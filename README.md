@@ -1,6 +1,6 @@
 # Printing Press
 
-<img src='assets/press_logo.png' width='250px' align="right" style="float:right;margin-left:0pt;margin-top:10pt;"></img>
+<img src='assets/press_logo.png' height='270px' align="right" style="float:right;margin-left:0pt;margin-top:10pt;"></img>
 
 Printing Press allows to to quickly apply different latex templates to your documents.
 Press automatically converts and organizes your plain text (txt, md, rst) and compiles.
@@ -21,7 +21,7 @@ brew install press
 
 # Features
 - Save latex templates in only one place instead of creating multiple instances.
-- Clean your wokring directory by only having the content.
+- Clean your working directory by only having the content.
 - Experiment with different templates instantaneously.
 
 # Basic Usage
