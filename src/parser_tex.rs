@@ -68,14 +68,3 @@ fn boolean_parser(input: &str) -> IResult<&str, Variable> {
 pub fn latex_parser(input: &str) -> IResult<&str, Variable> {
     alt((variable_parser, boolean_parser))(input)
 }
-//
-// fn main() {
-//     let input1 = r#" \newcommand{\author}{Authorius Namus}"#;
-//   let input2 = r#" \newif\ifanswers %this is a boolean"#;
-//   for input in  [input1,input2].iter(){
-//     match latex_parser(input) {
-//           Ok((_, variable)) => println!("{:?}",variable),
-//           Err(err) => println!("Error: {:?}", err),
-//       }
-//     }
-//   }

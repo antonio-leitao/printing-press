@@ -1,16 +1,28 @@
 # Printing Press
 
+<img src='assets/press_logo.png' width='250px' align="right" style="float:right;margin-left:0pt;margin-top:10pt;"></img>
+
 Printing Press allows to to quickly apply different latex templates to your documents.
 Press automatically converts and organizes your plain text (txt, md, rst) and compiles.
 All latex compilation is done in a temporary directory that is cleaned after the pdf is produced
 You only left with the main.pdf, just as God intended.
 
+#### Contents
+  - [Installation](#installation)
+  - [Features](#features)
+  - [Usage](#basic-usage)
+    
 # Installation
 ```bash
 # macOS or Linux
 brew tap antonio-leitao/taps
 brew install press
 ```
+
+# Features
+- Save latex templates in only one place instead of creating multiple instances.
+- Clean your wokring directory by only having the content.
+- Experiment with different templates instantaneously.
 
 # Basic Usage
 Save LateX templates in `.press/themes` so that they dont clog up your content diretory.
@@ -19,7 +31,7 @@ When you are ready to compile just run
 ```bash
 press <theme> [options]
 ```
-The options for each theme are dynamically read from the file `.press/theme/theme_name/variables.tex`.
+The options for each theme are dynamically read from the file `.press/themes/theme_name/variables.tex`.
 You can use comments to add variable descriptions.
 Currently only supports text and boolean variables.
 
@@ -39,7 +51,7 @@ Applies the book template
 
 Arguments:
   --authorname   Author name
-  --booktitle    Book title
+  --booktitle    Description of title variable
   --subtitle     Book subtitle (if any)
 
 Flags:

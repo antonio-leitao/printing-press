@@ -127,14 +127,13 @@ pub fn print_general_help() {
     }
 }
 
-pub fn print_theme_help(name: String, base_variables: Vec<Variable>) {
+pub fn print_theme_help(name: String) {
     // Get theme variables
     println!("Applies the {} template", name);
     match theme::theme_variables(name) {
         Ok(variables) => {
-            let (flags, mut arguments) = separate_variables(variables);
+            let (flags, arguments) = separate_variables(variables);
             println!("\nArguments:");
-            arguments.extend(base_variables);
             print_variable_help(arguments);
             if flags.len() > 0 {
                 println!("\nFlags:");
