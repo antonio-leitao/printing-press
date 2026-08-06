@@ -10,6 +10,7 @@ use crate::model::{ToolInfo, ToolchainReport};
 pub fn detect_toolchain() -> ToolchainReport {
     ToolchainReport {
         latexmk: inspect_tool("latexmk", &["-v"]),
+        pandoc: inspect_tool("pandoc", &["--version"]),
         neovim: inspect_tool("nvim", &["--version"]),
     }
 }

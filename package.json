@@ -6,8 +6,10 @@
   "scripts": {
     "dev": "vite dev",
     "build": "vite build",
+    "release": "npm run tauri build && sh scripts/install-app.sh",
+    "install:app": "sh scripts/install-app.sh",
     "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
-    "test:frontend": "node --test tests/pdf-render.test.mjs",
+    "test:frontend": "node --test tests/*.test.mjs",
     "tauri": "tauri"
   },
   "devDependencies": {
@@ -22,7 +24,6 @@
   },
   "dependencies": {
     "@tauri-apps/api": "2.11.1",
-    "@tauri-apps/plugin-dialog": "2.7.2",
-    "pdfjs-dist": "6.2.108"
+    "@tauri-apps/plugin-dialog": "2.7.2"
   }
 }

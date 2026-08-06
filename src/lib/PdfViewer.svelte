@@ -1,20 +1,27 @@
 <script lang="ts">
   import { onMount, tick, untrack } from 'svelte';
-  import type { PDFDocumentProxy } from 'pdfjs-dist';
   import PdfPage from '$lib/PdfPage.svelte';
-  import { errorMessage } from '$lib/api';
-  import {
-    MAX_ZOOM,
-    MIN_ZOOM,
-    normalizeZoom,
-    wheelZoomFactor,
-    zoomBySteps
-  } from '$lib/pdf-controls';
-  import { loadProjectPdf } from '$lib/pdf';
+  import { api, errorMessage } from '$lib/api';
+  import { MAX_ZOOM, MIN_ZOOM, normalizeZoom, wheelZoomFactor, zoomBySteps } from '$lib/pdf-controls';
+  import { initialKeyState, resolveKey, type KeyState, type ViewerAction } from '$lib/pdf-keys';
+  import { PageVisibilityTracker } from '$lib/pdf-visibility';
+  import type { ArtifactSummary, PageSize } from '$lib/types';
 
-  let { projectId, revision } = $props<{
-    projectId: number;
-    revision: number;
+  let {
+    artifact,
+    page = $bindable(1),
+    pageCount = $bindable(0),
+    zoomPercent = $bindable(100),
+    loadError = $bindable(''),
+    enabled = true
+  } = $props<{
+    artifact: ArtifactSummary;
+    page?: number;
+    pageCount?: number;
+    zoomPercent?: number;
+    loadError?: string;
+    /** False while a dialog owns the keyboard. */
+    enabled?: boolean;
   }>();
 
   type ViewAnchor = {
@@ -25,11 +32,7 @@
     viewportY: number;
   };
 
-  type WebKitGestureEvent = Event & {
-    clientX: number;
-    clientY: number;
-    scale: number;
-  };
+  type WebKitGestureEvent = Event & { clientX: number; clientY: number; scale: number };
 
   type ZoomSession = {
     kind: 'gesture' | 'wheel';
@@ -38,22 +41,52 @@
     anchor: ViewAnchor | null;
   };
 
-  let document = $state<PDFDocumentProxy | null>(null);
-  let error = $state('');
+  /** Time constant of the scroll glide. Short enough to feel immediate. */
+  const GLIDE_TAU = 55;
+  /**
+   * Gap left above a page when jumping to it. Matches the top padding of
+   * `.pages` below, because the window has no titlebar and the traffic lights
+   * are drawn over this corner: a page landed on by `G` or `12G` has to clear
+   * them the same way the first page does at rest.
+   */
+  const PAGE_LEAD = 36;
+  /** Breathing room either side when fitting a page to the window. */
+  const FIT_MARGIN = 48;
+
+  // Only ever replaced once the new document's geometry has arrived; blanking
+  // it first is what made every rebuild flash an empty viewer.
+  let layout = $state<PageSize[]>([]);
+  let shown = $state<ArtifactSummary | null>(null);
   let zoom = $state(1.3);
-  let currentPage = $state(1);
   let transientScale = $state(1);
   let transformOriginX = $state(0);
   let transformOriginY = $state(0);
   let generation = 0;
   let zoomGeneration = 0;
-  let viewer: HTMLDivElement;
+  let viewer = $state<HTMLDivElement | null>(null);
   let pagesHost = $state<HTMLDivElement | null>(null);
+  let tracker = $state<PageVisibilityTracker | null>(null);
   let zoomSession: ZoomSession | null = null;
   let wheelTimer: number | undefined;
   let scrollFrame = 0;
+  let keyState: KeyState = initialKeyState();
 
-  const zoomPercent = $derived(Math.round(zoom * 100));
+  /** Whether this viewer has already chosen a zoom for the document it opened. */
+  let sized = false;
+
+  let glideX: number | null = null;
+  let glideY: number | null = null;
+  let glideFrame = 0;
+  let glideClock = 0;
+
+  $effect(() => {
+    zoomPercent = Math.round(zoom * 100);
+  });
+  $effect(() => {
+    pageCount = layout.length;
+  });
+
+  // -- geometry ---------------------------------------------------------
 
   function pageElements(): HTMLElement[] {
     if (!viewer) return [];
@@ -63,12 +96,12 @@
   function closestPage(clientY: number): HTMLElement | null {
     let closest: HTMLElement | null = null;
     let closestDistance = Number.POSITIVE_INFINITY;
-    for (const page of pageElements()) {
-      const rect = page.getBoundingClientRect();
-      if (clientY >= rect.top && clientY <= rect.bottom) return page;
+    for (const element of pageElements()) {
+      const rect = element.getBoundingClientRect();
+      if (clientY >= rect.top && clientY <= rect.bottom) return element;
       const distance = Math.min(Math.abs(clientY - rect.top), Math.abs(clientY - rect.bottom));
       if (distance < closestDistance) {
-        closest = page;
+        closest = element;
         closestDistance = distance;
       }
     }
@@ -76,15 +109,15 @@
   }
 
   function captureAnchor(clientX?: number, clientY?: number): ViewAnchor | null {
-    if (!viewer || !document) return null;
+    if (!viewer || layout.length === 0) return null;
     const viewerRect = viewer.getBoundingClientRect();
     const pointX = clientX ?? viewerRect.left + viewer.clientWidth / 2;
     const pointY = clientY ?? viewerRect.top + viewer.clientHeight / 2;
-    const page = closestPage(pointY);
-    if (!page) return null;
-    const pageRect = page.getBoundingClientRect();
+    const element = closestPage(pointY);
+    if (!element) return null;
+    const pageRect = element.getBoundingClientRect();
     return {
-      page: Number(page.dataset.page ?? 1),
+      page: Number(element.dataset.page ?? 1),
       pageX: Math.min(1, Math.max(0, (pointX - pageRect.left) / Math.max(1, pageRect.width))),
       pageY: Math.min(1, Math.max(0, (pointY - pageRect.top) / Math.max(1, pageRect.height))),
       viewportX: pointX - viewerRect.left,
@@ -101,17 +134,109 @@
     await tick();
     await nextFrame();
     await nextFrame();
-    if (request !== zoomGeneration) return;
-    const pageNumber = Math.min(anchor.page, document?.numPages ?? anchor.page);
-    const page = viewer.querySelector<HTMLElement>(`[data-page="${pageNumber}"]`);
-    if (!page) return;
+    if (request !== zoomGeneration || !viewer) return;
+    const pageNumber = Math.min(anchor.page, layout.length || anchor.page);
+    const element = viewer.querySelector<HTMLElement>(`[data-page="${pageNumber}"]`);
+    if (!element) return;
     const viewerRect = viewer.getBoundingClientRect();
-    const pageRect = page.getBoundingClientRect();
+    const pageRect = element.getBoundingClientRect();
     const targetX = pageRect.left + pageRect.width * anchor.pageX;
     const targetY = pageRect.top + pageRect.height * anchor.pageY;
+    stopGlide();
     viewer.scrollLeft += targetX - (viewerRect.left + anchor.viewportX);
     viewer.scrollTop += targetY - (viewerRect.top + anchor.viewportY);
   }
+
+  // -- scrolling --------------------------------------------------------
+
+  function clampY(value: number) {
+    if (!viewer) return 0;
+    return Math.max(0, Math.min(value, viewer.scrollHeight - viewer.clientHeight));
+  }
+
+  function clampX(value: number) {
+    if (!viewer) return 0;
+    return Math.max(0, Math.min(value, viewer.scrollWidth - viewer.clientWidth));
+  }
+
+  /**
+   * Glides toward a target rather than jumping. Repeated keys add to the target
+   * that is already in flight, so holding `j` reads as continuous motion instead
+   * of a stutter.
+   */
+  function glideBy(deltaX: number, deltaY: number) {
+    if (!viewer) return;
+    glideX = clampX((glideX ?? viewer.scrollLeft) + deltaX);
+    glideY = clampY((glideY ?? viewer.scrollTop) + deltaY);
+    startGlide();
+  }
+
+  function glideToY(value: number) {
+    if (!viewer) return;
+    glideX = glideX ?? viewer.scrollLeft;
+    glideY = clampY(value);
+    startGlide();
+  }
+
+  function stopGlide() {
+    glideX = null;
+    glideY = null;
+    if (glideFrame) cancelAnimationFrame(glideFrame);
+    glideFrame = 0;
+  }
+
+  function startGlide() {
+    if (glideFrame) return;
+    glideClock = performance.now();
+    const step = (now: number) => {
+      glideFrame = 0;
+      if (!viewer || glideY === null) return;
+      const elapsed = Math.min(64, now - glideClock);
+      glideClock = now;
+      // Frame-rate independent exponential approach.
+      const progress = 1 - Math.exp(-elapsed / GLIDE_TAU);
+      const remainingY = glideY - viewer.scrollTop;
+      const remainingX = (glideX ?? viewer.scrollLeft) - viewer.scrollLeft;
+      if (Math.abs(remainingY) < 0.5 && Math.abs(remainingX) < 0.5) {
+        viewer.scrollTop = glideY;
+        if (glideX !== null) viewer.scrollLeft = glideX;
+        stopGlide();
+        return;
+      }
+      viewer.scrollTop += remainingY * progress;
+      viewer.scrollLeft += remainingX * progress;
+      glideFrame = requestAnimationFrame(step);
+    };
+    glideFrame = requestAnimationFrame(step);
+  }
+
+  function pageTop(pageNumber: number): number | null {
+    if (!viewer) return null;
+    const element = viewer.querySelector<HTMLElement>(`[data-page="${pageNumber}"]`);
+    if (!element) return null;
+    return (
+      element.getBoundingClientRect().top -
+      viewer.getBoundingClientRect().top +
+      viewer.scrollTop -
+      PAGE_LEAD
+    );
+  }
+
+  function goToPage(pageNumber: number) {
+    if (layout.length === 0) return;
+    const clamped = Math.max(1, Math.min(pageNumber, layout.length));
+    const top = pageTop(clamped);
+    if (top === null) {
+      // The page is not laid out yet; approximate from the average page height.
+      if (!viewer) return;
+      const total = viewer.scrollHeight - viewer.clientHeight;
+      glideToY((total * (clamped - 1)) / Math.max(1, layout.length - 1));
+      return;
+    }
+    glideToY(top);
+  }
+
+  // -- zoom -------------------------------------------------------------
 
   async function commitZoom(value: number, anchor = captureAnchor()) {
     const nextZoom = normalizeZoom(value);
@@ -123,15 +248,11 @@
     await restoreAnchor(anchor, request);
   }
 
-  function startZoomSession(
-    kind: ZoomSession['kind'],
-    clientX: number,
-    clientY: number
-  ): ZoomSession {
+  function startZoomSession(kind: ZoomSession['kind'], clientX: number, clientY: number) {
     transientScale = 1;
-    const hostRect = (pagesHost ?? viewer).getBoundingClientRect();
-    transformOriginX = clientX - hostRect.left;
-    transformOriginY = clientY - hostRect.top;
+    const hostRect = (pagesHost ?? viewer)?.getBoundingClientRect();
+    transformOriginX = clientX - (hostRect?.left ?? 0);
+    transformOriginY = clientY - (hostRect?.top ?? 0);
     const session = {
       kind,
       baseZoom: zoom,
@@ -154,14 +275,49 @@
     void commitZoom(session.targetZoom, session.anchor);
   }
 
+  /** A wheel delta in pixels, whatever unit the device reported it in. */
+  function wheelPixels(delta: number, event: WheelEvent, extent: number): number {
+    if (event.deltaMode === WheelEvent.DOM_DELTA_LINE) return delta * 16;
+    if (event.deltaMode === WheelEvent.DOM_DELTA_PAGE) return delta * extent;
+    return delta;
+  }
+
   function wheelDeltaPixels(event: WheelEvent): number {
-    if (event.deltaMode === WheelEvent.DOM_DELTA_LINE) return event.deltaY * 16;
-    if (event.deltaMode === WheelEvent.DOM_DELTA_PAGE) return event.deltaY * viewer.clientHeight;
-    return event.deltaY;
+    return wheelPixels(event.deltaY, event, viewer?.clientHeight ?? 0);
+  }
+
+  /**
+   * Panning sideways, which the webview will not do on its own: a horizontal
+   * trackpad swipe is claimed as a back-forward navigation gesture before the
+   * page ever sees it as scrolling.
+   *
+   * Only taken when there is somewhere to pan to, so an unzoomed document
+   * scrolls natively as before. Once the event is claimed, its vertical part
+   * has to be applied here too, or a diagonal swipe would lose it.
+   */
+  function panSideways(event: WheelEvent): boolean {
+    if (!viewer) return false;
+    if (viewer.scrollWidth - viewer.clientWidth <= 1) return false;
+    // Shift turns a vertical wheel into a horizontal one, as it does elsewhere.
+    const sideways = event.deltaX !== 0 ? event.deltaX : event.shiftKey ? event.deltaY : 0;
+    if (sideways === 0) return false;
+
+    event.preventDefault();
+    viewer.scrollLeft += wheelPixels(sideways, event, viewer.clientWidth);
+    if (event.deltaX !== 0 && event.deltaY !== 0) {
+      viewer.scrollTop += wheelPixels(event.deltaY, event, viewer.clientHeight);
+    }
+    return true;
   }
 
   function handleWheel(event: WheelEvent) {
-    if ((!event.ctrlKey && !event.metaKey) || !document) return;
+    if (!event.ctrlKey && !event.metaKey) {
+      // A real scroll takes over from any glide in flight.
+      stopGlide();
+      panSideways(event);
+      return;
+    }
+    if (layout.length === 0) return;
     event.preventDefault();
     if (zoomSession?.kind === 'gesture') return;
     const session =
@@ -174,8 +330,9 @@
   }
 
   function handleGestureStart(event: Event) {
-    if (!document) return;
+    if (layout.length === 0) return;
     event.preventDefault();
+    stopGlide();
     if (wheelTimer !== undefined) window.clearTimeout(wheelTimer);
     const gesture = event as WebKitGestureEvent;
     startZoomSession('gesture', gesture.clientX, gesture.clientY);
@@ -193,30 +350,38 @@
     finishZoomSession('gesture');
   }
 
-  function changeZoom(steps: number) {
-    void commitZoom(zoomBySteps(zoom, steps));
-  }
-
-  function actualSize() {
-    void commitZoom(1);
-  }
-
-  async function fitWidth() {
-    if (!document || !viewer) return;
+  async function fitTo(mode: 'actual' | 'page' | 'width') {
+    if (mode === 'actual') {
+      await commitZoom(1);
+      return;
+    }
+    if (!viewer || layout.length === 0) return;
     const anchor = captureAnchor();
-    const pageNumber = Math.min(anchor?.page ?? currentPage, document.numPages);
-    const page = await document.getPage(pageNumber);
-    const viewport = page.getViewport({ scale: 1 });
-    const availableWidth = Math.max(1, viewer.clientWidth - 48);
-    await commitZoom(availableWidth / viewport.width, anchor);
+    const size = layout[Math.min(anchor?.page ?? page, layout.length) - 1];
+    if (!size) return;
+    const scale =
+      mode === 'width'
+        ? Math.max(1, viewer.clientWidth - FIT_MARGIN) / size.width
+        : Math.max(1, viewer.clientHeight - FIT_MARGIN) / size.height;
+    await commitZoom(scale, anchor);
   }
 
-  function applyZoomInput(event: Event) {
-    const input = event.currentTarget as HTMLInputElement;
-    const percentage = Number(input.value);
-    if (Number.isFinite(percentage)) void commitZoom(percentage / 100);
-    input.value = String(zoomPercent);
+  /**
+   * A document opens at the width of the window, which is how a page sits on a
+   * desk. Only ever on open: a rebuild, or switching to a stored version, must
+   * not override a zoom the reader chose.
+   */
+  async function fitWidthOnOpen(sizes: PageSize[]) {
+    await tick();
+    if (!viewer || sizes.length === 0) return;
+    const available = viewer.clientWidth - FIT_MARGIN;
+    // The viewer may not be laid out yet on the very first frame.
+    if (available <= 0) return;
+    zoom = normalizeZoom(available / sizes[0].width);
+    sized = true;
   }
+
+  // -- keyboard ---------------------------------------------------------
 
   function editableTarget(target: EventTarget | null): boolean {
     return (
@@ -227,35 +392,74 @@
     );
   }
 
-  function handleKeydown(event: KeyboardEvent) {
-    const command = event.metaKey || event.ctrlKey;
-    if (!command || !document) return;
-    const plus = event.key === '+' || event.key === '=' || event.code === 'NumpadAdd';
-    const minus = event.key === '-' || event.code === 'NumpadSubtract';
-    if (plus) {
-      event.preventDefault();
-      changeZoom(1);
-    } else if (minus) {
-      event.preventDefault();
-      changeZoom(-1);
-    } else if (event.key === '0') {
-      event.preventDefault();
-      actualSize();
-    } else if (event.key === '9') {
-      event.preventDefault();
-      void fitWidth();
-    } else if (editableTarget(event.target)) {
-      return;
+  function scrollAmount(amount: 'step' | 'half' | 'page', axis: 'x' | 'y'): number {
+    if (!viewer) return 0;
+    const extent = axis === 'y' ? viewer.clientHeight : viewer.clientWidth;
+    if (amount === 'half') return extent * 0.5;
+    // A page keeps a sliver of context rather than jumping cleanly.
+    if (amount === 'page') return extent * 0.92;
+    return Math.max(56, extent * 0.1);
+  }
+
+  function runAction(action: ViewerAction) {
+    switch (action.kind) {
+      case 'scroll': {
+        const distance = scrollAmount(action.amount, action.axis) * action.sign * action.count;
+        glideBy(action.axis === 'x' ? distance : 0, action.axis === 'y' ? distance : 0);
+        return;
+      }
+      case 'goto':
+        if (action.target === 'first') glideToY(0);
+        else if (action.target === 'last') glideToY(Number.MAX_SAFE_INTEGER);
+        else if (action.page !== undefined) goToPage(action.page);
+        return;
+      case 'page':
+        goToPage(page + action.sign * action.count);
+        return;
+      case 'zoom':
+        void commitZoom(zoomBySteps(zoom, action.step));
+        return;
+      case 'fit':
+        void fitTo(action.mode);
     }
   }
+
+  function handleKeydown(event: KeyboardEvent) {
+    if (!enabled || layout.length === 0 || editableTarget(event.target)) return;
+
+    // The platform zoom chords stay on Command, separate from the vim keys.
+    if (event.metaKey && !event.ctrlKey && !event.altKey) {
+      const plus = event.key === '+' || event.key === '=' || event.code === 'NumpadAdd';
+      const minus = event.key === '-' || event.code === 'NumpadSubtract';
+      if (plus || minus) {
+        event.preventDefault();
+        void commitZoom(zoomBySteps(zoom, plus ? 1 : -1));
+      } else if (event.key === '0') {
+        event.preventDefault();
+        void fitTo('actual');
+      } else if (event.key === '9') {
+        event.preventDefault();
+        void fitTo('width');
+      }
+      return;
+    }
+
+    const { resolution, state } = resolveKey(event, keyState);
+    keyState = state;
+    if (resolution.kind === 'ignored') return;
+    event.preventDefault();
+    if (resolution.kind === 'action') runAction(resolution.action);
+  }
+
+  // -- lifecycle --------------------------------------------------------
 
   function updateCurrentPage() {
     scrollFrame = 0;
     if (!viewer) return;
     const viewerRect = viewer.getBoundingClientRect();
-    const center = viewerRect.top + viewer.clientHeight / 2;
-    const page = closestPage(center);
-    if (page) currentPage = Number(page.dataset.page ?? 1);
+    const centre = viewerRect.top + viewer.clientHeight / 2;
+    const element = closestPage(centre);
+    if (element) page = Number(element.dataset.page ?? 1);
   }
 
   function handleScroll() {
@@ -263,159 +467,111 @@
   }
 
   onMount(() => {
-    viewer.addEventListener('wheel', handleWheel, { passive: false });
-    viewer.addEventListener('gesturestart', handleGestureStart, { passive: false });
-    viewer.addEventListener('gesturechange', handleGestureChange, { passive: false });
-    viewer.addEventListener('gestureend', handleGestureEnd, { passive: false });
-    viewer.addEventListener('scroll', handleScroll, { passive: true });
+    const element = viewer;
+    if (!element) return;
+    tracker = new PageVisibilityTracker(element);
+    element.addEventListener('wheel', handleWheel, { passive: false });
+    element.addEventListener('gesturestart', handleGestureStart, { passive: false });
+    element.addEventListener('gesturechange', handleGestureChange, { passive: false });
+    element.addEventListener('gestureend', handleGestureEnd, { passive: false });
+    element.addEventListener('scroll', handleScroll, { passive: true });
+    element.addEventListener('pointerdown', stopGlide);
     window.addEventListener('keydown', handleKeydown);
     return () => {
-      viewer.removeEventListener('wheel', handleWheel);
-      viewer.removeEventListener('gesturestart', handleGestureStart);
-      viewer.removeEventListener('gesturechange', handleGestureChange);
-      viewer.removeEventListener('gestureend', handleGestureEnd);
-      viewer.removeEventListener('scroll', handleScroll);
+      element.removeEventListener('wheel', handleWheel);
+      element.removeEventListener('gesturestart', handleGestureStart);
+      element.removeEventListener('gesturechange', handleGestureChange);
+      element.removeEventListener('gestureend', handleGestureEnd);
+      element.removeEventListener('scroll', handleScroll);
+      element.removeEventListener('pointerdown', stopGlide);
       window.removeEventListener('keydown', handleKeydown);
       if (wheelTimer !== undefined) window.clearTimeout(wheelTimer);
       if (scrollFrame) cancelAnimationFrame(scrollFrame);
+      stopGlide();
+      tracker?.disconnect();
+      tracker = null;
     };
   });
 
   $effect(() => {
-    const currentProject = projectId;
-    const currentRevision = revision;
-    const currentGeneration = ++generation;
-    const anchor = untrack(captureAnchor);
-    document = null;
-    error = '';
-    void loadProjectPdf(currentProject, currentRevision)
-      .then((loaded) => {
-        if (currentGeneration === generation) {
-          document = loaded;
-          const request = ++zoomGeneration;
-          void restoreAnchor(anchor, request);
+    const next = artifact;
+    const request = ++generation;
+
+    // Geometry for a whole document costs a few milliseconds, so the layout is
+    // known before any page is drawn and the page counter is right immediately.
+    void api
+      .pageLayout(next.id)
+      .then((sizes) => {
+        if (request !== generation) return;
+        // Captured from the document still on screen, then reapplied to the new
+        // one, so a rebuild leaves the reader where they were.
+        const anchor = untrack(captureAnchor);
+        layout = sizes;
+        shown = next;
+        loadError = '';
+        if (sized) {
+          void restoreAnchor(anchor, ++zoomGeneration);
+        } else {
+          void fitWidthOnOpen(sizes);
         }
       })
       .catch((reason) => {
-        if (currentGeneration === generation) error = errorMessage(reason);
+        if (request !== generation) return;
+        // The previous document stays on screen; taking it away is the worst
+        // thing the viewer can do.
+        loadError = errorMessage(reason);
       });
   });
 </script>
 
-<div class="viewer-shell">
-  <nav class="viewer-toolbar" aria-label="PDF controls">
-    <button onclick={() => changeZoom(-1)} disabled={zoom <= MIN_ZOOM} title="Zoom out (⌘−)">
-      −
-    </button>
-    <label class="zoom-field">
-      <span class="visually-hidden">Zoom percentage</span>
-      <input
-        type="number"
-        min={MIN_ZOOM * 100}
-        max={MAX_ZOOM * 100}
-        step="10"
-        value={zoomPercent}
-        onchange={applyZoomInput}
-        aria-label="Zoom percentage"
-      />
-      <span>%</span>
-    </label>
-    <button onclick={() => changeZoom(1)} disabled={zoom >= MAX_ZOOM} title="Zoom in (⌘+)">
-      +
-    </button>
-    <button onclick={actualSize} title="Actual size (⌘0)">Actual Size</button>
-    <button onclick={fitWidth} title="Fit width (⌘9)">Fit Width</button>
-    {#if document}<span class="page-status">Page {currentPage} of {document.numPages}</span>{/if}
-  </nav>
-
-  <div class="viewer" bind:this={viewer}>
-    {#if error}
-      <p role="alert">Could not open the cached PDF: {error}</p>
-    {:else if !document}
-      <p>Opening PDF…</p>
-    {:else}
-      <div
-        class="pages"
-        class:zooming={transientScale !== 1}
-        bind:this={pagesHost}
-        style:transform={`scale(${transientScale})`}
-        style:transform-origin={`${transformOriginX}px ${transformOriginY}px`}
-      >
-        {#each Array.from({ length: document.numPages }, (_, index) => index + 1) as page}
-          <PdfPage {document} pageNumber={page} scale={zoom} />
-        {/each}
-      </div>
-    {/if}
-  </div>
+<div class="viewer" bind:this={viewer} tabindex="-1">
+  {#if shown && tracker && layout.length > 0}
+    <div
+      class="pages"
+      class:zooming={transientScale !== 1}
+      bind:this={pagesHost}
+      style:transform={`scale(${transientScale})`}
+      style:transform-origin={`${transformOriginX}px ${transformOriginY}px`}
+    >
+      {#each layout as size, index}
+        <PdfPage
+          artifact={shown}
+          size={size}
+          pageNumber={index + 1}
+          zoom={zoom}
+          tracker={tracker}
+        />
+      {/each}
+    </div>
+  {:else if !loadError}
+    <p class="placeholder">Opening PDF…</p>
+  {/if}
 </div>
 
 <style>
-  .viewer-shell {
-    display: grid;
-    grid-template-rows: auto minmax(0, 1fr);
-    height: 100%;
-    min-height: 0;
-  }
-
-  .viewer-toolbar {
-    display: flex;
-    align-items: center;
-    gap: 0.4rem;
-    min-width: 0;
-    padding: 0.4rem 0.75rem;
-    border-bottom: 1px solid #999;
-    background: #eee;
-  }
-
-  .viewer-toolbar button {
-    padding: 0.3rem 0.55rem;
-  }
-
-  .zoom-field {
-    display: flex;
-    align-items: center;
-    gap: 0.2rem;
-  }
-
-  .zoom-field input {
-    width: 4.5rem;
-    font: inherit;
-    text-align: right;
-  }
-
-  .page-status {
-    margin-left: auto;
-    white-space: nowrap;
-  }
-
   .viewer {
     height: 100%;
     min-height: 0;
     overflow: auto;
+    outline: none;
     overscroll-behavior: contain;
-    background: #b7b7b7;
+    background: #6f6f6f;
   }
 
   .pages {
     width: max-content;
     min-width: 100%;
-    padding: 1px 16px 16px;
+    /* Enough headroom that the first page clears the traffic lights at rest.
+       Unlike a bar, this scrolls away. */
+    padding: 2.25rem 16px 16px;
   }
 
   .pages.zooming {
     will-change: transform;
   }
 
-  .viewer > p {
+  .placeholder {
     margin: 2rem;
-  }
-
-  .visually-hidden {
-    position: absolute;
-    width: 1px;
-    height: 1px;
-    overflow: hidden;
-    clip: rect(0 0 0 0);
-    white-space: nowrap;
+    color: #eee;
   }
 </style>

@@ -11,7 +11,7 @@
   },
   "app": {
     "security": {
-      "csp": "default-src 'self'; connect-src ipc: http://ipc.localhost; img-src 'self' asset: http://asset.localhost blob: data:; style-src 'self' 'unsafe-inline'; worker-src 'self' blob:"
+      "csp": "default-src 'self'; connect-src ipc: http://ipc.localhost press: http://press.localhost; img-src 'self' press: http://press.localhost blob: data:; style-src 'self' 'unsafe-inline'; worker-src 'self' blob:"
     },
     "windows": [
       {
@@ -21,7 +21,10 @@
         "height": 800,
         "minWidth": 760,
         "minHeight": 520,
-        "resizable": true
+        "resizable": true,
+        "titleBarStyle": "Overlay",
+        "hiddenTitle": true,
+        "trafficLightPosition": { "x": 14, "y": 14 }
       }
     ]
   },

@@ -1,55 +1,90 @@
-// Tauri's WKWebView can lag the newest ECMAScript collection APIs used by PDF.js.
-// The supported legacy build provides the same renderer plus its required polyfills.
-import * as pdfjs from 'pdfjs-dist/legacy/build/pdf.mjs';
-import workerUrl from 'pdfjs-dist/legacy/build/pdf.worker.min.mjs?url';
-import type { PDFDocumentProxy } from 'pdfjs-dist';
-import { api } from '$lib/api';
+/**
+ * Fetching rasterised pages from the native renderer.
+ *
+ * Pages arrive as raw RGBA over the `press:` scheme rather than as PNG. There is
+ * no image decode to do: the bytes go straight into an `ImageData` and then into
+ * an `ImageBitmap`, which the compositor can blit. Encoding a page to PNG in
+ * Rust would cost more than MuPDF spent drawing it.
+ */
 
-pdfjs.GlobalWorkerOptions.workerSrc = workerUrl;
+/**
+ * A ceiling on the pixels in one drawn page, so a large page at high zoom
+ * cannot ask for a bitmap the GPU will refuse or the machine will choke on.
+ */
+export const MAX_PAGE_PIXELS = 16_000_000;
 
-const MAX_CACHED_DOCUMENTS = 8;
-type CachedDocument = {
-  promise: Promise<PDFDocumentProxy>;
-  destroy: () => Promise<void>;
+/**
+ * Tauri serves custom schemes as `press://localhost` everywhere except Windows,
+ * which rewrites them onto http.
+ */
+const ORIGIN = navigator.userAgent.includes('Windows')
+  ? 'http://press.localhost'
+  : 'press://localhost';
+
+export type PageBitmap = {
+  bitmap: ImageBitmap;
+  width: number;
+  height: number;
 };
 
-const documents = new Map<string, CachedDocument>();
+/**
+ * Device pixels per PDF point for a page, clamped so one page can never exceed
+ * the pixel budget. Returning the clamped value means the renderer is never
+ * asked to draw pixels that would be thrown away.
+ */
+export function renderScale(
+  pageWidth: number,
+  pageHeight: number,
+  zoom: number,
+  devicePixelRatio: number
+): number {
+  const ratio = Number.isFinite(devicePixelRatio) && devicePixelRatio > 0 ? devicePixelRatio : 1;
+  const wanted = zoom * ratio;
+  const pixels = pageWidth * pageHeight * wanted * wanted;
+  if (!Number.isFinite(pixels) || pixels <= MAX_PAGE_PIXELS) return wanted;
+  return wanted * Math.sqrt(MAX_PAGE_PIXELS / pixels);
+}
 
-export function loadProjectPdf(
-  projectId: number,
-  revision: number
-): Promise<PDFDocumentProxy> {
-  const key = `${projectId}:${revision}`;
-  const existing = documents.get(key);
-  if (existing) {
-    documents.delete(key);
-    documents.set(key, existing);
-    return existing.promise;
-  }
+/** The revision is in the path so a rebuilt page can never be served stale. */
+export function pageUrl(
+  artifactId: number,
+  revision: number,
+  page: number,
+  scale: number
+): string {
+  return `${ORIGIN}/page/${artifactId}/${revision}/${page}?scale=${scale.toFixed(4)}`;
+}
 
-  let loadingTask: ReturnType<typeof pdfjs.getDocument> | undefined;
-  const promise = api.readProjectPdf(projectId).then((data) => {
-    loadingTask = pdfjs.getDocument({ data });
-    return loadingTask.promise;
-  });
-  const loading: CachedDocument = {
-    promise,
-    destroy: async () => {
-      await promise.catch(() => undefined);
-      await loadingTask?.destroy();
-    }
-  };
-  documents.set(key, loading);
-  while (documents.size > MAX_CACHED_DOCUMENTS) {
-    const oldestKey = documents.keys().next().value;
-    if (oldestKey === undefined) break;
-    const discarded = documents.get(oldestKey);
-    documents.delete(oldestKey);
-    if (discarded) {
-      window.setTimeout(() => {
-        void discarded.destroy().catch(() => undefined);
-      }, 5000);
-    }
+/**
+ * Bytes of dimensions in front of the samples: width then height, little-endian
+ * `u32`. They travel in the body rather than in headers because this response is
+ * cross-origin, and a cross-origin reader cannot see custom headers unless the
+ * server also exposes them.
+ */
+const PAGE_HEADER_BYTES = 8;
+
+export async function fetchPage(url: string, signal?: AbortSignal): Promise<PageBitmap> {
+  const response = await fetch(url, { signal });
+  if (!response.ok) {
+    throw new Error((await response.text()) || `page request failed (${response.status})`);
   }
-  return promise;
+  const buffer = await response.arrayBuffer();
+  if (buffer.byteLength < PAGE_HEADER_BYTES) {
+    throw new Error('the renderer returned a truncated page');
+  }
+  const header = new DataView(buffer, 0, PAGE_HEADER_BYTES);
+  const width = header.getUint32(0, true);
+  const height = header.getUint32(4, true);
+  const expected = width * height * 4;
+  if (width <= 0 || height <= 0 || buffer.byteLength - PAGE_HEADER_BYTES !== expected) {
+    throw new Error(
+      `expected ${expected} bytes for a ${width}x${height} page, received ${
+        buffer.byteLength - PAGE_HEADER_BYTES
+      }`
+    );
+  }
+  // A view over the samples, not a copy of them.
+  const samples = new Uint8ClampedArray(buffer, PAGE_HEADER_BYTES, expected);
+  const image = new ImageData(samples, width, height);
+  return { bitmap: await createImageBitmap(image), width, height };
 }

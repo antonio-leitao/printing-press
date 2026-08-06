@@ -1,71 +1,79 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
-  import type { PDFDocumentProxy, RenderTask } from 'pdfjs-dist';
   import { errorMessage } from '$lib/api';
-  import { startPageRender } from '$lib/pdf-render';
+  import { fetchPage, pageUrl, renderScale } from '$lib/pdf';
+  import type { PageVisibility, PageVisibilityTracker } from '$lib/pdf-visibility';
+  import type { ArtifactSummary, PageSize } from '$lib/types';
 
-  let { document, pageNumber, scale = 1.3 } = $props<{
-    document: PDFDocumentProxy;
+  let { artifact, size, pageNumber, zoom, tracker } = $props<{
+    artifact: ArtifactSummary;
+    size: PageSize;
     pageNumber: number;
-    scale?: number;
+    zoom: number;
+    tracker: PageVisibilityTracker;
   }>();
 
-  let host: HTMLElement;
-  let canvas: HTMLCanvasElement;
-  let baseWidth = $state(612);
-  let baseHeight = $state(792);
-  let isNear = $state(false);
+  let host = $state<HTMLElement | null>(null);
+  let canvas = $state<HTMLCanvasElement | null>(null);
+  let visibility = $state<PageVisibility>({ render: false, retain: false });
   let renderError = $state('');
-  let renderedScale: number | null = null;
-  const width = $derived(baseWidth * scale);
-  const height = $derived(baseHeight * scale);
+  /** Identifies what is currently painted, so a redraw only happens if needed. */
+  let painted: string | null = null;
 
-  onMount(() => {
-    const observer = new IntersectionObserver(
-      (entries) => {
-        isNear = entries.some((entry) => entry.isIntersecting);
-      },
-      { rootMargin: '800px 0px' }
-    );
-    observer.observe(host);
-    return () => observer.disconnect();
+  const width = $derived(size.width * zoom);
+  const height = $derived(size.height * zoom);
+
+  $effect(() => {
+    const element = host;
+    if (!element) return;
+    tracker.observe(element, (next: PageVisibility) => (visibility = next));
+    return () => tracker.unobserve(element);
+  });
+
+  // Far enough away that the bitmap is no longer worth its memory. A page at
+  // retina scale is several megabytes; without this a long document keeps every
+  // page it has ever shown.
+  $effect(() => {
+    if (visibility.retain || !canvas || painted === null) return;
+    canvas.width = 0;
+    canvas.height = 0;
+    painted = null;
   });
 
   $effect(() => {
-    if (!isNear) return;
-    const currentDocument = document;
-    const currentPage = pageNumber;
-    const currentScale = scale;
-    if (renderedScale === currentScale) return;
+    if (!visibility.render || !canvas) return;
+    const scale = renderScale(size.width, size.height, zoom, window.devicePixelRatio || 1);
+    const url = pageUrl(artifact.id, artifact.revision, pageNumber - 1, scale);
+    // The previous drawing stays on screen until the new one replaces it, so a
+    // rebuild or a zoom never flashes an empty page.
+    if (painted === url) return;
 
-    let cancelled = false;
-    let renderTask: RenderTask | undefined;
+    const surface = canvas;
+    const controller = new AbortController();
     renderError = '';
+
     void (async () => {
       try {
-        const page = await currentDocument.getPage(currentPage);
-        if (cancelled) return;
-        const naturalViewport = page.getViewport({ scale: 1 });
-        baseWidth = naturalViewport.width;
-        baseHeight = naturalViewport.height;
-        const startedRender = startPageRender(
-          page,
-          canvas,
-          currentScale,
-          window.devicePixelRatio || 1
-        );
-        renderTask = startedRender.task;
-        await startedRender.task.promise;
-        if (!cancelled) renderedScale = currentScale;
+        const page = await fetchPage(url, controller.signal);
+        if (controller.signal.aborted) {
+          page.bitmap.close();
+          return;
+        }
+        surface.width = page.width;
+        surface.height = page.height;
+        const context = surface.getContext('2d', { alpha: false });
+        if (!context) throw new Error('could not get a drawing context');
+        context.drawImage(page.bitmap, 0, 0);
+        // The bitmap has been copied into the canvas; holding it would double
+        // the memory for every visible page.
+        page.bitmap.close();
+        painted = url;
       } catch (reason) {
-        if (!cancelled) renderError = errorMessage(reason);
+        if (controller.signal.aborted) return;
+        renderError = errorMessage(reason);
       }
     })();
 
-    return () => {
-      cancelled = true;
-      renderTask?.cancel();
-    };
+    return () => controller.abort();
   });
 </script>
 

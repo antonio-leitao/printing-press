@@ -1,44 +1,48 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import type { RenderTask } from 'pdfjs-dist';
-  import { errorMessage } from '$lib/api';
-  import { loadProjectPdf } from '$lib/pdf';
-  import { startPageRender } from '$lib/pdf-render';
+  import { api, errorMessage } from '$lib/api';
+  import { fetchPage, pageUrl } from '$lib/pdf';
+  import type { ArtifactSummary } from '$lib/types';
 
-  let { projectId, revision } = $props<{
-    projectId: number;
-    revision: number;
-  }>();
+  let { artifact } = $props<{ artifact: ArtifactSummary }>();
 
-  let host: HTMLDivElement;
-  let canvas: HTMLCanvasElement;
+  let host = $state<HTMLDivElement | null>(null);
+  let canvas = $state<HTMLCanvasElement | null>(null);
   let renderError = $state('');
 
   onMount(() => {
-    let cancelled = false;
+    const element = host;
+    if (!element) return;
+    const controller = new AbortController();
     let started = false;
-    let renderTask: RenderTask | undefined;
+
     const render = async () => {
-      if (started) return;
+      if (started || !canvas) return;
       started = true;
+      const surface = canvas;
       try {
-        const document = await loadProjectPdf(projectId, revision);
-        const page = await document.getPage(1);
-        if (cancelled) return;
-        const base = page.getViewport({ scale: 1 });
-        const scale = Math.min(260 / base.width, 0.5);
-        const startedRender = startPageRender(
-          page,
-          canvas,
-          scale,
-          window.devicePixelRatio || 1
+        const [first] = await api.pageLayout(artifact.id);
+        if (!first || controller.signal.aborted) return;
+        // Small enough to be cheap, sharp enough on a retina display.
+        const scale = Math.min(260 / first.width, 0.5) * (window.devicePixelRatio || 1);
+        const page = await fetchPage(
+          pageUrl(artifact.id, artifact.revision, 0, scale),
+          controller.signal
         );
-        renderTask = startedRender.task;
-        await startedRender.task.promise;
+        if (controller.signal.aborted) {
+          page.bitmap.close();
+          return;
+        }
+        surface.width = page.width;
+        surface.height = page.height;
+        surface.style.width = `${Math.round(page.width / (window.devicePixelRatio || 1))}px`;
+        surface.getContext('2d', { alpha: false })?.drawImage(page.bitmap, 0, 0);
+        page.bitmap.close();
       } catch (reason) {
-        if (!cancelled) renderError = errorMessage(reason);
+        if (!controller.signal.aborted) renderError = errorMessage(reason);
       }
     };
+
     const observer = new IntersectionObserver(
       (entries) => {
         if (entries.some((entry) => entry.isIntersecting)) {
@@ -48,10 +52,9 @@
       },
       { rootMargin: '400px' }
     );
-    observer.observe(host);
+    observer.observe(element);
     return () => {
-      cancelled = true;
-      renderTask?.cancel();
+      controller.abort();
       observer.disconnect();
     };
   });

@@ -15,11 +15,19 @@ tauri-build = { version = "2.6.3", features = [] }
 
 [dependencies]
 libc = "0.2"
+# Native page rasterisation. The C source is vendored inside the crate, so
+# nothing enters the build from outside crates.io. Default features pull in
+# tesseract and other formats Press has no use for.
+mupdf = { version = "0.8.0", default-features = false, features = ["base14-fonts"] }
 notify = "8.2"
 regex = "1.13.1"
 rusqlite = { version = "0.40.1", features = ["bundled"] }
 serde = { version = "1.0.229", features = ["derive"] }
+# Content addressing for the snapshot store. Pure Rust, no build step.
+sha2 = "0.10"
 serde_json = "1"
+# Snapshot builds are compiled from a checkout that is removed with the build.
+tempfile = "3.27.0"
 tauri = { version = "2.11.5", features = [] }
 tauri-plugin-dialog = "2.7.2"
 tauri-plugin-single-instance = "2.4.3"
@@ -29,3 +37,11 @@ walkdir = "2.5.0"
 
 [dev-dependencies]
 tempfile = "3.27.0"
+
+# MuPDF's C is compiled by the `cc` crate, which follows the active profile. At
+# the dev profile's opt-level that means an unoptimised rasteriser, and a page
+# takes an order of magnitude longer to draw. Dependencies are optimised even in
+# development so the viewer behaves the same way there as in a release build;
+# Press's own code keeps its debug settings.
+[profile.dev.package."*"]
+opt-level = 3

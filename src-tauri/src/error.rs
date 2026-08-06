@@ -14,8 +14,25 @@ pub enum AppError {
     Io(#[from] std::io::Error),
     #[error("database error: {0}")]
     Database(#[from] rusqlite::Error),
+    #[error("could not encode build data: {0}")]
+    Encoding(#[from] serde_json::Error),
     #[error("task failed: {0}")]
     Task(String),
+}
+
+impl AppError {
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::InvalidInput(_) => "invalidInput",
+            Self::NotFound(_) => "notFound",
+            Self::ToolUnavailable(_) => "toolUnavailable",
+            Self::Build(_) => "buildFailed",
+            Self::Io(_) => "filesystem",
+            Self::Database(_) => "database",
+            Self::Encoding(_) => "encoding",
+            Self::Task(_) => "task",
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -30,18 +47,9 @@ impl Serialize for AppError {
     where
         S: serde::Serializer,
     {
-        let code = match self {
-            Self::InvalidInput(_) => "invalidInput",
-            Self::NotFound(_) => "notFound",
-            Self::ToolUnavailable(_) => "toolUnavailable",
-            Self::Build(_) => "buildFailed",
-            Self::Io(_) => "filesystem",
-            Self::Database(_) => "database",
-            Self::Task(_) => "task",
-        };
         let message = self.to_string();
         ErrorPayload {
-            code,
+            code: self.code(),
             message: &message,
         }
         .serialize(serializer)

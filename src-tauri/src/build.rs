@@ -1,878 +1,811 @@
+//! Scheduling builds.
+//!
+//! One project's working tree is watched at a time, but any number of versions
+//! can be building at once: the queue is keyed on `(project, source_ref)`, which
+//! is the shape the history sidebar needs when it opens three past versions at
+//! once and expects the interface to stay live.
+//!
+//! Coalescing rather than cancelling is deliberate. A save during a build marks
+//! that build dirty; the build still finishes and still publishes, and only then
+//! runs again. Discarding a finished PDF because a keystroke landed means a
+//! document that saves faster than it compiles never updates at all.
+
 use std::{
-    collections::VecDeque,
-    fs::File,
-    io::{Read as StdRead, Seek, SeekFrom},
+    collections::HashMap,
     path::{Path, PathBuf},
-    process::Stdio,
-    sync::{
-        Arc, LazyLock,
-        atomic::{AtomicI32, Ordering},
-    },
+    sync::Arc,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use notify::{Event, EventKind, RecursiveMode, Watcher};
-use regex::Regex;
 use tauri::{AppHandle, Emitter};
-use tokio::{
-    io::{AsyncRead, AsyncReadExt},
-    process::Command,
-    sync::{Mutex, mpsc, oneshot},
-};
+use tokio::sync::{Mutex, Semaphore, mpsc};
 
 use crate::{
-    database::Repository,
-    error::{AppError, AppResult},
-    model::ProjectSummary,
-    toolchain::{augmented_path, resolve_executable},
+    database::{NewArtifact, Repository},
+    files,
+    diagnostics::ProgressSnapshot,
+    error::AppResult,
+    model::{
+        ArtifactSummary, BuildProgress, BuildState, BuildStatus, BuildUpdate, Diagnostic,
+        DocumentKind, Project, SourceRef,
+    },
+    runner::{self, BuildInputs, BuildOutcome, Cancel, CancelHandle, PidRegistry, ProgressSink},
+    sources,
 };
 
-const OUTPUT_LIMIT: usize = 2 * 1024 * 1024;
+/// LaTeX builds are single-threaded and heavy; a few at once keeps the machine
+/// responsive while still letting the history open several versions.
+const MAX_CONCURRENT_BUILDS: usize = 3;
 const DEBOUNCE: Duration = Duration::from_millis(250);
-static FILE_LINE_ERROR: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(?i)([^\r\n]+\.tex):(\d+):\s*(.+)").unwrap());
+
+type BuildKey = (i64, SourceRef);
 
 pub struct BuildManager {
     repository: Arc<Repository>,
     artifact_root: PathBuf,
     work_root: PathBuf,
-    current: Mutex<Option<SessionHandle>>,
-    active_pid: Arc<AtomicI32>,
+    /// Where snapshot file contents live, for restoring a version to build it.
+    objects_root: PathBuf,
+    pids: Arc<PidRegistry>,
+    permits: Arc<Semaphore>,
+    state: Mutex<ManagerState>,
 }
 
-struct SessionHandle {
+#[derive(Default)]
+struct ManagerState {
+    next_build_id: u64,
+    active: HashMap<BuildKey, ActiveBuild>,
+    watch: Option<WatchHandle>,
+}
+
+struct ActiveBuild {
+    build_id: u64,
+    cancel: CancelHandle,
+    /// The source changed while this build was running, so run again once it has
+    /// published.
+    dirty: bool,
+}
+
+struct WatchHandle {
     project_id: i64,
-    sender: mpsc::UnboundedSender<SessionMessage>,
+    cancel: CancelHandle,
 }
 
-enum SessionMessage {
-    Trigger,
-    WatcherError(String),
-    Stop(oneshot::Sender<()>),
-}
-
-struct BuildResult {
-    published_pdf: PathBuf,
-}
-
-enum BuildRun {
-    Finished {
-        result: AppResult<BuildResult>,
-        duration_ms: i64,
-        dirty: bool,
-    },
-    Superseded,
-    Stopped,
+enum WatchMessage {
+    Changed,
+    Failed(String),
 }
 
 impl BuildManager {
-    pub fn new(repository: Arc<Repository>, artifact_root: PathBuf, work_root: PathBuf) -> Self {
+    pub fn new(
+        repository: Arc<Repository>,
+        artifact_root: PathBuf,
+        work_root: PathBuf,
+        objects_root: PathBuf,
+    ) -> Self {
         Self {
             repository,
             artifact_root,
             work_root,
-            current: Mutex::new(None),
-            active_pid: Arc::new(AtomicI32::new(0)),
+            objects_root,
+            pids: Arc::new(PidRegistry::default()),
+            permits: Arc::new(Semaphore::new(MAX_CONCURRENT_BUILDS)),
+            state: Mutex::new(ManagerState::default()),
         }
     }
 
-    pub async fn activate(&self, app: AppHandle, project: ProjectSummary) -> AppResult<()> {
-        self.stop().await;
+    /// Makes a project current: stops watching whatever was open, watches this
+    /// one, and starts a build of its working tree.
+    pub async fn open(self: Arc<Self>, app: AppHandle, project: Project) -> AppResult<()> {
+        self.close_others(project.id).await;
         self.repository.touch_project(project.id)?;
-
-        let (sender, receiver) = mpsc::unbounded_channel();
-        let handle = SessionHandle {
-            project_id: project.id,
-            sender: sender.clone(),
-        };
-        *self.current.lock().await = Some(handle);
-
-        let repository = Arc::clone(&self.repository);
-        let artifact_root = self.artifact_root.clone();
-        let work_root = self.work_root.clone();
-        let active_pid = Arc::clone(&self.active_pid);
-        tauri::async_runtime::spawn(async move {
-            session_loop(
-                app,
-                repository,
-                project,
-                artifact_root,
-                work_root,
-                active_pid,
-                sender.clone(),
-                receiver,
-            )
-            .await;
-        });
-        let _ = self
-            .current
-            .lock()
-            .await
-            .as_ref()
-            .and_then(|session| session.sender.send(SessionMessage::Trigger).ok());
+        Arc::clone(&self).start_watching(&app, &project).await;
+        self.request(app, project, SourceRef::Worktree).await?;
         Ok(())
     }
 
-    pub async fn rebuild(&self, project_id: i64) -> AppResult<()> {
-        let guard = self.current.lock().await;
-        let session = guard.as_ref().ok_or_else(|| {
-            AppError::InvalidInput("open the project before requesting a rebuild".into())
-        })?;
-        if session.project_id != project_id {
-            return Err(AppError::InvalidInput(
-                "the requested project is not currently open".into(),
-            ));
-        }
-        session
-            .sender
-            .send(SessionMessage::Trigger)
-            .map_err(|_| AppError::Task("the active build session has stopped".into()))
-    }
-
-    pub async fn stop(&self) {
-        let session = self.current.lock().await.take();
-        let Some(session) = session else {
-            return;
+    /// Stops watching and cancels everything in flight.
+    pub async fn close(&self) {
+        let (watch, builds) = {
+            let mut state = self.state.lock().await;
+            (
+                state.watch.take(),
+                state.active.drain().map(|(_, build)| build).collect::<Vec<_>>(),
+            )
         };
-        terminate_process_group(self.active_pid.load(Ordering::SeqCst), libc::SIGTERM);
-        let (acknowledge, receiver) = oneshot::channel();
-        if session
-            .sender
-            .send(SessionMessage::Stop(acknowledge))
-            .is_ok()
-        {
-            let _ = tokio::time::timeout(Duration::from_secs(3), receiver).await;
+        if let Some(watch) = watch {
+            watch.cancel.cancel();
         }
-        let remaining = self.active_pid.swap(0, Ordering::SeqCst);
-        terminate_process_group(remaining, libc::SIGKILL);
+        for build in builds {
+            build.cancel.cancel();
+        }
     }
 
-    pub fn shutdown_now(&self) {
-        let pid = self.active_pid.swap(0, Ordering::SeqCst);
-        terminate_process_group(pid, libc::SIGTERM);
-        terminate_process_group(pid, libc::SIGKILL);
+    async fn close_others(&self, keep: i64) {
+        let (watch, builds) = {
+            let mut state = self.state.lock().await;
+            let watch = match &state.watch {
+                Some(handle) if handle.project_id != keep => state.watch.take(),
+                _ => None,
+            };
+            let stale = state
+                .active
+                .keys()
+                .filter(|(project_id, _)| *project_id != keep)
+                .cloned()
+                .collect::<Vec<_>>();
+            let builds = stale
+                .into_iter()
+                .filter_map(|key| state.active.remove(&key))
+                .collect::<Vec<_>>();
+            (watch, builds)
+        };
+        if let Some(watch) = watch {
+            watch.cancel.cancel();
+        }
+        for build in builds {
+            build.cancel.cancel();
+        }
     }
 
-    pub fn log_path(&self, project_id: i64) -> PathBuf {
-        self.work_root
-            .join(project_id.to_string())
-            .join("last-build.log")
-    }
-}
+    /// Queues a build, or marks the one already running for this version dirty.
+    /// Returns the build that will satisfy the request.
+    pub async fn request(
+        self: Arc<Self>,
+        app: AppHandle,
+        project: Project,
+        source_ref: SourceRef,
+    ) -> AppResult<u64> {
+        let key = (project.id, source_ref.clone());
+        let (build_id, cancel) = {
+            let mut state = self.state.lock().await;
+            if let Some(active) = state.active.get_mut(&key) {
+                active.dirty = true;
+                return Ok(active.build_id);
+            }
+            state.next_build_id += 1;
+            let build_id = state.next_build_id;
+            let (handle, cancel) = CancelHandle::new();
+            state.active.insert(
+                key,
+                ActiveBuild {
+                    build_id,
+                    cancel: handle,
+                    dirty: false,
+                },
+            );
+            (build_id, cancel)
+        };
 
-#[allow(clippy::too_many_arguments)]
-async fn session_loop(
-    app: AppHandle,
-    repository: Arc<Repository>,
-    project: ProjectSummary,
-    artifact_root: PathBuf,
-    work_root: PathBuf,
-    active_pid: Arc<AtomicI32>,
-    sender: mpsc::UnboundedSender<SessionMessage>,
-    mut receiver: mpsc::UnboundedReceiver<SessionMessage>,
-) {
-    let watcher_sender = sender.clone();
-    let mut watcher =
-        match notify::recommended_watcher(move |result: notify::Result<Event>| match result {
-            Ok(event) if relevant_event(&event) => {
-                let _ = watcher_sender.send(SessionMessage::Trigger);
+        tauri::async_runtime::spawn(async move {
+            self.drive(app, project, source_ref, build_id, cancel).await;
+        });
+        Ok(build_id)
+    }
+
+    /// Runs a build, then repeats while it keeps being marked dirty.
+    async fn drive(
+        self: Arc<Self>,
+        app: AppHandle,
+        project: Project,
+        source_ref: SourceRef,
+        build_id: u64,
+        cancel: Cancel,
+    ) {
+        let key = (project.id, source_ref.clone());
+        // Kept so a cancelled build can put back what was on screen. Without
+        // this, closing a project mid-build leaves it recorded as running
+        // forever, because a cancelled build records no result of its own.
+        let settled = self
+            .repository
+            .build_state(project.id, &source_ref)
+            .unwrap_or_else(|_| BuildState::never(source_ref.clone()));
+
+        self.record(
+            &app,
+            build_id,
+            project.id,
+            BuildState {
+                source_ref: source_ref.clone(),
+                status: BuildStatus::Queued,
+                started_at: Some(now()),
+                finished_at: None,
+                duration_ms: None,
+                error_summary: None,
+                diagnostics: Vec::new(),
+            },
+            None,
+        )
+        .await;
+
+        loop {
+            // Waiting for a permit is the queued state; the interface stays live.
+            let Ok(permit) = Arc::clone(&self.permits).acquire_owned().await else {
+                break;
+            };
+            if cancel.is_cancelled() {
+                break;
+            }
+            self.run_once(&app, &project, &source_ref, build_id, cancel.clone())
+                .await;
+            drop(permit);
+            if cancel.is_cancelled() {
+                break;
+            }
+
+            let mut state = self.state.lock().await;
+            match state.active.get_mut(&key) {
+                // Something changed while we were building: publish happened,
+                // now go again.
+                Some(active) if active.build_id == build_id && active.dirty => {
+                    active.dirty = false;
+                }
+                _ => break,
+            }
+        }
+
+        let superseded = {
+            let mut state = self.state.lock().await;
+            match state.active.get(&key) {
+                Some(active) if active.build_id == build_id => {
+                    state.active.remove(&key);
+                    false
+                }
+                // A newer build already owns this version.
+                Some(_) => true,
+                None => false,
+            }
+        };
+
+        // A cancelled build records no result of its own, so the state it wrote
+        // on the way in has to be undone. Skipped when a newer build has taken
+        // over, which would otherwise be overwritten with stale state.
+        if cancel.is_cancelled() && !superseded {
+            self.record(&app, build_id, project.id, settled, None).await;
+        }
+    }
+
+    async fn run_once(
+        &self,
+        app: &AppHandle,
+        project: &Project,
+        source_ref: &SourceRef,
+        build_id: u64,
+        cancel: Cancel,
+    ) {
+        let started = Instant::now();
+        let started_at = now();
+        self.record(
+            app,
+            build_id,
+            project.id,
+            BuildState {
+                source_ref: source_ref.clone(),
+                status: BuildStatus::Running,
+                started_at: Some(started_at),
+                finished_at: None,
+                duration_ms: None,
+                error_summary: None,
+                diagnostics: Vec::new(),
+            },
+            None,
+        )
+        .await;
+
+        let source = match sources::prepare(
+            project,
+            source_ref,
+            &self.repository,
+            &self.objects_root,
+        ) {
+            Ok(source) => source,
+            Err(error) => {
+                self.finish_with_error(
+                    app,
+                    build_id,
+                    project.id,
+                    source_ref,
+                    started_at,
+                    started.elapsed(),
+                    error.to_string(),
+                    Vec::new(),
+                )
+                .await;
+                return;
+            }
+        };
+
+        // The previous build's page count is the denominator for the progress
+        // banner: "page 30 of about 42".
+        let expected_pages = self
+            .repository
+            .artifact_for(project.id, source_ref, project.engine)
+            .ok()
+            .flatten()
+            .and_then(|stored| stored.summary.page_count);
+
+        let sink = progress_sink(app.clone(), build_id, project.id, source_ref.clone(), expected_pages);
+        let inputs = BuildInputs {
+            build_id,
+            project,
+            source: &source,
+            work_directory: self.work_directory(project.id, source_ref),
+            log_path: self.log_path(project.id, source_ref),
+            artifact_directory: self.artifact_directory(project.id, source_ref),
+        };
+
+        let outcome = runner::run(inputs, cancel.clone(), Arc::clone(&self.pids), sink).await;
+        let elapsed = started.elapsed();
+
+        match outcome {
+            Ok(BuildOutcome::Cancelled) => {
+                // Nothing is recorded: a cancelled build is not a result, and the
+                // last good PDF stays on screen.
+            }
+            Ok(BuildOutcome::Succeeded {
+                product,
+                diagnostics,
+            }) => {
+                let recorded = self.repository.record_artifact(NewArtifact {
+                    project_id: project.id,
+                    source_ref,
+                    engine: project.engine,
+                    pdf_path: &product.pdf_path,
+                    page_count: product.page_count,
+                    byte_size: product.byte_size,
+                });
+                match recorded {
+                    Ok((artifact, superseded)) => {
+                        if let Some(previous) = superseded {
+                            let _ = tokio::fs::remove_file(previous).await;
+                        }
+                        self.record(
+                            app,
+                            build_id,
+                            project.id,
+                            BuildState {
+                                source_ref: source_ref.clone(),
+                                status: BuildStatus::Success,
+                                started_at: Some(started_at),
+                                finished_at: Some(now()),
+                                duration_ms: Some(elapsed.as_millis() as i64),
+                                error_summary: None,
+                                diagnostics,
+                            },
+                            Some(artifact),
+                        )
+                        .await;
+                    }
+                    Err(error) => {
+                        // The PDF exists but could not be recorded, so it would
+                        // never be found again.
+                        let _ = tokio::fs::remove_file(&product.pdf_path).await;
+                        self.finish_with_error(
+                            app,
+                            build_id,
+                            project.id,
+                            source_ref,
+                            started_at,
+                            elapsed,
+                            format!("could not record the built PDF: {error}"),
+                            Vec::new(),
+                        )
+                        .await;
+                    }
+                }
+            }
+            Ok(BuildOutcome::Failed {
+                diagnostics,
+                summary,
+            }) => {
+                self.finish_with_error(
+                    app,
+                    build_id,
+                    project.id,
+                    source_ref,
+                    started_at,
+                    elapsed,
+                    summary,
+                    diagnostics,
+                )
+                .await;
+            }
+            Err(error) => {
+                self.finish_with_error(
+                    app,
+                    build_id,
+                    project.id,
+                    source_ref,
+                    started_at,
+                    elapsed,
+                    error.to_string(),
+                    Vec::new(),
+                )
+                .await;
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn finish_with_error(
+        &self,
+        app: &AppHandle,
+        build_id: u64,
+        project_id: i64,
+        source_ref: &SourceRef,
+        started_at: i64,
+        elapsed: Duration,
+        summary: String,
+        diagnostics: Vec<Diagnostic>,
+    ) {
+        self.record(
+            app,
+            build_id,
+            project_id,
+            BuildState {
+                source_ref: source_ref.clone(),
+                status: BuildStatus::Error,
+                started_at: Some(started_at),
+                finished_at: Some(now()),
+                duration_ms: Some(elapsed.as_millis() as i64),
+                error_summary: Some(summary),
+                diagnostics,
+            },
+            None,
+        )
+        .await;
+    }
+
+    /// Persists a build state and tells the interface about it. The artifact is
+    /// looked up when not supplied so every update carries the PDF that is
+    /// currently on screen.
+    async fn record(
+        &self,
+        app: &AppHandle,
+        build_id: u64,
+        project_id: i64,
+        state: BuildState,
+        artifact: Option<ArtifactSummary>,
+    ) {
+        if let Err(error) = self.repository.set_build_state(project_id, &state) {
+            eprintln!("Press could not record build state: {error}");
+        }
+        let artifact = artifact.or_else(|| {
+            let engine = self.repository.get_project(project_id).ok()?.engine;
+            self.repository
+                .artifact_for(project_id, &state.source_ref, engine)
+                .ok()
+                .flatten()
+                .map(|stored| stored.summary)
+        });
+        let _ = app.emit(
+            "build-updated",
+            BuildUpdate {
+                build_id: Some(build_id),
+                project_id,
+                source_ref: state.source_ref.clone(),
+                build: state,
+                artifact,
+            },
+        );
+        // The library grid shows per-project state, so keep it in step.
+        if let Ok(summary) = self.repository.project_summary(project_id) {
+            let _ = app.emit("project-updated", summary);
+        }
+    }
+
+    // -- watching ---------------------------------------------------------
+
+    async fn start_watching(self: Arc<Self>, app: &AppHandle, project: &Project) {
+        let (sender, receiver) = mpsc::unbounded_channel();
+        let watcher_sender = sender.clone();
+        let kind = project.kind;
+        let main_file = project.main_file.clone();
+        let watcher = notify::recommended_watcher(move |result: notify::Result<Event>| match result {
+            Ok(event) if relevant_event(&event, kind, &main_file) => {
+                let _ = watcher_sender.send(WatchMessage::Changed);
             }
             Ok(_) => {}
             Err(error) => {
-                let _ = watcher_sender.send(SessionMessage::WatcherError(error.to_string()));
+                let _ = watcher_sender.send(WatchMessage::Failed(error.to_string()));
             }
-        }) {
+        });
+        let mut watcher = match watcher {
             Ok(watcher) => watcher,
             Err(error) => {
-                emit_session_error(
-                    &app,
-                    &repository,
-                    project.id,
-                    format!("File watcher failed: {error}"),
-                );
+                // A project without a watcher still builds on request. This is a
+                // degraded mode, not a failed document, so it never touches
+                // build state.
+                emit_watcher_error(app, project.id, &error.to_string());
                 return;
             }
         };
-    if let Err(error) = watcher.watch(&project.root(), RecursiveMode::Recursive) {
-        emit_session_error(
-            &app,
-            &repository,
-            project.id,
-            format!("Could not watch project files: {error}"),
-        );
-        return;
-    }
-
-    let mut pending = false;
-    loop {
-        let should_wait_for_trigger = !pending;
-        if should_wait_for_trigger {
-            match receiver.recv().await {
-                Some(SessionMessage::Trigger) => {}
-                Some(SessionMessage::WatcherError(error)) => {
-                    emit_session_error(
-                        &app,
-                        &repository,
-                        project.id,
-                        format!("File watcher failed: {error}"),
-                    );
-                    continue;
-                }
-                Some(SessionMessage::Stop(acknowledge)) => {
-                    let _ = acknowledge.send(());
-                    return;
-                }
-                None => return,
-            }
+        if let Err(error) = watcher.watch(&project.root(), RecursiveMode::Recursive) {
+            emit_watcher_error(app, project.id, &error.to_string());
+            return;
         }
 
-        let debounce = tokio::time::sleep(DEBOUNCE);
-        tokio::pin!(debounce);
-        loop {
-            tokio::select! {
-                _ = &mut debounce => break,
-                message = receiver.recv() => match message {
-                    Some(SessionMessage::Trigger) => {
-                        debounce.as_mut().reset(tokio::time::Instant::now() + DEBOUNCE);
-                    }
-                    Some(SessionMessage::WatcherError(error)) => {
-                        emit_session_error(
-                            &app,
-                            &repository,
-                            project.id,
-                            format!("File watcher failed: {error}"),
-                        );
-                        continue;
-                    }
-                    Some(SessionMessage::Stop(acknowledge)) => {
-                        let _ = acknowledge.send(());
-                        return;
-                    }
-                    None => return,
-                }
-            }
-        }
-        match repository.record_build_started(project.id) {
-            Ok(summary) => emit_project(&app, &summary),
-            Err(error) => {
-                eprintln!("Press could not record build start: {error}");
-                return;
-            }
-        }
-
-        match execute_build(
-            &project,
-            &artifact_root,
-            &work_root,
-            &active_pid,
-            &mut receiver,
-        )
-        .await
+        let (handle, cancel) = CancelHandle::new();
         {
-            BuildRun::Stopped => return,
-            BuildRun::Superseded => pending = true,
-            BuildRun::Finished {
-                result,
-                duration_ms,
-                dirty,
-            } => {
-                let summary = match result {
-                    Ok(result) => {
-                        let old_pdf = repository.pdf_path(project.id).ok();
-                        match repository.record_build_success(
-                            project.id,
-                            duration_ms,
-                            &result.published_pdf,
-                        ) {
-                            Ok(summary) => {
-                                if let Some(old) =
-                                    old_pdf.filter(|path| path != &result.published_pdf)
-                                {
-                                    let _ = std::fs::remove_file(old);
-                                }
-                                summary
-                            }
-                            Err(error) => {
-                                eprintln!("Press could not record successful build: {error}");
-                                return;
-                            }
-                        }
-                    }
-                    Err(error) => match repository.record_build_failure(
-                        project.id,
-                        duration_ms,
-                        &error.to_string(),
-                    ) {
-                        Ok(summary) => summary,
-                        Err(database_error) => {
-                            eprintln!("Press could not record build failure: {database_error}");
-                            return;
-                        }
-                    },
-                };
-                emit_project(&app, &summary);
-                pending = dirty;
+            let mut state = self.state.lock().await;
+            if let Some(previous) = state.watch.replace(WatchHandle {
+                project_id: project.id,
+                cancel: handle,
+            }) {
+                previous.cancel.cancel();
             }
         }
-    }
-}
 
-async fn execute_build(
-    project: &ProjectSummary,
-    artifact_root: &Path,
-    work_root: &Path,
-    active_pid: &AtomicI32,
-    receiver: &mut mpsc::UnboundedReceiver<SessionMessage>,
-) -> BuildRun {
-    let started = Instant::now();
-    let result =
-        prepare_and_run_build(project, artifact_root, work_root, active_pid, receiver).await;
-    let duration_ms = started.elapsed().as_millis() as i64;
-    match result {
-        Ok(RunOutcome::Stopped) => BuildRun::Stopped,
-        Ok(RunOutcome::Superseded) => BuildRun::Superseded,
-        Ok(RunOutcome::Completed { pdf, dirty }) => BuildRun::Finished {
-            result: Ok(BuildResult { published_pdf: pdf }),
-            duration_ms,
-            dirty,
-        },
-        Err((error, dirty)) => BuildRun::Finished {
-            result: Err(AppError::Build(error)),
-            duration_ms,
-            dirty,
-        },
-    }
-}
-
-enum RunOutcome {
-    Completed { pdf: PathBuf, dirty: bool },
-    Superseded,
-    Stopped,
-}
-
-async fn prepare_and_run_build(
-    project: &ProjectSummary,
-    artifact_root: &Path,
-    work_root: &Path,
-    active_pid: &AtomicI32,
-    receiver: &mut mpsc::UnboundedReceiver<SessionMessage>,
-) -> Result<RunOutcome, (String, bool)> {
-    let latexmk = resolve_executable("latexmk").ok_or_else(|| {
-        (
-            "latexmk is not available in the app environment".into(),
-            false,
-        )
-    })?;
-    let work_directory = work_root.join(project.id.to_string()).join("work");
-    let log_path = work_root
-        .join(project.id.to_string())
-        .join("last-build.log");
-    let artifact_directory = artifact_root.join(project.id.to_string()).join("artifacts");
-    tokio::fs::create_dir_all(&work_directory)
-        .await
-        .map_err(|error| (format!("could not create build directory: {error}"), false))?;
-    tokio::fs::create_dir_all(&artifact_directory)
-        .await
-        .map_err(|error| {
-            (
-                format!("could not create artifact directory: {error}"),
-                false,
-            )
-        })?;
-
-    let mut command = Command::new(&latexmk);
-    command.current_dir(project.working_path());
-    command.env("PATH", augmented_path(&latexmk));
-    command.arg(match project.engine.as_str() {
-        "xelatex" => "-pdfxe",
-        "lualatex" => "-pdflua",
-        _ => "-pdf",
-    });
-    command.args([
-        "-interaction=nonstopmode",
-        "-file-line-error",
-        "-synctex=1",
-        "-recorder",
-    ]);
-    if let Some(configuration) = latexmk_configuration(&project.root(), &project.working_path()) {
-        command.arg("-r").arg(configuration);
-    }
-    command.arg(format!("-outdir={}", work_directory.display()));
-    command.arg(project.main_path());
-    command.stdout(Stdio::piped()).stderr(Stdio::piped());
-    command.kill_on_drop(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        command.as_std_mut().process_group(0);
+        let app = app.clone();
+        let project = project.clone();
+        tauri::async_runtime::spawn(async move {
+            watch_loop(self, app, project, receiver, cancel, watcher).await;
+        });
     }
 
-    let mut child = command
-        .spawn()
-        .map_err(|error| (format!("could not start latexmk: {error}"), false))?;
-    let pid = child.id().unwrap_or_default() as i32;
-    active_pid.store(pid, Ordering::SeqCst);
-    let stdout_task = child
-        .stdout
-        .take()
-        .map(|stdout| tokio::spawn(read_limited(stdout)));
-    let stderr_task = child
-        .stderr
-        .take()
-        .map(|stderr| tokio::spawn(read_limited(stderr)));
-    let mut dirty = false;
-
-    let status = loop {
-        tokio::select! {
-            status = child.wait() => break status,
-            message = receiver.recv() => match message {
-                Some(SessionMessage::Trigger) => dirty = true,
-                Some(SessionMessage::WatcherError(error)) => {
-                    terminate_child(&mut child, pid).await;
-                    active_pid.compare_exchange(pid, 0, Ordering::SeqCst, Ordering::SeqCst).ok();
-                    return Err((format!("File watcher failed: {error}"), false));
-                }
-                Some(SessionMessage::Stop(acknowledge)) => {
-                    terminate_child(&mut child, pid).await;
-                    active_pid.compare_exchange(pid, 0, Ordering::SeqCst, Ordering::SeqCst).ok();
-                    let _ = acknowledge.send(());
-                    return Ok(RunOutcome::Stopped);
-                }
-                None => {
-                    terminate_child(&mut child, pid).await;
-                    active_pid.compare_exchange(pid, 0, Ordering::SeqCst, Ordering::SeqCst).ok();
-                    return Ok(RunOutcome::Stopped);
-                }
-            }
+    /// Cancels the build of one version, leaving the project's others alone.
+    pub async fn cancel_version(&self, project_id: i64, source_ref: &SourceRef) {
+        let build = {
+            let mut state = self.state.lock().await;
+            state.active.remove(&(project_id, source_ref.clone()))
+        };
+        if let Some(build) = build {
+            build.cancel.cancel();
         }
-    };
-    active_pid
-        .compare_exchange(pid, 0, Ordering::SeqCst, Ordering::SeqCst)
-        .ok();
-
-    let stdout = join_reader(stdout_task).await;
-    let stderr = join_reader(stderr_task).await;
-    let mut combined = stdout;
-    if !combined.is_empty() && !stderr.is_empty() {
-        combined.push(b'\n');
     }
-    combined.extend(stderr);
-    if combined.len() > OUTPUT_LIMIT {
-        combined.drain(..combined.len() - OUTPUT_LIMIT);
-    }
-    let _ = tokio::fs::write(&log_path, &combined).await;
-    let output = String::from_utf8_lossy(&combined);
 
+    /// Cancels every build for one project, without touching the others.
+    pub async fn cancel_project(&self, project_id: i64) {
+        let (watch, builds) = {
+            let mut state = self.state.lock().await;
+            let watch = match &state.watch {
+                Some(handle) if handle.project_id == project_id => state.watch.take(),
+                _ => None,
+            };
+            let keys = state
+                .active
+                .keys()
+                .filter(|(owner, _)| *owner == project_id)
+                .cloned()
+                .collect::<Vec<_>>();
+            let builds = keys
+                .into_iter()
+                .filter_map(|key| state.active.remove(&key))
+                .collect::<Vec<_>>();
+            (watch, builds)
+        };
+        if let Some(watch) = watch {
+            watch.cancel.cancel();
+        }
+        for build in builds {
+            build.cancel.cancel();
+        }
+    }
+
+    // -- paths ------------------------------------------------------------
+
+    fn version_directory(&self, root: &Path, project_id: i64, source_ref: &SourceRef) -> PathBuf {
+        root.join(project_id.to_string()).join(source_ref.slug())
+    }
+
+    fn work_directory(&self, project_id: i64, source_ref: &SourceRef) -> PathBuf {
+        self.version_directory(&self.work_root, project_id, source_ref)
+            .join("work")
+    }
+
+    pub fn log_path(&self, project_id: i64, source_ref: &SourceRef) -> PathBuf {
+        self.version_directory(&self.work_root, project_id, source_ref)
+            .join("last-build.log")
+    }
+
+    fn artifact_directory(&self, project_id: i64, source_ref: &SourceRef) -> PathBuf {
+        self.version_directory(&self.artifact_root, project_id, source_ref)
+    }
+
+    /// Removes everything Press generated for a project. Called after the
+    /// project itself has been deleted.
+    pub async fn discard_project_storage(&self, project_id: i64) {
+        for root in [&self.artifact_root, &self.work_root] {
+            let _ = tokio::fs::remove_dir_all(root.join(project_id.to_string())).await;
+        }
+    }
+
+    /// Signals every live build without waiting. Only for application exit.
+    pub fn shutdown_now(&self) {
+        self.pids.terminate_all();
+    }
+}
+
+async fn watch_loop(
+    manager: Arc<BuildManager>,
+    app: AppHandle,
+    project: Project,
+    mut events: mpsc::UnboundedReceiver<WatchMessage>,
+    cancel: Cancel,
+    _watcher: notify::RecommendedWatcher,
+) {
     loop {
-        match receiver.try_recv() {
-            Ok(SessionMessage::Trigger) => dirty = true,
-            Ok(SessionMessage::WatcherError(error)) => {
-                return Err((format!("File watcher failed: {error}"), false));
+        let message = tokio::select! {
+            () = cancel.cancelled() => return,
+            message = events.recv() => message,
+        };
+        match message {
+            None => return,
+            Some(WatchMessage::Failed(error)) => {
+                emit_watcher_error(&app, project.id, &error);
+                continue;
             }
-            Ok(SessionMessage::Stop(acknowledge)) => {
-                let _ = acknowledge.send(());
-                return Ok(RunOutcome::Stopped);
+            Some(WatchMessage::Changed) => {}
+        }
+
+        // Coalesce a burst of saves into one build.
+        loop {
+            let deadline = tokio::time::sleep(DEBOUNCE);
+            tokio::pin!(deadline);
+            tokio::select! {
+                () = &mut deadline => break,
+                () = cancel.cancelled() => return,
+                message = events.recv() => match message {
+                    None => return,
+                    Some(WatchMessage::Failed(error)) => {
+                        emit_watcher_error(&app, project.id, &error);
+                    }
+                    Some(WatchMessage::Changed) => {}
+                },
             }
-            Err(mpsc::error::TryRecvError::Empty) => break,
-            Err(mpsc::error::TryRecvError::Disconnected) => return Ok(RunOutcome::Stopped),
+        }
+
+        // Re-read the project so an edit to its settings is picked up.
+        let current = manager
+            .repository
+            .get_project(project.id)
+            .unwrap_or_else(|_| project.clone());
+        if let Err(error) = Arc::clone(&manager)
+            .request(app.clone(), current, SourceRef::Worktree)
+            .await
+        {
+            eprintln!("Press could not queue a build: {error}");
         }
     }
+}
 
-    let status = status.map_err(|error| (format!("could not wait for latexmk: {error}"), dirty))?;
-    if dirty {
-        return Ok(RunOutcome::Superseded);
-    }
-    if !status.success() {
-        let message = first_build_error(&output)
-            .unwrap_or_else(|| format!("latexmk exited with {}", status.code().unwrap_or(-1)));
-        return Err((message, dirty));
-    }
+/// A broken watcher is a Press problem, not a document problem, and is reported
+/// on its own channel so it never appears as a compile error.
+fn emit_watcher_error(app: &AppHandle, project_id: i64, message: &str) {
+    let _ = app.emit(
+        "watcher-error",
+        serde_json::json!({
+            "projectId": project_id,
+            "message": format!("Press cannot watch this folder for changes: {message}"),
+        }),
+    );
+}
 
-    let generated = find_generated_pdf(&work_directory, &project.main_path())
-        .map_err(|error| (error, dirty))?;
-    verify_pdf(&generated).map_err(|error| (error, dirty))?;
-    let artifact_id = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    let destination = artifact_directory.join(format!("build-{artifact_id}.pdf"));
-    let staging = artifact_directory.join(format!("build-{artifact_id}.next"));
-    tokio::fs::copy(&generated, &staging)
-        .await
-        .map_err(|error| (format!("could not stage successful PDF: {error}"), dirty))?;
-    tokio::fs::rename(&staging, &destination)
-        .await
-        .map_err(|error| (format!("could not publish successful PDF: {error}"), dirty))?;
-    Ok(RunOutcome::Completed {
-        pdf: destination,
-        dirty,
+fn progress_sink(
+    app: AppHandle,
+    build_id: u64,
+    project_id: i64,
+    source_ref: SourceRef,
+    expected_pages: Option<i64>,
+) -> ProgressSink {
+    Arc::new(move |snapshot: ProgressSnapshot| {
+        let _ = app.emit(
+            "build-progress",
+            BuildProgress {
+                build_id,
+                project_id,
+                source_ref: source_ref.clone(),
+                stage: snapshot.stage,
+                pass: snapshot.pass,
+                page: snapshot.page,
+                expected_pages,
+            },
+        );
     })
 }
 
-async fn read_limited<R>(mut reader: R) -> Vec<u8>
-where
-    R: AsyncRead + Unpin,
-{
-    let mut output = VecDeque::with_capacity(OUTPUT_LIMIT);
-    let mut chunk = [0_u8; 8192];
-    while let Ok(count) = reader.read(&mut chunk).await {
-        if count == 0 {
-            break;
-        }
-        output.extend(chunk[..count].iter().copied());
-        if output.len() > OUTPUT_LIMIT {
-            output.drain(..output.len() - OUTPUT_LIMIT);
-        }
-    }
-    output.into()
+fn now() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64
 }
 
-async fn join_reader(task: Option<tokio::task::JoinHandle<Vec<u8>>>) -> Vec<u8> {
-    match task {
-        Some(task) => task.await.unwrap_or_default(),
-        None => Vec::new(),
-    }
-}
-
-fn find_generated_pdf(directory: &Path, main: &Path) -> Result<PathBuf, String> {
-    let expected = directory.join(
-        main.file_stem()
-            .map(|stem| {
-                let mut value = stem.to_os_string();
-                value.push(".pdf");
-                value
-            })
-            .ok_or_else(|| "main file has no filename".to_owned())?,
-    );
-    if expected.is_file() {
-        return Ok(expected);
-    }
-    let mut candidates = std::fs::read_dir(directory)
-        .map_err(|error| format!("could not inspect build output: {error}"))?
-        .filter_map(Result::ok)
-        .map(|entry| entry.path())
-        .filter(|path| {
-            path.extension()
-                .is_some_and(|extension| extension.eq_ignore_ascii_case("pdf"))
-        })
-        .collect::<Vec<_>>();
-    candidates.sort_by_key(|path| {
-        std::fs::metadata(path)
-            .and_then(|metadata| metadata.modified())
-            .unwrap_or(UNIX_EPOCH)
-    });
-    candidates
-        .pop()
-        .ok_or_else(|| "latexmk succeeded but produced no PDF".into())
-}
-
-fn verify_pdf(path: &Path) -> Result<(), String> {
-    let mut file =
-        File::open(path).map_err(|error| format!("could not read generated PDF: {error}"))?;
-    let length = file
-        .metadata()
-        .map_err(|error| format!("could not inspect generated PDF: {error}"))?
-        .len();
-    if length < 10 {
-        return Err("latexmk produced a file that is not a readable PDF".into());
-    }
-    let mut header = [0_u8; 5];
-    file.read_exact(&mut header)
-        .map_err(|error| format!("could not read generated PDF header: {error}"))?;
-    if &header != b"%PDF-" {
-        return Err("latexmk produced a file that is not a readable PDF".into());
-    }
-    let tail_length = length.min(2048) as usize;
-    file.seek(SeekFrom::End(-(tail_length as i64)))
-        .map_err(|error| format!("could not seek generated PDF: {error}"))?;
-    let mut tail = vec![0_u8; tail_length];
-    file.read_exact(&mut tail)
-        .map_err(|error| format!("could not read generated PDF trailer: {error}"))?;
-    if !tail.windows(5).any(|window| window == b"%%EOF") {
-        return Err("latexmk produced an incomplete PDF without an end marker".into());
-    }
-    Ok(())
-}
-
-fn latexmk_configuration(root: &Path, working: &Path) -> Option<PathBuf> {
-    if root == working {
-        return None;
-    }
-    [root.join(".latexmkrc"), root.join("latexmkrc")]
-        .into_iter()
-        .find(|path| path.is_file())
-}
-
-fn first_build_error(output: &str) -> Option<String> {
-    for line in output.lines() {
-        let trimmed = line.trim();
-        if let Some(capture) = FILE_LINE_ERROR.captures(trimmed) {
-            return Some(format!(
-                "{}:{}: {}",
-                capture.get(1)?.as_str(),
-                capture.get(2)?.as_str(),
-                capture.get(3)?.as_str().trim()
-            ));
-        }
-        let lower = trimmed.to_ascii_lowercase();
-        if trimmed.starts_with("! ")
-            || lower.contains("latex error")
-            || lower.contains("undefined control sequence")
-            || lower.contains("emergency stop")
-            || lower.contains("fatal error")
-        {
-            return Some(trimmed.chars().take(400).collect());
-        }
-    }
-    None
-}
-
-fn relevant_event(event: &Event) -> bool {
+/// A change is worth rebuilding for when it touches something the author wrote.
+/// Reads and build output are not that.
+fn relevant_event(event: &Event, kind: DocumentKind, main_file: &str) -> bool {
     if matches!(event.kind, EventKind::Access(_)) {
         return false;
     }
-    event.paths.iter().any(|path| !ignored_watch_path(path))
+    event
+        .paths
+        .iter()
+        .any(|path| worth_rebuilding(path, kind, main_file))
 }
 
-fn ignored_watch_path(path: &Path) -> bool {
-    const IGNORED_DIRECTORIES: &[&str] = &[
-        ".git",
-        ".hg",
-        ".svn",
-        ".cache",
-        "node_modules",
-        "target",
-        "build",
-        "out",
-        "dist",
-    ];
-    if path.components().any(|component| {
-        component
-            .as_os_str()
-            .to_str()
-            .is_some_and(|value| IGNORED_DIRECTORIES.contains(&value))
-    }) {
-        return true;
+fn worth_rebuilding(path: &Path, kind: DocumentKind, main_file: &str) -> bool {
+    if !files::is_project_source(path) {
+        return false;
     }
-    let name = path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or_default();
-    if name == ".DS_Store"
-        || name.starts_with(".#")
-        || name.ends_with('~')
-        || name.starts_with(".nfs")
-        || name.ends_with(".synctex.gz")
-        || name.ends_with(".run.xml")
-    {
-        return true;
+    // A markdown project is one file. Other markdown in the same folder is other
+    // documents, and editing those is no reason to rebuild this one — but the
+    // images and data beside them are shared, so those still count.
+    if kind == DocumentKind::Markdown && DocumentKind::of(path) == DocumentKind::Markdown {
+        return path.ends_with(main_file);
     }
-    path.extension()
-        .and_then(|extension| extension.to_str())
-        .is_some_and(|extension| {
-            matches!(
-                extension.to_ascii_lowercase().as_str(),
-                "aux"
-                    | "acn"
-                    | "acr"
-                    | "alg"
-                    | "bbl"
-                    | "bcf"
-                    | "blg"
-                    | "fdb_latexmk"
-                    | "fls"
-                    | "glg"
-                    | "glo"
-                    | "gls"
-                    | "idx"
-                    | "ilg"
-                    | "ind"
-                    | "lof"
-                    | "log"
-                    | "lot"
-                    | "nav"
-                    | "out"
-                    | "snm"
-                    | "swo"
-                    | "swp"
-                    | "synctex"
-                    | "tmp"
-                    | "toc"
-            )
-        })
-}
-
-fn emit_project(app: &AppHandle, project: &ProjectSummary) {
-    let _ = app.emit("project-updated", project);
-}
-
-fn emit_session_error(app: &AppHandle, repository: &Repository, id: i64, message: String) {
-    if let Ok(project) = repository.record_build_failure(id, 0, &message) {
-        emit_project(app, &project);
-    }
-}
-
-fn terminate_process_group(pid: i32, signal: i32) {
-    if pid <= 0 {
-        return;
-    }
-    #[cfg(unix)]
-    unsafe {
-        libc::kill(-pid, signal);
-    }
-    #[cfg(windows)]
-    {
-        let _ = (pid, signal);
-    }
-}
-
-async fn terminate_child(child: &mut tokio::process::Child, pid: i32) {
-    terminate_process_group(pid, libc::SIGTERM);
-    if tokio::time::timeout(Duration::from_millis(1200), child.wait())
-        .await
-        .is_err()
-    {
-        terminate_process_group(pid, libc::SIGKILL);
-        let _ = child.wait().await;
-    }
+    true
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
 
     #[test]
-    fn extracts_useful_latex_errors() {
-        let output = "noise\n./chapter.tex:42: Undefined control sequence.\nmore";
-        assert_eq!(
-            first_build_error(output).as_deref(),
-            Some("./chapter.tex:42: Undefined control sequence.")
+    fn source_changes_trigger_builds_but_generated_files_do_not() {
+        let event = |path: &str| Event {
+            kind: EventKind::Any,
+            paths: vec![PathBuf::from(path)],
+            attrs: Default::default(),
+        };
+        let relevant_event = |event: &Event| relevant_event(event, DocumentKind::Latex, "main.tex");
+        assert!(relevant_event(&event("chapter.tex")));
+        assert!(relevant_event(&event("figures/data.csv")));
+        assert!(relevant_event(&event("references.bib")));
+        // PDF figures are ordinary source: regenerating a plot must rebuild.
+        // Press writes its own output outside the project, so there is no loop.
+        assert!(relevant_event(&event("figures/plot.pdf")));
+        assert!(!relevant_event(&event("main.aux")));
+        assert!(!relevant_event(&event("main.log")));
+        assert!(!relevant_event(&event(".git/index")));
+        assert!(!relevant_event(&event(".main.tex.swp")));
+        assert!(!relevant_event(&event("4913")));
+        assert!(!relevant_event(&event(".#main.tex")));
+    }
+
+    #[test]
+    fn a_markdown_project_ignores_the_other_documents_beside_it() {
+        let event = |path: &str| Event {
+            kind: EventKind::Any,
+            paths: vec![PathBuf::from(path)],
+            attrs: Default::default(),
+        };
+        let watching = |event: &Event| relevant_event(event, DocumentKind::Markdown, "essay.md");
+
+        assert!(watching(&event("/writing/essay.md")), "its own document");
+        // Another document in the same folder, which is another project.
+        assert!(!watching(&event("/writing/talk.md")));
+        // Assets are shared, so they still count.
+        assert!(watching(&event("/writing/figures/plot.png")));
+        assert!(watching(&event("/writing/references.bib")));
+        assert!(!watching(&event("/writing/essay.aux")));
+    }
+
+    #[test]
+    fn versions_get_separate_scratch_space() {
+        let manager = BuildManager::new(
+            Arc::new(Repository::open(&std::env::temp_dir().join(format!(
+                "press-test-{}.db",
+                std::process::id()
+            )))
+            .unwrap()),
+            PathBuf::from("/artifacts"),
+            PathBuf::from("/work"),
+            PathBuf::from("/objects"),
         );
-    }
-
-    #[test]
-    fn verifies_real_pdf_headers() {
-        let directory = tempfile::tempdir().unwrap();
-        let good = directory.path().join("good.pdf");
-        let bad = directory.path().join("bad.pdf");
-        std::fs::write(&good, b"%PDF-1.7\nbody\n%%EOF\n").unwrap();
-        std::fs::write(&bad, b"not pdf").unwrap();
-        assert!(verify_pdf(&good).is_ok());
-        assert!(verify_pdf(&bad).is_err());
-    }
-
-    #[test]
-    fn recognizes_source_changes_but_not_aux_files() {
-        let source = Event {
-            kind: EventKind::Any,
-            paths: vec![PathBuf::from("chapter.tex")],
-            attrs: Default::default(),
-        };
-        let aux = Event {
-            kind: EventKind::Any,
-            paths: vec![PathBuf::from("main.aux")],
-            attrs: Default::default(),
-        };
-        let data = Event {
-            kind: EventKind::Any,
-            paths: vec![PathBuf::from("figures/data.csv")],
-            attrs: Default::default(),
-        };
-        let git = Event {
-            kind: EventKind::Any,
-            paths: vec![PathBuf::from(".git/index")],
-            attrs: Default::default(),
-        };
-        assert!(relevant_event(&source));
-        assert!(relevant_event(&data));
-        assert!(!relevant_event(&aux));
-        assert!(!relevant_event(&git));
-    }
-
-    #[test]
-    fn compiles_and_publishes_a_real_latex_document_when_available() {
-        if resolve_executable("latexmk").is_none() {
-            return;
-        }
-        let directory = tempfile::tempdir().unwrap();
-        let root = directory.path().join("source");
-        let artifacts = directory.path().join("artifacts");
-        let work = directory.path().join("work-cache");
-        std::fs::create_dir(&root).unwrap();
-        std::fs::write(
-            root.join("main.tex"),
-            "\\documentclass{article}\n\\begin{document}\n\\input{chapter}\n\\end{document}\n",
-        )
-        .unwrap();
-        std::fs::write(root.join("chapter.tex"), "Press works.\n").unwrap();
-        let project = ProjectSummary {
-            id: 1,
-            name: "Fixture".into(),
-            root_path: root.to_string_lossy().into_owned(),
-            main_file: "main.tex".into(),
-            working_directory: ".".into(),
-            engine: "pdflatex".into(),
-            build_status: "never".into(),
-            last_build_at: None,
-            last_build_duration_ms: None,
-            last_error: None,
-            artifact_revision: 0,
-            has_pdf: false,
-            path_available: true,
-        };
-        let active_pid = AtomicI32::new(0);
-        let (sender, mut receiver) = mpsc::unbounded_channel();
-
-        let outcome = tauri::async_runtime::block_on(prepare_and_run_build(
-            &project,
-            &artifacts,
-            &work,
-            &active_pid,
-            &mut receiver,
-        ))
-        .unwrap();
-
-        let RunOutcome::Completed { pdf, dirty } = outcome else {
-            panic!("build unexpectedly stopped");
-        };
-        assert!(!dirty);
-        assert!(pdf.is_file());
-        verify_pdf(&pdf).unwrap();
-        assert!(work.join("1/last-build.log").is_file());
-
-        std::fs::write(root.join("chapter.tex"), "Press rebuilds included files.\n").unwrap();
-        let rebuilt = tauri::async_runtime::block_on(prepare_and_run_build(
-            &project,
-            &artifacts,
-            &work,
-            &active_pid,
-            &mut receiver,
-        ))
-        .unwrap();
-        let RunOutcome::Completed {
-            pdf: rebuilt_pdf, ..
-        } = rebuilt
-        else {
-            panic!("incremental build unexpectedly stopped");
-        };
-        assert_ne!(pdf, rebuilt_pdf);
-        verify_pdf(&rebuilt_pdf).unwrap();
-
-        sender.send(SessionMessage::Trigger).unwrap();
-        let superseded = tauri::async_runtime::block_on(prepare_and_run_build(
-            &project,
-            &artifacts,
-            &work,
-            &active_pid,
-            &mut receiver,
-        ))
-        .unwrap();
-        assert!(matches!(superseded, RunOutcome::Superseded));
-        let published_count = std::fs::read_dir(artifacts.join("1/artifacts"))
-            .unwrap()
-            .filter_map(Result::ok)
-            .filter(|entry| entry.path().extension().is_some_and(|value| value == "pdf"))
-            .count();
-        assert_eq!(published_count, 2);
+        let worktree = manager.work_directory(7, &SourceRef::Worktree);
+        let snapshot = manager.work_directory(7, &SourceRef::Snapshot("abc".into()));
+        assert_ne!(worktree, snapshot);
+        assert!(worktree.starts_with("/work/7"));
+        assert!(snapshot.starts_with("/work/7"));
+        // Two versions building at once must not share an auxiliary directory.
+        assert_ne!(
+            manager.artifact_directory(7, &SourceRef::Worktree),
+            manager.artifact_directory(7, &SourceRef::Snapshot("abc".into()))
+        );
+        let _ = std::fs::remove_file(
+            std::env::temp_dir().join(format!("press-test-{}.db", std::process::id())),
+        );
     }
 }
