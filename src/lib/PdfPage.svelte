@@ -92,10 +92,13 @@
 </section>
 
 <style>
+  /* Bottom margin only, so the first page sits flush against the top of the
+     window and the gap exists only *between* pages. PAGE_GUTTER in
+     PdfViewer.svelte is this number. */
   .page {
-    margin: 16px auto;
+    margin: 0 auto 16px;
     background: white;
-    box-shadow: 0 1px 5px #0005;
+    box-shadow: 0 0.4px 2px rgba(0, 0, 0, 0.25);
   }
 
   canvas {

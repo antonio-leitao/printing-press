@@ -218,7 +218,10 @@
         (target instanceof HTMLElement && target.isContentEditable);
       if (typing) return;
 
-      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') {
+      // `code` as well as `key`, because a layout that does not put `k` on the
+      // physical K key reports something else for `key` under a modifier.
+      const isK = event.code === 'KeyK' || event.key.toLowerCase() === 'k';
+      if ((event.metaKey || event.ctrlKey) && isK) {
         event.preventDefault();
         openSnapshotDialog();
         return;
@@ -780,6 +783,11 @@
         <span class="quiet">{viewerPage}/{viewerPageCount}</span>
       {/if}
       {#if viewerZoom !== 100}<span class="quiet">{viewerZoom}%</span>{/if}
+      <!-- ⌘K as well, but a keystroke nobody can see is not a way to reach a
+           feature, and it depends on the webview getting the key at all. -->
+      <button class="link" onclick={openSnapshotDialog} disabled={busy} title="Snapshot (⌘K)">
+        Snapshot
+      </button>
       <button class="link" onclick={launchEditor} disabled={busy}>Editor</button>
       <button class="link" onclick={returnToLibrary} disabled={busy}>Projects</button>
       <button class="link" onclick={() => togglePanel('keys')} title="Keys (?)">?</button>
@@ -1231,12 +1239,14 @@
     width: 100%;
   }
 
+  /* The same surface as the viewer, shown when a version has no PDF yet — so it
+     matches, rather than flashing a different colour when one is selected. */
   .empty {
     display: grid;
     height: 100%;
     place-items: center;
-    background: #6f6f6f;
-    color: #eee;
+    background: #f8f8f6;
+    color: #767676;
   }
 
   .panel {

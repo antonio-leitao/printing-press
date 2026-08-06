@@ -44,19 +44,16 @@
   /** Time constant of the scroll glide. Short enough to feel immediate. */
   const GLIDE_TAU = 55;
   /**
-   * The gap around a page, which is the `margin` on `.page` in `PdfPage.svelte`
-   * and the only spacing there is: `.pages` adds no padding of its own, so a
-   * document opens flush against the top of the window.
+   * A document sits flush against the top and both sides of the window. The
+   * only gap anywhere is *between* pages, which is the bottom `margin` on
+   * `.page` in `PdfPage.svelte`.
    *
-   * Changing it there means changing it here, because the two have to agree for
-   * a fit to leave no leftover and for a jumped-to page to land where the first
-   * page sits at rest.
+   * Both of these follow from that: nothing is left above a jumped-to page, so
+   * `G` lands exactly as page one rests, and a fitted page uses the full width
+   * because there are no side gutters to leave room for.
    */
-  const PAGE_GUTTER = 16;
-  /** Gap left above a page when jumping to it, so `G` matches the resting view. */
-  const PAGE_LEAD = PAGE_GUTTER;
-  /** Both gutters, which is exactly the width a fitted page cannot use. */
-  const FIT_MARGIN = PAGE_GUTTER * 2;
+  const PAGE_LEAD = 0;
+  const FIT_MARGIN = 0;
 
   // Only ever replaced once the new document's geometry has arrived; blanking
   // it first is what made every rebuild flash an empty viewer.
@@ -573,14 +570,13 @@
     overflow: auto;
     outline: none;
     overscroll-behavior: contain;
-    background: #6f6f6f;
+    background: #f8f8f6;
   }
 
   .pages {
-    /* Contains the pages' own margins rather than letting the first one collapse
-       out of the top and the last one fall outside the scrollable area. With
-       that, the only gap around a document is `.page`'s margin — one gutter, the
-       same on all four sides, and PAGE_GUTTER above is that number. */
+    /* flow-root so the last page's bottom margin stays inside the scrollable
+       area instead of being dropped at the end of the document. Nothing else
+       adds spacing here: the first page starts at y=0. */
     display: flow-root;
     width: max-content;
     min-width: 100%;
@@ -593,6 +589,7 @@
 
   .placeholder {
     margin: 2rem;
-    color: #eee;
+    /* Dark, because the viewer's background is now nearly white. */
+    color: #767676;
   }
 </style>
