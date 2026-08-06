@@ -1,6 +1,5 @@
 import { invoke } from '@tauri-apps/api/core';
 import type {
-  DiscoveryReport,
   EditorLaunchResult,
   Engine,
   OpenRequest,
@@ -16,15 +15,11 @@ import type {
 export const api = {
   listProjects: () => invoke<ProjectSummary[]>('list_projects'),
 
-  inspectProject: (rootPath: string) =>
-    invoke<DiscoveryReport>('inspect_project', { rootPath }),
+  /** The one way in: a file or a directory, and the documents it means. */
+  resolvePath: (path: string) => invoke<OpenRequest>('resolve_path', { path }),
 
-  /** Inspects one named file: this document, in this folder, no discovery. */
-  inspectDocument: (filePath: string) =>
-    invoke<DiscoveryReport>('inspect_document', { filePath }),
-
-  addProject: (rootPath: string, mainFile: string, engineOverride?: Engine) =>
-    invoke<ProjectSummary>('add_project', { rootPath, mainFile, engineOverride }),
+  addProject: (documentPath: string, name?: string, engineOverride?: Engine) =>
+    invoke<ProjectSummary>('add_project', { documentPath, name, engineOverride }),
 
   openProject: (projectId: number) =>
     invoke<ProjectSummary>('open_project', { projectId }),
@@ -38,10 +33,9 @@ export const api = {
   renameProject: (projectId: number, name: string) =>
     invoke<ProjectSummary>('rename_project', { projectId, name }),
 
-  updateProjectSettings: (
-    projectId: number,
-    settings: { mainFile?: string; engineOverride?: Engine }
-  ) => invoke<ProjectSummary>('update_project_settings', { projectId, ...settings }),
+  /** Discards every cached PDF: versions built by different engines are not comparable. */
+  setProjectEngine: (projectId: number, engineOverride: Engine) =>
+    invoke<ProjectSummary>('set_project_engine', { projectId, engineOverride }),
 
   deleteProject: (projectId: number) =>
     invoke<void>('delete_project', { projectId }),
@@ -70,6 +64,10 @@ export const api = {
 
   searchDocument: (artifactId: number, needle: string) =>
     invoke<SearchHit[]>('search_document', { artifactId, needle }),
+
+  /** Copies a built PDF into Downloads. Returns where it was written. */
+  exportArtifact: (artifactId: number) =>
+    invoke<string>('export_artifact', { artifactId }),
 
   getBuildLog: (projectId: number, sourceRef?: SourceRef) =>
     invoke<string>('get_build_log', { projectId, sourceRef }),

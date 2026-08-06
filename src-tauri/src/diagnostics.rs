@@ -57,10 +57,10 @@ pub struct LogAnalysis {
     pub produced_no_pages: bool,
 }
 
-/// Parses a `.log` file. `working` is latexmk's working directory, which is what
-/// the relative paths in the log are relative to; `root` bounds what counts as
-/// a project file.
-pub fn analyze_log(text: &str, root: &Path, working: &Path) -> LogAnalysis {
+/// Parses a `.log` file. `directory` is where latexmk ran, which is both what
+/// the log's relative paths are relative to and what a diagnostic's path is
+/// reported relative to — the document's own folder, so the two cannot differ.
+pub fn analyze_log(text: &str, directory: &Path) -> LogAnalysis {
     let lines = text.lines().collect::<Vec<_>>();
     let mut analysis = LogAnalysis::default();
     let mut stack = FileStack::default();
@@ -74,8 +74,8 @@ pub fn analyze_log(text: &str, root: &Path, working: &Path) -> LogAnalysis {
             analysis.produced_no_pages = true;
         }
 
-        let diagnostic = parse_error_line(line, &lines, index, &stack, root, working)
-            .or_else(|| parse_warning_line(line, &lines, index, &stack, root, working));
+        let diagnostic = parse_error_line(line, &lines, index, &stack, directory)
+            .or_else(|| parse_warning_line(line, &lines, index, &stack, directory));
         if let Some(diagnostic) = diagnostic
             && seen.insert(diagnostic.clone())
             && analysis.diagnostics.len() < MAX_DIAGNOSTICS
@@ -100,8 +100,7 @@ fn parse_error_line(
     lines: &[&str],
     index: usize,
     stack: &FileStack,
-    root: &Path,
-    working: &Path,
+    directory: &Path,
 ) -> Option<Diagnostic> {
     // `-file-line-error` gives the strongest signal: the file and line are on
     // the error line itself.
@@ -110,7 +109,7 @@ fn parse_error_line(
         let message = capture.get(3)?.as_str().trim();
         if looks_like_source_path(raw_file) && !message.is_empty() {
             return Some(Diagnostic {
-                file: relativize(raw_file, root, working),
+                file: relativize(raw_file, directory),
                 line: capture.get(2)?.as_str().parse().ok(),
                 severity: Severity::Error,
                 message: clean(message),
@@ -124,7 +123,7 @@ fn parse_error_line(
         return None;
     }
     Some(Diagnostic {
-        file: stack.current().and_then(|file| relativize(file, root, working)),
+        file: stack.current().and_then(|file| relativize(file, directory)),
         line: lookahead_line(lines, index),
         severity: Severity::Error,
         message: clean(message),
@@ -136,8 +135,7 @@ fn parse_warning_line(
     lines: &[&str],
     index: usize,
     stack: &FileStack,
-    root: &Path,
-    working: &Path,
+    directory: &Path,
 ) -> Option<Diagnostic> {
     // Overfull and underfull boxes are typographic notes, not defects. There can
     // be thousands, and they would bury every real problem.
@@ -163,7 +161,7 @@ fn parse_warning_line(
         _ => message.to_owned(),
     };
     Some(Diagnostic {
-        file: stack.current().and_then(|file| relativize(file, root, working)),
+        file: stack.current().and_then(|file| relativize(file, directory)),
         line: line_number,
         severity: Severity::Warning,
         message: clean(&message),
@@ -249,7 +247,7 @@ fn looks_like_source_path(value: &str) -> bool {
 /// Resolves a path from the log to one relative to the project root. Paths that
 /// point outside the project (a system class file, say) keep their absolute form
 /// so they are still openable.
-fn relativize(raw: &str, root: &Path, working: &Path) -> Option<String> {
+fn relativize(raw: &str, directory: &Path) -> Option<String> {
     let trimmed = raw.trim().trim_matches('"');
     if trimmed.is_empty() {
         return None;
@@ -258,15 +256,17 @@ fn relativize(raw: &str, root: &Path, working: &Path) -> Option<String> {
     let joined = if candidate.is_absolute() {
         candidate.to_path_buf()
     } else {
-        working.join(candidate)
+        directory.join(candidate)
     };
     // The file may legitimately not exist — a missing \include is exactly the
     // case that matters — so fall back to lexical normalization.
     let resolved = joined
         .canonicalize()
         .unwrap_or_else(|_| normalize_lexically(&joined));
-    let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
-    match resolved.strip_prefix(&root) {
+    let directory = directory
+        .canonicalize()
+        .unwrap_or_else(|_| directory.to_path_buf());
+    match resolved.strip_prefix(&directory) {
         Ok(relative) => Some(portable(relative)),
         Err(_) => Some(portable(&resolved)),
     }
@@ -432,7 +432,7 @@ mod tests {
     fn reads_file_and_line_from_file_line_error_output() {
         let (_guard, root) = roots();
         let log = "This is pdfTeX\n./chapters/one.tex:42: Undefined control sequence.\nl.42 \\foo\n";
-        let analysis = analyze_log(log, &root, &root);
+        let analysis = analyze_log(log, &root);
         assert_eq!(analysis.diagnostics.len(), 1);
         let diagnostic = &analysis.diagnostics[0];
         assert_eq!(diagnostic.file.as_deref(), Some("chapters/one.tex"));
@@ -450,7 +450,7 @@ mod tests {
             "! Undefined control sequence.\n",
             "l.17 \\nope\n",
         );
-        let analysis = analyze_log(log, &root, &root);
+        let analysis = analyze_log(log, &root);
         assert_eq!(analysis.diagnostics.len(), 1);
         assert_eq!(
             analysis.diagnostics[0].file.as_deref(),
@@ -467,7 +467,7 @@ mod tests {
             "(./chapters/two.tex done)\n",
             "! Missing $ inserted.\n",
         );
-        let analysis = analyze_log(log, &root, &root);
+        let analysis = analyze_log(log, &root);
         assert_eq!(analysis.diagnostics[0].file.as_deref(), Some("main.tex"));
     }
 
@@ -479,7 +479,7 @@ mod tests {
             "(see the transcript file for additional information)\n",
             "! Emergency stop.\n",
         );
-        let analysis = analyze_log(log, &root, &root);
+        let analysis = analyze_log(log, &root);
         assert_eq!(analysis.diagnostics[0].file.as_deref(), Some("main.tex"));
     }
 
@@ -490,7 +490,7 @@ mod tests {
             "(./main.tex\n",
             "LaTeX Warning: Reference `fig:one' on page 1 undefined on input line 12.\n",
         );
-        let analysis = analyze_log(log, &root, &root);
+        let analysis = analyze_log(log, &root);
         assert_eq!(analysis.diagnostics.len(), 1);
         assert_eq!(analysis.diagnostics[0].severity, Severity::Warning);
         assert_eq!(analysis.diagnostics[0].line, Some(12));
@@ -504,7 +504,7 @@ mod tests {
             "Overfull \\hbox (12.0pt too wide) in paragraph at lines 10--12\n",
             "Underfull \\vbox (badness 10000) has occurred while \\output is active\n",
         );
-        assert!(analyze_log(log, &root, &root).diagnostics.is_empty());
+        assert!(analyze_log(log, &root).diagnostics.is_empty());
     }
 
     #[test]
@@ -515,7 +515,7 @@ mod tests {
             "LaTeX Warning: Citation `x' undefined on input line 3.\n",
             "./main.tex:9: Missing $ inserted.\n",
         );
-        let analysis = analyze_log(log, &root, &root);
+        let analysis = analyze_log(log, &root);
         assert_eq!(analysis.diagnostics[0].severity, Severity::Error);
         assert_eq!(
             summarize(&analysis.diagnostics).as_deref(),
@@ -527,7 +527,7 @@ mod tests {
     fn keeps_paths_outside_the_project_absolute() {
         let (_guard, root) = roots();
         let log = "/usr/local/texlive/tex/latex/base/article.cls:5: Undefined control sequence.\n";
-        let analysis = analyze_log(log, &root, &root);
+        let analysis = analyze_log(log, &root);
         assert_eq!(
             analysis.diagnostics[0].file.as_deref(),
             Some("/usr/local/texlive/tex/latex/base/article.cls")
@@ -535,16 +535,15 @@ mod tests {
     }
 
     #[test]
-    fn resolves_paths_against_the_working_directory() {
+    fn resolves_paths_against_the_directory_latexmk_ran_in() {
         let (_guard, root) = roots();
-        let working = root.join("papers");
-        std::fs::create_dir_all(working.join("chapters")).unwrap();
-        std::fs::write(working.join("chapters/one.tex"), "").unwrap();
+        std::fs::create_dir_all(root.join("chapters")).unwrap();
+        std::fs::write(root.join("chapters/one.tex"), "").unwrap();
         let log = "./chapters/one.tex:3: Missing $ inserted.\n";
-        let analysis = analyze_log(log, &root, &working);
+        let analysis = analyze_log(log, &root);
         assert_eq!(
             analysis.diagnostics[0].file.as_deref(),
-            Some("papers/chapters/one.tex")
+            Some("chapters/one.tex")
         );
     }
 
@@ -552,11 +551,11 @@ mod tests {
     fn reads_the_page_count_from_the_output_line() {
         let (_guard, root) = roots();
         let log = "Output written on main.pdf (42 pages, 1234567 bytes).\n";
-        let analysis = analyze_log(log, &root, &root);
+        let analysis = analyze_log(log, &root);
         assert_eq!(analysis.page_count, Some(42));
         assert!(!analysis.produced_no_pages);
 
-        let empty = analyze_log("No pages of output.\n", &root, &root);
+        let empty = analyze_log("No pages of output.\n", &root);
         assert!(empty.produced_no_pages);
         assert_eq!(empty.page_count, None);
     }
@@ -565,7 +564,7 @@ mod tests {
     fn identical_repeated_errors_are_reported_once() {
         let (_guard, root) = roots();
         let log = "./main.tex:4: Missing $ inserted.\n./main.tex:4: Missing $ inserted.\n";
-        assert_eq!(analyze_log(log, &root, &root).diagnostics.len(), 1);
+        assert_eq!(analyze_log(log, &root).diagnostics.len(), 1);
     }
 
     #[test]

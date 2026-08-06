@@ -1,4 +1,4 @@
-//! Resolving a [`SourceRef`] to a directory tree that can be compiled.
+//! Resolving a [`SourceRef`] to a directory that can be compiled.
 //!
 //! The working tree is compiled where it lives. A snapshot has to be
 //! materialized somewhere first, and that is the only difference between
@@ -14,17 +14,25 @@ use crate::{
     snapshot,
 };
 
+/// Where a build runs and what it compiles.
+///
+/// Two fields, because a project is a document: latexmk runs in the document's
+/// own directory and is handed the document's own name. A snapshot swaps the
+/// directory for a checkout and changes nothing else.
 #[derive(Debug)]
 pub struct PreparedSource {
-    /// Stands in for the project root: what paths are reported relative to, and
-    /// the boundary a build is not allowed to escape.
-    pub root: PathBuf,
-    /// Where latexmk runs.
-    pub working: PathBuf,
-    /// The main file, relative to `working`.
-    pub main_file: PathBuf,
+    /// Where latexmk runs, and what log paths are reported relative to.
+    pub directory: PathBuf,
+    /// The document, relative to `directory`.
+    pub file_name: String,
     /// Held for the lifetime of the build; dropping it removes a checkout.
     _checkout: Option<tempfile::TempDir>,
+}
+
+impl PreparedSource {
+    pub fn document(&self) -> PathBuf {
+        self.directory.join(&self.file_name)
+    }
 }
 
 /// Prepares a version of a project for compilation.
@@ -39,32 +47,18 @@ pub fn prepare(
     repository: &Repository,
     objects: &Path,
 ) -> AppResult<PreparedSource> {
+    let file_name = project.file_name();
     match source_ref {
         SourceRef::Worktree => {
-            let root = project.root();
-            if !root.is_dir() {
+            if !project.document().is_file() {
                 return Err(AppError::NotFound(format!(
-                    "the project folder is no longer available: {}",
-                    project.root_path
-                )));
-            }
-            let working = project.working_path();
-            if !working.is_dir() {
-                return Err(AppError::NotFound(format!(
-                    "the working directory {} no longer exists",
-                    project.working_directory
-                )));
-            }
-            if !project.main_path().is_file() {
-                return Err(AppError::NotFound(format!(
-                    "the main file {} no longer exists",
-                    project.main_file
+                    "{} is no longer there",
+                    project.document_path
                 )));
             }
             Ok(PreparedSource {
-                root,
-                working,
-                main_file: project.main_relative_to_working(),
+                directory: project.directory(),
+                file_name,
                 _checkout: None,
             })
         }
@@ -73,21 +67,16 @@ pub fn prepare(
             let checkout = tempfile::Builder::new().prefix("press-version-").tempdir()?;
             snapshot::materialize(&manifest, objects, checkout.path())?;
 
-            let root = checkout.path().to_path_buf();
-            let working = root.join(&project.working_directory);
-            let main_file = project.main_relative_to_working();
-            if !working.join(&main_file).is_file() {
-                // The project's main file was changed after this version was
+            if !checkout.path().join(&file_name).is_file() {
+                // The project's document was renamed after this version was
                 // stored, so there is nothing here to compile.
                 return Err(AppError::NotFound(format!(
-                    "this version does not contain {}",
-                    project.main_file
+                    "this version does not contain {file_name}"
                 )));
             }
             Ok(PreparedSource {
-                root,
-                working,
-                main_file,
+                directory: checkout.path().to_path_buf(),
+                file_name,
                 _checkout: Some(checkout),
             })
         }
@@ -97,8 +86,8 @@ pub fn prepare(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{DocumentKind, Engine};
-    use std::path::Path;
+    use crate::model::Engine;
+    use std::{collections::HashSet, path::Path};
 
     fn empty_store() -> (Repository, tempfile::TempDir) {
         let directory = tempfile::tempdir().unwrap();
@@ -106,14 +95,11 @@ mod tests {
         (repository, directory)
     }
 
-    fn project(root: &Path, main_file: &str, working: &str) -> Project {
+    fn project(document: &Path) -> Project {
         Project {
             id: 1,
             name: "Fixture".into(),
-            root_path: root.to_string_lossy().into_owned(),
-            main_file: main_file.into(),
-            working_directory: working.into(),
-            kind: DocumentKind::Latex,
+            document_path: document.to_string_lossy().into_owned(),
             engine: Engine::PdfLatex,
             created_at: 0,
             last_opened_at: 0,
@@ -121,26 +107,28 @@ mod tests {
     }
 
     #[test]
-    fn the_working_tree_is_compiled_in_place() {
+    fn the_working_tree_is_compiled_in_its_own_directory() {
         let directory = tempfile::tempdir().unwrap();
         let papers = directory.path().join("papers");
         std::fs::create_dir_all(&papers).unwrap();
         std::fs::write(papers.join("main.tex"), "\\documentclass{article}").unwrap();
 
-        let project = project(directory.path(), "papers/main.tex", "papers");
+        let project = project(&papers.join("main.tex"));
         let (repository, _store) = empty_store();
-        let prepared = prepare(&project, &SourceRef::Worktree, &repository, Path::new("/objects")).unwrap();
-        assert_eq!(prepared.root, directory.path());
-        assert_eq!(prepared.working, papers);
-        assert_eq!(prepared.main_file, Path::new("main.tex"));
+        let prepared =
+            prepare(&project, &SourceRef::Worktree, &repository, Path::new("/objects")).unwrap();
+        // The document's own folder, whatever sits above it.
+        assert_eq!(prepared.directory, papers);
+        assert_eq!(prepared.file_name, "main.tex");
     }
 
     #[test]
-    fn a_vanished_main_file_is_reported_before_latexmk_runs() {
+    fn a_vanished_document_is_reported_before_latexmk_runs() {
         let directory = tempfile::tempdir().unwrap();
-        let project = project(directory.path(), "main.tex", ".");
+        let project = project(&directory.path().join("main.tex"));
         let (repository, _store) = empty_store();
-        let error = prepare(&project, &SourceRef::Worktree, &repository, Path::new("/objects")).unwrap_err();
+        let error =
+            prepare(&project, &SourceRef::Worktree, &repository, Path::new("/objects")).unwrap_err();
         assert!(error.to_string().contains("main.tex"));
     }
 
@@ -155,20 +143,16 @@ mod tests {
         std::fs::write(root.join("main.tex"), "\\documentclass{article}\noriginal\n").unwrap();
         std::fs::write(root.join("chapters/one.tex"), "first draft\n").unwrap();
 
-        let repository =
-            Repository::open(&directory.path().join("press.db")).unwrap();
+        let repository = Repository::open(&directory.path().join("press.db")).unwrap();
         let stored = repository
             .upsert_project(crate::database::NewProject {
-                name: "Paper",
-                root_path: root.to_str().unwrap(),
-                main_file: "main.tex",
-                working_directory: ".",
-                kind: DocumentKind::Latex,
+                name: "paper/main.tex",
+                document_path: root.join("main.tex").to_str().unwrap(),
                 engine: Engine::PdfLatex,
             })
             .unwrap();
 
-        let capture = crate::snapshot::capture(&root, &objects, crate::snapshot::Scope::Folder).unwrap();
+        let capture = crate::snapshot::capture(&root, &objects, &HashSet::new()).unwrap();
         let snapshot = repository
             .create_snapshot(stored.id, &capture, "  First draft  ", Some("  "))
             .unwrap();
@@ -188,17 +172,20 @@ mod tests {
         )
         .unwrap();
 
-        assert_ne!(prepared.root, root, "a version never builds in the project folder");
+        assert_ne!(
+            prepared.directory, root,
+            "a version never builds in the project folder"
+        );
         assert_eq!(
-            std::fs::read_to_string(prepared.root.join("main.tex")).unwrap(),
+            std::fs::read_to_string(prepared.document()).unwrap(),
             "\\documentclass{article}\noriginal\n"
         );
         assert_eq!(
-            std::fs::read_to_string(prepared.root.join("chapters/one.tex")).unwrap(),
+            std::fs::read_to_string(prepared.directory.join("chapters/one.tex")).unwrap(),
             "first draft\n",
             "a file deleted since the snapshot still comes back"
         );
-        assert_eq!(prepared.main_file, Path::new("main.tex"));
+        assert_eq!(prepared.file_name, "main.tex");
 
         // The history is listed with the working tree pinned at the top.
         let versions = repository.list_versions(stored.id).unwrap();
@@ -209,13 +196,13 @@ mod tests {
         assert!(versions[1].artifact.is_none(), "not built yet");
 
         // The checkout goes away with the build that owns it.
-        let checkout = prepared.root.clone();
+        let checkout = prepared.directory.clone();
         drop(prepared);
         assert!(!checkout.exists());
     }
 
     #[test]
-    fn a_version_missing_the_main_file_says_so() {
+    fn a_version_missing_the_document_says_so() {
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path().join("paper");
         let objects = directory.path().join("objects");
@@ -225,16 +212,13 @@ mod tests {
         let repository = Repository::open(&directory.path().join("press.db")).unwrap();
         let stored = repository
             .upsert_project(crate::database::NewProject {
-                name: "Paper",
-                root_path: root.to_str().unwrap(),
+                name: "paper/main.tex",
                 // The snapshot below will not contain this file.
-                main_file: "main.tex",
-                working_directory: ".",
-                kind: DocumentKind::Latex,
+                document_path: root.join("main.tex").to_str().unwrap(),
                 engine: Engine::PdfLatex,
             })
             .unwrap();
-        let capture = crate::snapshot::capture(&root, &objects, crate::snapshot::Scope::Folder).unwrap();
+        let capture = crate::snapshot::capture(&root, &objects, &HashSet::new()).unwrap();
         let snapshot = repository
             .create_snapshot(stored.id, &capture, "Notes only", None)
             .unwrap();
@@ -253,7 +237,7 @@ mod tests {
     fn an_unknown_revision_is_reported_rather_than_built() {
         let directory = tempfile::tempdir().unwrap();
         std::fs::write(directory.path().join("main.tex"), "").unwrap();
-        let project = project(directory.path(), "main.tex", ".");
+        let project = project(&directory.path().join("main.tex"));
         let (repository, _store) = empty_store();
         let error = prepare(
             &project,

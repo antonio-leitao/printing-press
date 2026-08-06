@@ -296,44 +296,49 @@ pub struct ArtifactSummary {
 }
 
 /// A project as stored.
+///
+/// A project *is* a document. `document_path` is its identity and its only
+/// location data: the directory latexmk runs in, the tree the watcher follows,
+/// the files a snapshot holds and the kind of document it is all derive from it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Project {
     pub id: i64,
     pub name: String,
-    pub root_path: String,
-    pub main_file: String,
-    pub working_directory: String,
-    pub kind: DocumentKind,
+    pub document_path: String,
     pub engine: Engine,
     pub created_at: i64,
     pub last_opened_at: i64,
 }
 
 impl Project {
-    pub fn root(&self) -> PathBuf {
-        PathBuf::from(&self.root_path)
+    pub fn document(&self) -> PathBuf {
+        PathBuf::from(&self.document_path)
     }
 
-    pub fn main_path(&self) -> PathBuf {
-        self.root().join(&self.main_file)
-    }
-
-    pub fn working_path(&self) -> PathBuf {
-        self.root().join(&self.working_directory)
-    }
-
-    /// The main file relative to the working directory, which is the argument
-    /// latexmk actually receives.
-    pub fn main_relative_to_working(&self) -> PathBuf {
-        self.main_path()
-            .strip_prefix(self.working_path())
+    /// Where latexmk runs, what the watcher follows, and what a snapshot holds.
+    pub fn directory(&self) -> PathBuf {
+        self.document()
+            .parent()
             .map(Path::to_path_buf)
-            .unwrap_or_else(|_| self.main_path())
+            .unwrap_or_else(|| PathBuf::from("/"))
+    }
+
+    /// The document's own name, which is the argument latexmk receives.
+    pub fn file_name(&self) -> String {
+        Path::new(&self.document_path)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("document")
+            .to_owned()
+    }
+
+    pub fn kind(&self) -> DocumentKind {
+        DocumentKind::of(Path::new(&self.document_path))
     }
 
     pub fn job_name(&self) -> String {
-        Path::new(&self.main_file)
+        Path::new(&self.document_path)
             .file_stem()
             .and_then(|stem| stem.to_str())
             .filter(|stem| !stem.is_empty())
@@ -344,24 +349,21 @@ impl Project {
 
 /// A project plus everything the library and the viewer need about its working
 /// tree. Snapshot state is fetched separately so this payload stays small.
+///
+/// `kind`, `directory` and `file_name` are derived from the document path and
+/// sent along so the interface never has to take a path apart itself.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProjectSummary {
     #[serde(flatten)]
     pub project: Project,
+    pub kind: DocumentKind,
+    pub directory: String,
+    pub file_name: String,
     pub build: BuildState,
     pub artifact: Option<ArtifactSummary>,
-    pub path_available: bool,
-    pub main_file_available: bool,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct MainCandidate {
-    pub relative_path: String,
-    pub kind: DocumentKind,
-    pub score: i32,
-    pub reasons: Vec<String>,
+    /// The document is still where Press left it.
+    pub available: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -382,42 +384,43 @@ pub struct ToolchainReport {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct DiscoveryReport {
-    pub root_path: String,
-    pub project_name: String,
-    pub tex_file_count: usize,
-    pub candidates: Vec<MainCandidate>,
-    pub recommended_main: Option<String>,
-    pub requires_selection: bool,
-    /// Every latexmk configuration file that would be executed for the
-    /// recommended main file, relative to the project root.
-    pub latexmkrc_paths: Vec<String>,
-    pub detected_engine: Option<Engine>,
-    pub warnings: Vec<String>,
-    pub toolchain: ToolchainReport,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "camelCase")]
 pub struct EditorLaunchResult {
     pub status: String,
     pub socket_path: String,
     pub message: String,
 }
 
-/// A request from outside to open something: from the command line, or from a
-/// second launch handing its arguments to the running instance.
+/// One document a path resolved to.
 ///
-/// Exactly one of `project_id`, `report` and `message` is set: the path was
-/// already a known project, or it is a project Press could describe but has not
-/// been asked to keep, or it is neither.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+/// `project_id` is set when Press already keeps this document, which is the
+/// only difference between opening something and adding it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OpenCandidate {
+    pub document_path: String,
+    /// Suggested name, `<folder>/<file>`. Ignored when the project exists.
+    pub name: String,
+    pub kind: DocumentKind,
+    pub engine: Option<Engine>,
+    pub project_id: Option<i64>,
+    /// latexmk configuration beside this document. Executable Perl, so it is
+    /// always shown before the document is added.
+    pub latexmkrc_paths: Vec<String>,
+}
+
+/// What a path from outside resolved to: from the command line, from `:Press`,
+/// or from the library's Add button. Every one of them asks the same question,
+/// so they all get the same answer.
+///
+/// One candidate and nothing to warn about means open it. Several means ask.
+/// None means say why.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OpenRequest {
     pub path: String,
-    pub project_id: Option<i64>,
-    pub report: Option<DiscoveryReport>,
-    pub message: Option<String>,
+    pub candidates: Vec<OpenCandidate>,
+    pub warnings: Vec<String>,
+    pub toolchain: ToolchainReport,
 }
 
 /// A stored version of a project's source.
@@ -507,10 +510,6 @@ pub struct BuildUpdate {
     pub artifact: Option<ArtifactSummary>,
 }
 
-pub fn path_to_string(path: &Path) -> Option<String> {
-    path.to_str().map(ToOwned::to_owned)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -560,18 +559,19 @@ mod tests {
     /// payload shape is pinned.
     #[test]
     fn project_summaries_serialize_flat_for_the_webview() {
+        let project = Project {
+            id: 3,
+            name: "thesis/main.tex".into(),
+            document_path: "/projects/thesis/main.tex".into(),
+            engine: Engine::LuaLatex,
+            created_at: 100,
+            last_opened_at: 200,
+        };
         let summary = ProjectSummary {
-            project: Project {
-                id: 3,
-                name: "Thesis".into(),
-                root_path: "/projects/thesis".into(),
-                main_file: "main.tex".into(),
-                working_directory: ".".into(),
-                kind: DocumentKind::Latex,
-                engine: Engine::LuaLatex,
-                created_at: 100,
-                last_opened_at: 200,
-            },
+            kind: project.kind(),
+            directory: "/projects/thesis".into(),
+            file_name: project.file_name(),
+            project,
             build: BuildState {
                 source_ref: SourceRef::Worktree,
                 status: BuildStatus::Error,
@@ -596,22 +596,23 @@ mod tests {
                 built_at: 300,
                 revision: 5,
             }),
-            path_available: true,
-            main_file_available: false,
+            available: true,
         };
 
         let json = serde_json::to_value(&summary).unwrap();
         // Project fields are flattened, not nested under `project`.
         assert_eq!(json["id"], 3);
-        assert_eq!(json["rootPath"], "/projects/thesis");
-        assert_eq!(json["mainFile"], "main.tex");
-        assert_eq!(json["workingDirectory"], ".");
+        assert_eq!(json["documentPath"], "/projects/thesis/main.tex");
+        assert_eq!(json["directory"], "/projects/thesis");
+        assert_eq!(json["fileName"], "main.tex");
         assert_eq!(json["engine"], "lualatex");
         assert_eq!(json["kind"], "latex");
         assert_eq!(json["lastOpenedAt"], 200);
-        assert_eq!(json["pathAvailable"], true);
-        assert_eq!(json["mainFileAvailable"], false);
+        assert_eq!(json["available"], true);
         assert!(json.get("project").is_none());
+        // Everything a folder used to be stored for is derived now.
+        assert!(json.get("rootPath").is_none());
+        assert!(json.get("workingDirectory").is_none());
 
         assert_eq!(json["build"]["status"], "error");
         assert_eq!(json["build"]["sourceRef"], "worktree");
@@ -643,20 +644,27 @@ mod tests {
         }
     }
 
+    /// Everything a build needs comes out of the one path it is stored under.
     #[test]
-    fn main_file_is_resolved_relative_to_the_working_directory() {
+    fn a_project_derives_its_whole_location_from_the_document() {
         let project = Project {
             id: 1,
-            name: "Thesis".into(),
-            root_path: "/projects/thesis".into(),
-            main_file: "papers/main.tex".into(),
-            working_directory: "papers".into(),
-            kind: DocumentKind::Latex,
+            name: "thesis/main.tex".into(),
+            document_path: "/projects/thesis/papers/main.tex".into(),
             engine: Engine::PdfLatex,
             created_at: 0,
             last_opened_at: 0,
         };
-        assert_eq!(project.main_relative_to_working(), Path::new("main.tex"));
+        assert_eq!(project.directory(), Path::new("/projects/thesis/papers"));
+        assert_eq!(project.file_name(), "main.tex");
         assert_eq!(project.job_name(), "main");
+        assert_eq!(project.kind(), DocumentKind::Latex);
+
+        let essay = Project {
+            document_path: "/writing/essay.md".into(),
+            ..project
+        };
+        assert_eq!(essay.directory(), Path::new("/writing"));
+        assert_eq!(essay.kind(), DocumentKind::Markdown);
     }
 }

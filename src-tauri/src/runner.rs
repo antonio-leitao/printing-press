@@ -174,15 +174,15 @@ pub async fn run(
     // rather than letting `pandoc --pdf-engine` drive the whole thing, is what
     // keeps latexmk's incremental cache: pandoc invokes TeX from scratch every
     // time and throws the auxiliary files away.
-    let latex_input = match inputs.project.kind {
-        DocumentKind::Latex => inputs.source.main_file.clone(),
+    let latex_input = match inputs.project.kind() {
+        DocumentKind::Latex => PathBuf::from(&inputs.source.file_name),
         DocumentKind::Markdown => {
             match convert_markdown(&inputs, &job_name).await {
                 Ok(path) => path,
                 Err(summary) => {
                     return Ok(BuildOutcome::Failed {
                         diagnostics: vec![Diagnostic {
-                            file: Some(inputs.project.main_file.clone()),
+                            file: Some(inputs.source.file_name.clone()),
                             line: None,
                             severity: Severity::Error,
                             message: summary.clone(),
@@ -198,7 +198,7 @@ pub async fn run(
     }
 
     let mut command = Command::new(&latexmk);
-    command.current_dir(&inputs.source.working);
+    command.current_dir(&inputs.source.directory);
     command.env("PATH", augmented_path(&latexmk));
     // TeX wraps its log at `max_print_line` columns, which splits file paths
     // across lines and makes the log unparseable. Widening it is what makes
@@ -213,9 +213,10 @@ pub async fn run(
         "-synctex=1",
         "-recorder",
     ]);
-    if let Some(configuration) = latexmk_configuration(&inputs.source.root, &inputs.source.working) {
-        command.arg("-r").arg(configuration);
-    }
+    // A `.latexmkrc` beside the document is loaded by latexmk itself, because it
+    // is the directory latexmk runs in. Nothing to pass, and nothing that can
+    // execute except what the user was warned about before adding the document.
+    //
     // Owning the job name makes the output path deterministic, so a stale PDF
     // from an earlier build can never be mistaken for this one's.
     command.arg(format!("-jobname={job_name}"));
@@ -292,11 +293,11 @@ pub async fn run(
         .await
         .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
         .unwrap_or_default();
-    let analysis = diagnostics::analyze_log(&tex_log, &inputs.source.root, &inputs.source.working);
+    let analysis = diagnostics::analyze_log(&tex_log, &inputs.source.directory);
     let mut all = analysis.diagnostics;
     all.extend(diagnostics::latexmk_failures(&terminal_output));
-    if inputs.project.kind == DocumentKind::Markdown {
-        attribute_to_source(&mut all, &latex_input, &inputs.project.main_file);
+    if inputs.project.kind() == DocumentKind::Markdown {
+        attribute_to_source(&mut all, &latex_input, &inputs.source.file_name);
     }
 
     let status = status.map_err(|error| AppError::Build(format!("latexmk did not finish: {error}")))?;
@@ -343,7 +344,7 @@ pub async fn run(
 /// The line numbers have to go with them. They refer to pandoc's output, and
 /// there is no map back to the markdown, so a line number here would point
 /// somewhere plausible and wrong — worse than none at all.
-fn attribute_to_source(diagnostics: &mut [Diagnostic], generated: &Path, main_file: &str) {
+fn attribute_to_source(diagnostics: &mut [Diagnostic], generated: &Path, document: &str) {
     let generated = generated.to_string_lossy();
     let generated_name = generated
         .rsplit('/')
@@ -357,7 +358,7 @@ fn attribute_to_source(diagnostics: &mut [Diagnostic], generated: &Path, main_fi
         // The log may name it absolutely or by bare filename depending on how
         // TeX happened to print it.
         if file == generated || file.ends_with(&generated_name) {
-            diagnostic.file = Some(main_file.to_owned());
+            diagnostic.file = Some(document.to_owned());
             diagnostic.line = None;
         }
     }
@@ -370,14 +371,14 @@ fn attribute_to_source(diagnostics: &mut [Diagnostic], generated: &Path, main_fi
 async fn convert_markdown(inputs: &BuildInputs<'_>, job_name: &str) -> Result<PathBuf, String> {
     let pandoc = resolve_executable("pandoc")
         .ok_or_else(|| "pandoc was not found. Install pandoc to compile markdown.".to_owned())?;
-    let source = inputs.source.working.join(&inputs.source.main_file);
+    let source = inputs.source.document();
     let generated = inputs.work_directory.join(format!("{job_name}.tex"));
     // Written beside the target first: latexmk must never see a half-written
     // file, and comparing before replacing is what preserves its cache.
     let staging = inputs.work_directory.join(format!("{job_name}.tex.next"));
 
     let mut command = Command::new(&pandoc);
-    command.current_dir(&inputs.source.working);
+    command.current_dir(&inputs.source.directory);
     command.env("PATH", augmented_path(&pandoc));
     command.args(["--from", "markdown", "--to", "latex"]);
     // Standalone gives a full document rather than a fragment, and applies the
@@ -447,18 +448,6 @@ async fn publish(
         page_count,
         byte_size: byte_size as i64,
     })
-}
-
-/// A `.latexmkrc` is executable Perl. latexmk loads one from its working
-/// directory on its own; this only adds the project root's when the build runs
-/// in a subdirectory, so the behaviour matches what the user was warned about.
-fn latexmk_configuration(root: &Path, working: &Path) -> Option<PathBuf> {
-    if root == working {
-        return None;
-    }
-    [root.join(".latexmkrc"), root.join("latexmkrc")]
-        .into_iter()
-        .find(|path| path.is_file())
 }
 
 fn verify_pdf(path: &Path) -> Result<(), String> {
@@ -580,7 +569,7 @@ impl Pump {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{DocumentKind, Engine, SourceRef};
+    use crate::model::{Engine, SourceRef};
 
     fn pdf_bytes() -> &'static [u8] {
         b"%PDF-1.7\n1 0 obj\n<<>>\nendobj\ntrailer\n%%EOF\n"
@@ -599,21 +588,6 @@ mod tests {
         assert!(verify_pdf(&good).is_ok());
         assert!(verify_pdf(&truncated).is_err());
         assert!(verify_pdf(&wrong).is_err());
-    }
-
-    #[test]
-    fn the_root_configuration_is_only_added_from_a_subdirectory() {
-        let directory = tempfile::tempdir().unwrap();
-        let root = directory.path();
-        let working = root.join("papers");
-        std::fs::create_dir_all(&working).unwrap();
-        std::fs::write(root.join(".latexmkrc"), "# perl").unwrap();
-
-        assert!(latexmk_configuration(root, root).is_none());
-        assert_eq!(
-            latexmk_configuration(root, &working),
-            Some(root.join(".latexmkrc"))
-        );
     }
 
     #[test]
@@ -664,14 +638,11 @@ mod tests {
             .expect("cancellation resolved");
     }
 
-    fn fixture_project(root: &Path) -> Project {
+    fn fixture_project(document: &Path) -> Project {
         Project {
             id: 1,
             name: "Fixture".into(),
-            root_path: root.to_string_lossy().into_owned(),
-            main_file: "main.tex".into(),
-            working_directory: ".".into(),
-            kind: DocumentKind::Latex,
+            document_path: document.to_string_lossy().into_owned(),
             engine: Engine::PdfLatex,
             created_at: 0,
             last_opened_at: 0,
@@ -696,7 +667,7 @@ mod tests {
         .unwrap();
         std::fs::write(root.join("chapter.tex"), "Press works.\n").unwrap();
 
-        let project = fixture_project(&root);
+        let project = fixture_project(&root.join("main.tex"));
         let store = tempfile::tempdir().unwrap();
         let repository = crate::database::Repository::open(&store.path().join("press.db")).unwrap();
         let source = crate::sources::prepare(
@@ -760,9 +731,7 @@ mod tests {
         )
         .unwrap();
 
-        let mut project = fixture_project(&root);
-        project.main_file = "essay.md".into();
-        project.kind = DocumentKind::Markdown;
+        let project = fixture_project(&root.join("essay.md"));
         let source = crate::sources::prepare(
             &project,
             &SourceRef::Worktree,
@@ -886,7 +855,7 @@ mod tests {
         )
         .unwrap();
 
-        let project = fixture_project(&root);
+        let project = fixture_project(&root.join("main.tex"));
         let store = tempfile::tempdir().unwrap();
         let repository = crate::database::Repository::open(&store.path().join("press.db")).unwrap();
         let source = crate::sources::prepare(

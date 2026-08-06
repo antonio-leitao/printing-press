@@ -1,15 +1,19 @@
-use std::{path::PathBuf, sync::Arc};
+use std::{
+    collections::HashSet,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
-use tauri::{AppHandle, State};
+use tauri::{AppHandle, Manager, State};
 
 use crate::{
     AppState,
     database::{NewProject, ProjectEdit},
-    discovery, editor,
+    documents, editor,
     error::{AppError, AppResult},
     model::{
-        DiscoveryReport, DocumentKind, EditorLaunchResult, Engine, OpenRequest, PageSize,
-        ProjectSummary, SearchHit, SnapshotSummary, SourceRef, TextBox, VersionSummary,
+        DocumentKind, EditorLaunchResult, Engine, OpenRequest, PageSize, ProjectSummary, SearchHit,
+        SnapshotSummary, SourceRef, TextBox, VersionSummary,
     },
 };
 
@@ -41,93 +45,55 @@ pub async fn list_projects(state: State<'_, AppState>) -> AppResult<Vec<ProjectS
     blocking(move || repository.list_projects()).await
 }
 
+/// Resolves a path to the documents it means.
+///
+/// The one way in: the Add button, `:Press`, and `press <path>` all ask this,
+/// because they are all the same question.
 #[tauri::command]
-pub async fn inspect_project(root_path: String) -> AppResult<DiscoveryReport> {
-    blocking(move || discovery::inspect(&PathBuf::from(root_path))).await
+pub async fn resolve_path(path: String, state: State<'_, AppState>) -> AppResult<OpenRequest> {
+    let repository = Arc::clone(&state.repository);
+    blocking(move || documents::resolve(&PathBuf::from(path), &repository)).await
 }
 
-/// Inspects one named file rather than a folder. Picking a file says "this
-/// document, in this folder" — the only way to add markdown, and a way to add a
-/// single LaTeX file without discovery ranging over its neighbours.
-#[tauri::command]
-pub async fn inspect_document(file_path: String) -> AppResult<DiscoveryReport> {
-    blocking(move || discovery::document_report(&PathBuf::from(file_path))).await
-}
-
+/// Keeps one document as a project. Adding a document Press already has just
+/// updates it, so this is also how a candidate is re-opened.
 #[tauri::command]
 pub async fn add_project(
-    root_path: String,
-    main_file: String,
+    document_path: String,
+    name: Option<String>,
     engine_override: Option<String>,
     state: State<'_, AppState>,
 ) -> AppResult<ProjectSummary> {
     let repository = Arc::clone(&state.repository);
     let requested = engine(engine_override)?;
     let id = blocking(move || {
-        let root = PathBuf::from(&root_path);
-        if !root.is_dir() {
-            return Err(AppError::InvalidInput(format!(
-                "{root_path} is not a directory"
-            )));
-        }
-        let root = root.canonicalize()?;
-        let canonical_root = root
+        let document = documents::validate(&PathBuf::from(&document_path))?;
+        let canonical = document
             .to_str()
-            .ok_or_else(|| AppError::InvalidInput("project path is not valid UTF-8".into()))?;
+            .ok_or_else(|| AppError::InvalidInput("that path is not valid UTF-8".into()))?;
         if crate::toolchain::resolve_executable("latexmk").is_none() {
             return Err(AppError::ToolUnavailable(
                 "latexmk was not found. Install a TeX distribution or add latexmk to PATH.".into(),
             ));
         }
-        let main = discovery::validate_main(&root, &main_file)?;
-        let kind = DocumentKind::of(&main);
         // Markdown reaches latexmk through pandoc, so both have to be present.
-        if kind == DocumentKind::Markdown
+        if DocumentKind::of(&document) == DocumentKind::Markdown
             && crate::toolchain::resolve_executable("pandoc").is_none()
         {
             return Err(AppError::ToolUnavailable(
                 "pandoc was not found. Install pandoc to compile markdown.".into(),
             ));
         }
-        let engine = match requested {
-            Some(engine) => engine,
-            // A markdown document says nothing about the TeX engine; pandoc's
-            // default output compiles with any of them.
-            None if kind == DocumentKind::Markdown => Engine::PdfLatex,
-            None => discovery::detect_engine(&main)?,
-        };
-        // A folder can hold several documents, and they cannot all be called
-        // after it. Markdown is always one file, so it takes the file's name;
-        // LaTeX keeps the folder's, which is what a paper is usually called.
-        let folder_name = root
-            .file_name()
-            .and_then(|value| value.to_str())
-            .unwrap_or("LaTeX project");
-        let project_name = match kind {
-            DocumentKind::Markdown => main
-                .file_stem()
-                .and_then(|value| value.to_str())
-                .unwrap_or(folder_name),
-            DocumentKind::Latex => folder_name,
-        };
-        let working = main
-            .parent()
-            .and_then(|parent| parent.strip_prefix(&root).ok())
-            .map(|relative| {
-                if relative.as_os_str().is_empty() {
-                    ".".to_owned()
-                } else {
-                    relative.to_string_lossy().into_owned()
-                }
-            })
-            .unwrap_or_else(|| ".".to_owned());
+        // A markdown document says nothing about the TeX engine, and pandoc's
+        // output compiles with any of them, so pdflatex is the honest default.
+        let engine = requested
+            .or_else(|| documents::detect_engine(&document))
+            .unwrap_or(Engine::PdfLatex);
+        let suggested = name.unwrap_or_else(|| canonical.to_owned());
         Ok(repository
             .upsert_project(NewProject {
-                name: project_name,
-                root_path: canonical_root,
-                main_file: &main_file,
-                working_directory: &working,
-                kind,
+                name: &suggested,
+                document_path: canonical,
                 engine,
             })?
             .id)
@@ -148,13 +114,7 @@ pub async fn open_project(
     let repository = Arc::clone(&state.repository);
     let project = blocking(move || {
         let project = repository.get_project(project_id)?;
-        if !project.root().is_dir() {
-            return Err(AppError::NotFound(format!(
-                "the project folder is no longer available: {}",
-                project.root_path
-            )));
-        }
-        discovery::validate_main(&project.root(), &project.main_file)?;
+        documents::validate(&project.document())?;
         Ok(project)
     })
     .await?;
@@ -207,41 +167,25 @@ pub async fn rename_project(
     .await
 }
 
-/// Changes the main file or the engine. Both invalidate every cached PDF, so the
-/// discarded ones are deleted here.
+/// Changes the engine, which invalidates every cached PDF, so the discarded ones
+/// are deleted here.
+///
+/// The document itself is not settable: a different document is a different
+/// project, which is what makes it possible to keep several in one folder.
 #[tauri::command]
-pub async fn update_project_settings(
+pub async fn set_project_engine(
     project_id: i64,
-    main_file: Option<String>,
-    engine_override: Option<String>,
+    engine_override: String,
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> AppResult<ProjectSummary> {
-    let requested = engine(engine_override)?;
+    let requested = engine(Some(engine_override))?;
     let repository = Arc::clone(&state.repository);
-    let main_file_for_check = main_file.clone();
     let (summary, discarded) = blocking(move || {
-        let project = repository.get_project(project_id)?;
-        let working = match &main_file_for_check {
-            Some(main_file) => {
-                let root = project.root().canonicalize()?;
-                let main = discovery::validate_main(&root, main_file)?;
-                let relative = main
-                    .parent()
-                    .and_then(|parent| parent.strip_prefix(&root).ok())
-                    .filter(|relative| !relative.as_os_str().is_empty())
-                    .map(|relative| relative.to_string_lossy().into_owned())
-                    .unwrap_or_else(|| ".".to_owned());
-                Some(relative)
-            }
-            None => None,
-        };
         let (_, discarded) = repository.update_project(
             project_id,
             ProjectEdit {
                 name: None,
-                main_file,
-                working_directory: working,
                 engine: requested,
             },
         )?;
@@ -289,15 +233,14 @@ pub async fn create_snapshot(
     let objects = state.objects_root.clone();
     let snapshot = blocking(move || {
         let project = repository.get_project(project_id)?;
-        // A markdown project is one document sharing a folder with others, so
-        // its history holds that document and the assets, not the neighbours.
-        let scope = match project.kind {
-            DocumentKind::Markdown => crate::snapshot::Scope::Document {
-                main_file: &project.main_file,
-            },
-            DocumentKind::Latex => crate::snapshot::Scope::Folder,
-        };
-        let capture = crate::snapshot::capture(&project.root(), &objects, scope)?;
+        let directory = project.directory();
+        // A document's history holds its directory minus the documents that are
+        // other projects: their drafts are not this document's versions.
+        let foreign = repository
+            .foreign_documents(project_id, &directory)?
+            .into_iter()
+            .collect::<HashSet<_>>();
+        let capture = crate::snapshot::capture(&directory, &objects, &foreign)?;
         repository.create_snapshot(project_id, &capture, &title, body.as_deref())
     })
     .await?;
@@ -431,6 +374,84 @@ pub async fn search_document(
             height: hit.height,
         })
         .collect())
+}
+
+/// Copies a built PDF into the user's Downloads folder, and says where it went.
+///
+/// The only thing Press writes outside its own storage, and only when asked for
+/// it by name. The source is resolved through the same check the viewer uses, so
+/// a PDF outside Press-managed storage is refused here too.
+#[tauri::command]
+pub async fn export_artifact(
+    artifact_id: i64,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> AppResult<String> {
+    let source = crate::protocol::resolve(&app, artifact_id).await?;
+
+    let repository = Arc::clone(&state.repository);
+    let stem = blocking(move || {
+        let stored = repository.artifact(artifact_id)?;
+        let project = repository.get_project(stored.summary.project_id)?;
+        // The working tree is the document itself; a snapshot carries its title
+        // so several exported versions do not collide.
+        let title = match &stored.summary.source_ref {
+            SourceRef::Worktree => None,
+            reference => repository
+                .list_versions(project.id)?
+                .into_iter()
+                .find(|version| &version.source_ref == reference)
+                .map(|version| version.title),
+        };
+        Ok(match title.as_deref().map(file_safe) {
+            Some(title) => format!("{}-{title}", project.job_name()),
+            None => project.job_name(),
+        })
+    })
+    .await?;
+
+    let downloads = app.path().download_dir().map_err(|error| {
+        AppError::NotFound(format!("Press could not find your Downloads folder: {error}"))
+    })?;
+    let destination = unused_path(&downloads, &stem);
+    tokio::fs::copy(&source, &destination).await.map_err(|error| {
+        AppError::Io(std::io::Error::new(
+            error.kind(),
+            format!("could not write to Downloads: {error}"),
+        ))
+    })?;
+    Ok(destination.to_string_lossy().into_owned())
+}
+
+/// A version title is free text, so it is reduced to something that survives
+/// being a file name on any platform.
+fn file_safe(title: &str) -> String {
+    let mut out = String::new();
+    for character in title.chars().take(60) {
+        if character.is_alphanumeric() {
+            out.push(character);
+        } else if !out.ends_with('-') && !out.is_empty() {
+            out.push('-');
+        }
+    }
+    let trimmed = out.trim_end_matches('-');
+    if trimmed.is_empty() {
+        "version".to_owned()
+    } else {
+        trimmed.to_owned()
+    }
+}
+
+/// Never overwrites: exporting the same version twice leaves both files.
+fn unused_path(directory: &Path, stem: &str) -> PathBuf {
+    let first = directory.join(format!("{stem}.pdf"));
+    if !first.exists() {
+        return first;
+    }
+    (2..)
+        .map(|suffix| directory.join(format!("{stem}-{suffix}.pdf")))
+        .find(|candidate| !candidate.exists())
+        .unwrap_or(first)
 }
 
 #[tauri::command]

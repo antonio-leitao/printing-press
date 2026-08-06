@@ -1,4 +1,5 @@
 use std::{
+    collections::HashMap,
     path::{Path, PathBuf},
     sync::Mutex,
     time::{SystemTime, UNIX_EPOCH},
@@ -9,8 +10,8 @@ use rusqlite::{Connection, OptionalExtension, Row, Transaction, params};
 use crate::{
     error::{AppError, AppResult},
     model::{
-        ArtifactSummary, BuildState, Diagnostic, DocumentKind, Engine, Project, ProjectSummary,
-        SnapshotSummary, SourceRef, VersionSummary,
+        ArtifactSummary, BuildState, Diagnostic, Engine, Project, ProjectSummary, SnapshotSummary,
+        SourceRef, VersionSummary,
     },
 };
 
@@ -22,18 +23,17 @@ pub struct Repository {
 
 pub struct NewProject<'a> {
     pub name: &'a str,
-    pub root_path: &'a str,
-    pub main_file: &'a str,
-    pub working_directory: &'a str,
-    pub kind: DocumentKind,
+    /// Absolute, canonical, and the project's identity.
+    pub document_path: &'a str,
     pub engine: Engine,
 }
 
+/// What a project has that its document does not already say. Everything else —
+/// the directory, the file name, whether it is markdown — is derived, so there
+/// is nothing else here to edit.
 #[derive(Default)]
 pub struct ProjectEdit {
     pub name: Option<String>,
-    pub main_file: Option<String>,
-    pub working_directory: Option<String>,
     pub engine: Option<Engine>,
 }
 
@@ -44,13 +44,6 @@ pub struct NewArtifact<'a> {
     pub pdf_path: &'a Path,
     pub page_count: Option<i64>,
     pub byte_size: i64,
-}
-
-pub struct ProjectLocation {
-    pub id: i64,
-    pub root_path: String,
-    pub main_file: String,
-    pub last_opened_at: i64,
 }
 
 /// A stored artifact plus the on-disk location, which never leaves the backend.
@@ -122,8 +115,7 @@ impl Repository {
         let connection = self.lock()?;
         connection
             .query_row(
-                "SELECT id, name, root_path, main_file, working_directory, kind, engine,
-                        created_at, last_opened_at
+                "SELECT id, name, document_path, engine, created_at, last_opened_at
                  FROM projects WHERE id = ?1",
                 [id],
                 map_project,
@@ -136,31 +128,24 @@ impl Repository {
         let now = unix_timestamp();
         let id = {
             let connection = self.lock()?;
-            // A re-added project keeps its stored name: the folder name is only a
-            // default for first insert, and renaming is a user action.
+            // A re-added project keeps its stored name: the suggested one is only
+            // a default for first insert, and renaming is a user action.
             connection.execute(
-                "INSERT INTO projects (
-                    name, root_path, main_file, working_directory, kind, engine,
-                    created_at, last_opened_at
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7)
-                 ON CONFLICT(root_path, main_file) DO UPDATE SET
-                    working_directory = excluded.working_directory,
-                    kind = excluded.kind,
+                "INSERT INTO projects (name, document_path, engine, created_at, last_opened_at)
+                 VALUES (?1, ?2, ?3, ?4, ?4)
+                 ON CONFLICT(document_path) DO UPDATE SET
                     engine = excluded.engine,
                     last_opened_at = excluded.last_opened_at",
                 params![
                     project.name,
-                    project.root_path,
-                    project.main_file,
-                    project.working_directory,
-                    project.kind.as_token(),
+                    project.document_path,
                     project.engine.as_token(),
                     now
                 ],
             )?;
             connection.query_row(
-                "SELECT id FROM projects WHERE root_path = ?1 AND main_file = ?2",
-                params![project.root_path, project.main_file],
+                "SELECT id FROM projects WHERE document_path = ?1",
+                [project.document_path],
                 |row| row.get::<_, i64>(0),
             )?
         };
@@ -186,25 +171,13 @@ impl Repository {
                     params![id, name],
                 )?;
             }
-            if let Some(main_file) = edit.main_file.as_deref() {
-                transaction.execute(
-                    "UPDATE projects SET main_file = ?2 WHERE id = ?1",
-                    params![id, main_file],
-                )?;
-            }
-            if let Some(working) = edit.working_directory.as_deref() {
-                transaction.execute(
-                    "UPDATE projects SET working_directory = ?2 WHERE id = ?1",
-                    params![id, working],
-                )?;
-            }
             if let Some(engine) = edit.engine {
                 transaction.execute(
                     "UPDATE projects SET engine = ?2 WHERE id = ?1",
                     params![id, engine.as_token()],
                 )?;
             }
-            let discarded = if engine_changed || edit.main_file.is_some() {
+            let discarded = if engine_changed {
                 let paths = artifact_paths_for_project(&transaction, id)?;
                 transaction.execute("DELETE FROM artifacts WHERE project_id = ?1", [id])?;
                 transaction.execute("DELETE FROM build_states WHERE project_id = ?1", [id])?;
@@ -660,22 +633,39 @@ impl Repository {
             .map_err(Into::into)
     }
 
-    /// Enough of each project to work out which one a path belongs to: the
-    /// folder, the document inside it, and how recently it was opened.
-    pub fn project_locations(&self) -> AppResult<Vec<ProjectLocation>> {
+    /// Every document Press keeps, by its path. Resolving a path to a project is
+    /// an exact lookup now, not a search: the document *is* the project.
+    pub fn project_documents(&self) -> AppResult<HashMap<PathBuf, i64>> {
         let connection = self.lock()?;
-        let mut statement = connection
-            .prepare("SELECT id, root_path, main_file, last_opened_at FROM projects")?;
+        let mut statement = connection.prepare("SELECT id, document_path FROM projects")?;
         let rows = statement.query_map([], |row| {
-            Ok(ProjectLocation {
-                id: row.get(0)?,
-                root_path: row.get(1)?,
-                main_file: row.get(2)?,
-                last_opened_at: row.get(3)?,
-            })
+            Ok((PathBuf::from(row.get::<_, String>(1)?), row.get::<_, i64>(0)?))
         })?;
-        rows.collect::<Result<Vec<_>, rusqlite::Error>>()
+        rows.collect::<Result<HashMap<_, _>, rusqlite::Error>>()
             .map_err(AppError::from)
+    }
+
+    /// Documents belonging to *other* projects at or under `directory`, relative
+    /// to it and with forward slashes.
+    ///
+    /// This is the whole of "which files are not mine". The watcher uses it so a
+    /// sibling's save does not rebuild this document, and the snapshot store uses
+    /// it so a sibling's draft does not land in this document's history. One
+    /// answer, one query, so the two can never disagree.
+    pub fn foreign_documents(&self, project_id: i64, directory: &Path) -> AppResult<Vec<String>> {
+        let connection = self.lock()?;
+        let mut statement =
+            connection.prepare("SELECT document_path FROM projects WHERE id <> ?1")?;
+        let rows = statement.query_map([project_id], |row| row.get::<_, String>(0))?;
+        Ok(rows
+            .filter_map(Result::ok)
+            .filter_map(|path| {
+                Path::new(&path)
+                    .strip_prefix(directory)
+                    .ok()
+                    .map(portable_path)
+            })
+            .collect())
     }
 
     pub fn project_ids(&self) -> AppResult<Vec<i64>> {
@@ -693,8 +683,7 @@ impl Repository {
 }
 
 const SUMMARY_QUERY_BASE: &str = "
-    SELECT p.id, p.name, p.root_path, p.main_file, p.working_directory, p.kind, p.engine,
-           p.created_at, p.last_opened_at,
+    SELECT p.id, p.name, p.document_path, p.engine, p.created_at, p.last_opened_at,
            b.source_ref AS state_source_ref, b.status, b.started_at, b.finished_at,
            b.duration_ms, b.error_summary, b.diagnostics,
            a.id AS artifact_id, a.project_id AS artifact_project_id,
@@ -744,15 +733,11 @@ fn map_snapshot(row: &Row<'_>) -> rusqlite::Result<SnapshotSummary> {
 
 fn map_project(row: &Row<'_>) -> rusqlite::Result<AppResult<Project>> {
     let engine: String = row.get("engine")?;
-    let kind: String = row.get("kind")?;
     Ok((|| {
         Ok(Project {
             id: row_value(row, "id")?,
             name: row_value(row, "name")?,
-            root_path: row_value(row, "root_path")?,
-            main_file: row_value(row, "main_file")?,
-            working_directory: row_value(row, "working_directory")?,
-            kind: kind.parse()?,
+            document_path: row_value(row, "document_path")?,
             engine: engine.parse()?,
             created_at: row_value(row, "created_at")?,
             last_opened_at: row_value(row, "last_opened_at")?,
@@ -863,21 +848,29 @@ fn map_summary(row: &Row<'_>) -> rusqlite::Result<AppResult<ProjectSummary>> {
             }),
             _ => None,
         };
-        let root = Path::new(&project.root_path);
-        let path_available = root.is_dir();
-        let main_file_available = path_available && root.join(&project.main_file).is_file();
         Ok(ProjectSummary {
+            kind: project.kind(),
+            directory: project.directory().to_string_lossy().into_owned(),
+            file_name: project.file_name(),
+            available: project.document().is_file(),
             project,
             build,
             artifact,
-            path_available,
-            main_file_available,
         })
     })())
 }
 
 fn row_value<T: rusqlite::types::FromSql>(row: &Row<'_>, name: &str) -> AppResult<T> {
     row.get(name).map_err(AppError::from)
+}
+
+/// Forward slashes regardless of platform, so a relative path means the same
+/// thing to the watcher, the snapshot manifest and the interface.
+fn portable_path(path: &Path) -> String {
+    path.components()
+        .filter_map(|component| component.as_os_str().to_str())
+        .collect::<Vec<_>>()
+        .join("/")
 }
 
 fn unix_timestamp() -> i64 {
@@ -893,18 +886,14 @@ const SCHEMA: &str = "
     CREATE TABLE IF NOT EXISTS projects (
         id INTEGER PRIMARY KEY,
         name TEXT NOT NULL,
-        root_path TEXT NOT NULL,
-        main_file TEXT NOT NULL,
-        working_directory TEXT NOT NULL,
-        kind TEXT NOT NULL DEFAULT 'latex',
+        -- A project is a document. This path is its identity, and its only
+        -- location data: the directory latexmk runs in, the tree the watcher
+        -- follows, the files a snapshot holds and whether it is markdown are
+        -- all derived from it. Nothing needs a stored folder.
+        document_path TEXT NOT NULL UNIQUE,
         engine TEXT NOT NULL DEFAULT 'pdflatex',
         created_at INTEGER NOT NULL,
-        last_opened_at INTEGER NOT NULL,
-        -- A project is a document, not a folder. Several documents can share a
-        -- directory: two markdown essays side by side, or a paper and its
-        -- poster. Keying on the folder alone made the second one overwrite the
-        -- first.
-        UNIQUE(root_path, main_file)
+        last_opened_at INTEGER NOT NULL
     );
     CREATE INDEX IF NOT EXISTS projects_last_opened_idx
         ON projects(last_opened_at DESC);
@@ -969,7 +958,7 @@ const SCHEMA: &str = "
 /// There is no migration path by design: Press has one user, and a stale
 /// database is cheaper to delete than to migrate. The version exists so that a
 /// mismatch says so plainly instead of failing later with a confusing SQL error.
-const SCHEMA_VERSION: i32 = 3;
+const SCHEMA_VERSION: i32 = 4;
 
 fn initialize(connection: &Connection) -> AppResult<()> {
     connection.execute_batch(SCHEMA)?;
@@ -1035,7 +1024,7 @@ mod tests {
         let root = project_fixture(directory.path(), "thesis");
         {
             let database = Repository::open(&database_path).unwrap();
-            add(&database, &root);
+            add(&database, &root.join("main.tex"));
         }
         let reopened = Repository::open(&database_path).unwrap();
         assert_eq!(reopened.list_projects().unwrap().len(), 1);
@@ -1050,7 +1039,7 @@ mod tests {
         let root = project_fixture(directory.path(), "thesis");
         {
             let stale = Repository::open(&database_path).unwrap();
-            add(&stale, &root);
+            add(&stale, &root.join("main.tex"));
             let connection = Connection::open(&database_path).unwrap();
             connection
                 .pragma_update(None, "user_version", SCHEMA_VERSION + 1)
@@ -1124,14 +1113,11 @@ mod tests {
         root
     }
 
-    fn add(repository: &Repository, root: &Path) -> Project {
+    fn add(repository: &Repository, document: &Path) -> Project {
         repository
             .upsert_project(NewProject {
                 name: "Thesis",
-                root_path: root.to_str().unwrap(),
-                main_file: "main.tex",
-                working_directory: ".",
-                kind: DocumentKind::Latex,
+                document_path: document.to_str().unwrap(),
                 engine: Engine::PdfLatex,
             })
             .unwrap()
@@ -1143,14 +1129,11 @@ mod tests {
         let database = Repository::open(&directory.path().join("press.db")).unwrap();
         let root = project_fixture(directory.path(), "thesis");
 
-        let first = add(&database, &root);
+        let first = add(&database, &root.join("main.tex"));
         let again = database
             .upsert_project(NewProject {
                 name: "Ignored",
-                root_path: root.to_str().unwrap(),
-                main_file: "main.tex",
-                working_directory: ".",
-                kind: DocumentKind::Latex,
+                document_path: root.join("main.tex").to_str().unwrap(),
                 engine: Engine::XeLatex,
             })
             .unwrap();
@@ -1174,30 +1157,26 @@ mod tests {
 
         let essay = database
             .upsert_project(NewProject {
-                name: "essay",
-                root_path: root.to_str().unwrap(),
-                main_file: "essay.md",
-                working_directory: ".",
-                kind: DocumentKind::Markdown,
+                name: "writing/essay.md",
+                document_path: root.join("essay.md").to_str().unwrap(),
                 engine: Engine::PdfLatex,
             })
             .unwrap();
         let talk = database
             .upsert_project(NewProject {
-                name: "talk",
-                root_path: root.to_str().unwrap(),
-                main_file: "talk.md",
-                working_directory: ".",
-                kind: DocumentKind::Markdown,
+                name: "writing/talk.md",
+                document_path: root.join("talk.md").to_str().unwrap(),
                 engine: Engine::PdfLatex,
             })
             .unwrap();
 
         assert_ne!(essay.id, talk.id);
         assert_eq!(database.list_projects().unwrap().len(), 2);
-        // Each keeps its own document and its own name.
-        assert_eq!(database.get_project(essay.id).unwrap().main_file, "essay.md");
-        assert_eq!(database.get_project(talk.id).unwrap().name, "talk");
+        // Each keeps its own document, and derives the rest from it.
+        let stored = database.get_project(essay.id).unwrap();
+        assert_eq!(stored.file_name(), "essay.md");
+        assert_eq!(stored.directory(), root);
+        assert_eq!(database.get_project(talk.id).unwrap().name, "writing/talk.md");
 
         // Deleting one leaves the other alone.
         database.delete_project(essay.id).unwrap();
@@ -1205,12 +1184,55 @@ mod tests {
         assert!(database.get_project(talk.id).is_ok());
     }
 
+    /// The one query that answers "which files here are not mine", for both the
+    /// watcher and the snapshot store.
+    #[test]
+    fn a_project_can_name_the_documents_that_are_not_its_own() {
+        let directory = tempfile::tempdir().unwrap();
+        let database = Repository::open(&directory.path().join("press.db")).unwrap();
+        let root = project_fixture(directory.path(), "paper");
+
+        let paper = add(&database, &root.join("main.tex"));
+        for relative in ["supplementary.tex", "talks/talk.md"] {
+            let path = root.join(relative);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, "content").unwrap();
+            database
+                .upsert_project(NewProject {
+                    name: relative,
+                    document_path: path.to_str().unwrap(),
+                    engine: Engine::PdfLatex,
+                })
+                .unwrap();
+        }
+        // A project somewhere else entirely is not this directory's business.
+        let elsewhere = project_fixture(directory.path(), "other");
+        add(&database, &elsewhere.join("main.tex"));
+
+        let mut foreign = database.foreign_documents(paper.id, &root).unwrap();
+        foreign.sort();
+        // Relative, forward-slashed, and never the project's own document.
+        assert_eq!(foreign, ["supplementary.tex", "talks/talk.md"]);
+    }
+
+    #[test]
+    fn every_document_is_findable_by_its_path() {
+        let directory = tempfile::tempdir().unwrap();
+        let database = Repository::open(&directory.path().join("press.db")).unwrap();
+        let root = project_fixture(directory.path(), "thesis");
+        let project = add(&database, &root.join("main.tex"));
+
+        let documents = database.project_documents().unwrap();
+        assert_eq!(documents.get(&root.join("main.tex")), Some(&project.id));
+        assert_eq!(documents.get(&root.join("other.tex")), None);
+    }
+
     #[test]
     fn artifacts_are_cached_per_version_and_engine() {
         let directory = tempfile::tempdir().unwrap();
         let database = Repository::open(&directory.path().join("press.db")).unwrap();
         let root = project_fixture(directory.path(), "thesis");
-        let project = add(&database, &root);
+        let project = add(&database, &root.join("main.tex"));
         let snapshot = SourceRef::Snapshot("abc123".into());
 
         let first = directory.path().join("build-1.pdf");
@@ -1276,7 +1298,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let database = Repository::open(&directory.path().join("press.db")).unwrap();
         let root = project_fixture(directory.path(), "thesis");
-        let project = add(&database, &root);
+        let project = add(&database, &root.join("main.tex"));
         let pdf = directory.path().join("build-1.pdf");
         std::fs::write(&pdf, b"%PDF-1.7").unwrap();
         database
@@ -1309,7 +1331,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let database = Repository::open(&directory.path().join("press.db")).unwrap();
         let root = project_fixture(directory.path(), "thesis");
-        let project = add(&database, &root);
+        let project = add(&database, &root.join("main.tex"));
         let pdf = directory.path().join("build-1.pdf");
         std::fs::write(&pdf, b"%PDF-1.7").unwrap();
         database
@@ -1342,7 +1364,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let database = Repository::open(&directory.path().join("press.db")).unwrap();
         let root = project_fixture(directory.path(), "thesis");
-        let project = add(&database, &root);
+        let project = add(&database, &root.join("main.tex"));
         let pdf = directory.path().join("build-1.pdf");
         std::fs::write(&pdf, b"%PDF-1.7").unwrap();
         database
@@ -1368,7 +1390,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let database = Repository::open(&directory.path().join("press.db")).unwrap();
         let root = project_fixture(directory.path(), "thesis");
-        let project = add(&database, &root);
+        let project = add(&database, &root.join("main.tex"));
         let snapshot = SourceRef::Snapshot("abc123".into());
 
         assert_eq!(
@@ -1433,7 +1455,7 @@ mod tests {
         let root = project_fixture(directory.path(), "thesis");
         let project_id = {
             let database = Repository::open(&database_path).unwrap();
-            let project = add(&database, &root);
+            let project = add(&database, &root.join("main.tex"));
             database
                 .set_build_state(
                     project.id,

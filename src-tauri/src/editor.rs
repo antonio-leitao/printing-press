@@ -62,7 +62,7 @@ pub fn launch(project: &Project) -> AppResult<EditorLaunchResult> {
         AppError::ToolUnavailable("Neovim was not found. Install nvim or add it to PATH.".into())
     })?;
     let socket = socket_path(project);
-    let main = project.main_path();
+    let document = project.document();
 
     // A running Neovim for this project just gets told to open the file.
     if socket_is_live(&socket) {
@@ -70,7 +70,7 @@ pub fn launch(project: &Project) -> AppResult<EditorLaunchResult> {
             .arg("--server")
             .arg(&socket)
             .arg("--remote")
-            .arg(&main)
+            .arg(&document)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -93,7 +93,7 @@ pub fn launch(project: &Project) -> AppResult<EditorLaunchResult> {
         )
     })?;
 
-    let working = project.working_path();
+    let working = project.directory();
     let mut command = Command::new(path);
     match terminal.directory {
         DirectoryArgument::Separate(flag) => {
@@ -111,7 +111,7 @@ pub fn launch(project: &Project) -> AppResult<EditorLaunchResult> {
         .arg(nvim)
         .arg("--listen")
         .arg(&socket)
-        .arg(main)
+        .arg(document)
         .current_dir(&working)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -169,10 +169,11 @@ fn resolve_terminal() -> Option<(&'static Terminal, PathBuf)> {
 }
 
 /// One stable socket per project, so reopening a project finds the editor that
-/// is already running for it.
+/// is already running for it. Keyed on the document, so two papers sharing a
+/// folder get an editor each.
 fn socket_path(project: &Project) -> PathBuf {
     let mut hash = 0xcbf29ce484222325_u64;
-    for byte in project.root_path.as_bytes() {
+    for byte in project.document_path.as_bytes() {
         hash ^= u64::from(*byte);
         hash = hash.wrapping_mul(0x100000001b3);
     }
@@ -182,16 +183,13 @@ fn socket_path(project: &Project) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{DocumentKind, Engine};
+    use crate::model::Engine;
 
-    fn project(root_path: &str) -> Project {
+    fn project(document_path: &str) -> Project {
         Project {
             id: 1,
             name: "Test".into(),
-            root_path: root_path.into(),
-            main_file: "main.tex".into(),
-            working_directory: ".".into(),
-            kind: DocumentKind::Latex,
+            document_path: document_path.into(),
             engine: Engine::PdfLatex,
             created_at: 0,
             last_opened_at: 0,
@@ -199,11 +197,16 @@ mod tests {
     }
 
     #[test]
-    fn sockets_are_short_stable_and_project_specific() {
-        let first = socket_path(&project("/tmp/one"));
-        let second = socket_path(&project("/tmp/two"));
+    fn sockets_are_short_stable_and_document_specific() {
+        let first = socket_path(&project("/tmp/one/main.tex"));
+        let second = socket_path(&project("/tmp/two/main.tex"));
         assert_ne!(first, second);
-        assert_eq!(first, socket_path(&project("/tmp/one")));
+        assert_eq!(first, socket_path(&project("/tmp/one/main.tex")));
+        // Two documents sharing a folder are two projects, and get an editor each.
+        assert_ne!(
+            socket_path(&project("/tmp/one/paper.tex")),
+            socket_path(&project("/tmp/one/supplementary.tex"))
+        );
         // Unix socket paths are limited to about 104 bytes on macOS.
         assert!(first.to_string_lossy().len() < 100);
     }
@@ -212,7 +215,8 @@ mod tests {
     fn a_missing_socket_reads_as_closed() {
         let directory = tempfile::tempdir().unwrap();
         assert!(!socket_is_live(&directory.path().join("absent.sock")));
-        assert_eq!(status(&project(directory.path().to_str().unwrap())), "closed");
+        let document = directory.path().join("main.tex");
+        assert_eq!(status(&project(document.to_str().unwrap())), "closed");
     }
 
     #[test]

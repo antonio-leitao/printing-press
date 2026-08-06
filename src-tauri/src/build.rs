@@ -11,7 +11,7 @@
 //! document that saves faster than it compiles never updates at all.
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     path::{Path, PathBuf},
     sync::Arc,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
@@ -27,8 +27,8 @@ use crate::{
     diagnostics::ProgressSnapshot,
     error::AppResult,
     model::{
-        ArtifactSummary, BuildProgress, BuildState, BuildStatus, BuildUpdate, Diagnostic,
-        DocumentKind, Project, SourceRef,
+        ArtifactSummary, BuildProgress, BuildState, BuildStatus, BuildUpdate, Diagnostic, Project,
+        SourceRef,
     },
     runner::{self, BuildInputs, BuildOutcome, Cancel, CancelHandle, PidRegistry, ProgressSink},
     sources,
@@ -500,10 +500,19 @@ impl BuildManager {
     async fn start_watching(self: Arc<Self>, app: &AppHandle, project: &Project) {
         let (sender, receiver) = mpsc::unbounded_channel();
         let watcher_sender = sender.clone();
-        let kind = project.kind;
-        let main_file = project.main_file.clone();
+        let directory = project.directory();
+        // Read once, when the project is opened: adding a sibling project while
+        // this one is on screen is not worth a channel for.
+        let foreign = self
+            .repository
+            .foreign_documents(project.id, &directory)
+            .unwrap_or_default();
+        let scope = WatchScope {
+            directory: directory.clone(),
+            foreign: foreign.into_iter().collect(),
+        };
         let watcher = notify::recommended_watcher(move |result: notify::Result<Event>| match result {
-            Ok(event) if relevant_event(&event, kind, &main_file) => {
+            Ok(event) if scope.relevant(&event) => {
                 let _ = watcher_sender.send(WatchMessage::Changed);
             }
             Ok(_) => {}
@@ -521,7 +530,7 @@ impl BuildManager {
                 return;
             }
         };
-        if let Err(error) = watcher.watch(&project.root(), RecursiveMode::Recursive) {
+        if let Err(error) = watcher.watch(&directory, RecursiveMode::Recursive) {
             emit_watcher_error(app, project.id, &error.to_string());
             return;
         }
@@ -714,27 +723,28 @@ fn now() -> i64 {
 
 /// A change is worth rebuilding for when it touches something the author wrote.
 /// Reads and build output are not that.
-fn relevant_event(event: &Event, kind: DocumentKind, main_file: &str) -> bool {
-    if matches!(event.kind, EventKind::Access(_)) {
-        return false;
-    }
-    event
-        .paths
-        .iter()
-        .any(|path| worth_rebuilding(path, kind, main_file))
+/// Which saves under a project's directory are this project's business.
+struct WatchScope {
+    directory: PathBuf,
+    /// The documents of the other projects here, relative to `directory`.
+    foreign: HashSet<String>,
 }
 
-fn worth_rebuilding(path: &Path, kind: DocumentKind, main_file: &str) -> bool {
-    if !files::is_project_source(path) {
-        return false;
+impl WatchScope {
+    fn relevant(&self, event: &Event) -> bool {
+        if matches!(event.kind, EventKind::Access(_)) {
+            return false;
+        }
+        event.paths.iter().any(|path| self.worth_rebuilding(path))
     }
-    // A markdown project is one file. Other markdown in the same folder is other
-    // documents, and editing those is no reason to rebuild this one — but the
-    // images and data beside them are shared, so those still count.
-    if kind == DocumentKind::Markdown && DocumentKind::of(path) == DocumentKind::Markdown {
-        return path.ends_with(main_file);
+
+    /// A save rebuilds this document unless the file saved is another project's
+    /// document. Everything else in the directory is shared — a figure, a `.bib`,
+    /// a chapter — and rebuilding for those is the point.
+    fn worth_rebuilding(&self, path: &Path) -> bool {
+        let relative = path.strip_prefix(&self.directory).unwrap_or(path);
+        files::belongs_to_project(relative, &self.foreign)
     }
-    true
 }
 
 #[cfg(test)]
@@ -742,44 +752,53 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
 
-    #[test]
-    fn source_changes_trigger_builds_but_generated_files_do_not() {
-        let event = |path: &str| Event {
+    fn event(path: &str) -> Event {
+        Event {
             kind: EventKind::Any,
             paths: vec![PathBuf::from(path)],
             attrs: Default::default(),
-        };
-        let relevant_event = |event: &Event| relevant_event(event, DocumentKind::Latex, "main.tex");
-        assert!(relevant_event(&event("chapter.tex")));
-        assert!(relevant_event(&event("figures/data.csv")));
-        assert!(relevant_event(&event("references.bib")));
-        // PDF figures are ordinary source: regenerating a plot must rebuild.
-        // Press writes its own output outside the project, so there is no loop.
-        assert!(relevant_event(&event("figures/plot.pdf")));
-        assert!(!relevant_event(&event("main.aux")));
-        assert!(!relevant_event(&event("main.log")));
-        assert!(!relevant_event(&event(".git/index")));
-        assert!(!relevant_event(&event(".main.tex.swp")));
-        assert!(!relevant_event(&event("4913")));
-        assert!(!relevant_event(&event(".#main.tex")));
+        }
+    }
+
+    fn scope(foreign: &[&str]) -> WatchScope {
+        WatchScope {
+            directory: PathBuf::from("/paper"),
+            foreign: foreign.iter().map(|path| (*path).to_owned()).collect(),
+        }
     }
 
     #[test]
-    fn a_markdown_project_ignores_the_other_documents_beside_it() {
-        let event = |path: &str| Event {
-            kind: EventKind::Any,
-            paths: vec![PathBuf::from(path)],
-            attrs: Default::default(),
-        };
-        let watching = |event: &Event| relevant_event(event, DocumentKind::Markdown, "essay.md");
+    fn source_changes_trigger_builds_but_generated_files_do_not() {
+        let scope = scope(&[]);
+        assert!(scope.relevant(&event("/paper/chapter.tex")));
+        assert!(scope.relevant(&event("/paper/figures/data.csv")));
+        assert!(scope.relevant(&event("/paper/references.bib")));
+        // PDF figures are ordinary source: regenerating a plot must rebuild.
+        // Press writes its own output outside the project, so there is no loop.
+        assert!(scope.relevant(&event("/paper/figures/plot.pdf")));
+        assert!(!scope.relevant(&event("/paper/main.aux")));
+        assert!(!scope.relevant(&event("/paper/main.log")));
+        assert!(!scope.relevant(&event("/paper/.git/index")));
+        assert!(!scope.relevant(&event("/paper/.main.tex.swp")));
+        assert!(!scope.relevant(&event("/paper/4913")));
+        assert!(!scope.relevant(&event("/paper/.#main.tex")));
+    }
 
-        assert!(watching(&event("/writing/essay.md")), "its own document");
-        // Another document in the same folder, which is another project.
-        assert!(!watching(&event("/writing/talk.md")));
+    /// One rule for every kind of document: a neighbour that is its own project
+    /// does not rebuild this one, and the assets they share do.
+    #[test]
+    fn a_neighbouring_project_does_not_rebuild_this_one() {
+        let scope = scope(&["talk.md", "supplementary.tex"]);
+
+        assert!(scope.relevant(&event("/paper/essay.md")), "its own document");
+        // Other documents in the same folder, which are other projects.
+        assert!(!scope.relevant(&event("/paper/talk.md")));
+        assert!(!scope.relevant(&event("/paper/supplementary.tex")));
+        // A chapter nothing else claims is still this document's business.
+        assert!(scope.relevant(&event("/paper/chapters/one.tex")));
         // Assets are shared, so they still count.
-        assert!(watching(&event("/writing/figures/plot.png")));
-        assert!(watching(&event("/writing/references.bib")));
-        assert!(!watching(&event("/writing/essay.aux")));
+        assert!(scope.relevant(&event("/paper/figures/plot.png")));
+        assert!(scope.relevant(&event("/paper/references.bib")));
     }
 
     #[test]

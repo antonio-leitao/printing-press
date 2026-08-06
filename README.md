@@ -1,25 +1,49 @@
 # Press
 
-Press is a Tauri desktop app that keeps LaTeX source trees clean while providing a cached PDF
-viewer and a Neovim workflow. Neovim remains the editor; Press owns the PDF, the compiler, and
-(eventually) the history.
+Press is a Tauri desktop app that keeps source trees clean while providing a cached PDF viewer, a
+compiler, and a Neovim workflow. Neovim remains the editor; Press owns the PDF, the build, and the
+history.
 
-The backend is built around a source reference — the working tree today, a snapshot later — so
-that builds, caches, database rows and events all already carry the dimension the history needs.
+The backend is built around a source reference — the working tree or a snapshot — so that builds,
+caches, database rows and events all carry the dimension the history needs.
+
+## A project is a document
+
+One idea does most of the work here: **a project is a document, and its path is its identity.**
+
+Nothing else about a project is stored. The directory latexmk runs in, the tree the watcher
+follows, the files a snapshot holds, whether it is markdown, the job name — all of it derives from
+the one path. There is no stored folder, because nothing needed one: latexmk wants a working
+directory (the document's own), the watcher wants a path to watch (the same), and a snapshot wants
+a *set of files*, for which a folder is merely the cheapest description.
+
+Three things follow, and they are the reason the model is worth stating:
+
+- **Documents sharing a folder are separate projects.** Two markdown essays, a paper and its
+  supplementary material, a thesis and its poster. Each has its own history, its own build cache,
+  its own editor socket.
+- **Naming a part opens the whole.** `:Press` inside `chapters/three.tex` opens the thesis,
+  because a named file resolves to its document root — through `% !TEX root` first, then the
+  inclusion graph. A `standalone` figure that some paper `\input`s opens that paper.
+- **A directory is never a project, only a place to look for one.** Point Press at a folder and it
+  lists the documents it found, known ones first. It never picks for you.
+
+The one layout this gives up: a document that references files *above* its own directory. Its
+working tree still builds — latexmk reads the real filesystem — but a snapshot of it would be
+incomplete, and says so at build time rather than silently.
 
 ## Included
 
-- Add a folder, and Press finds the LaTeX document in it; or add a file, which makes that one
-  document a project. A project is keyed on `(folder, main file)`, so several documents can share
-  a directory — two markdown essays side by side, or a paper and its poster.
-- Bounded, recursive main-file discovery using `\documentclass`, `\begin{document}`, conventional
-  filenames, folder depth, `% !TEX root` evidence, and an `\input`/`\include`/`\subimport` graph
-  that demotes files which are part of another document.
-- A disambiguation picker when there is no safe choice, listing the evidence for each candidate.
+- Point Press at a document — `.tex`, `.ltx`, `.Rnw`, or markdown — and it compiles that document.
+  One way in: the Add button, `:Press`, and `press <path>` all resolve a path the same way and get
+  the same answer back.
+- Document-root resolution from `% !TEX root`, `\documentclass`, and an
+  `\input`/`\include`/`\subimport`/`\subimport` graph that tells parts from wholes.
+- A picker when a path means more than one document, with the projects Press already knows listed
+  first.
 - TeX engine detection from `% !TEX program`, overridable per project.
-- Markdown as well as LaTeX, opened by naming the file rather than by guessing at a folder. A
-  markdown document is a project like any other, so snapshots, the history, the watcher and the
-  viewer all work on it unchanged.
+- Markdown and LaTeX on one path. A markdown document is a project like any other, so snapshots,
+  the history, the watcher and the viewer all work on it unchanged.
 - Rust-owned SQLite persistence. One schema, no migrations: Press has a single user, and a stale
   database is cheaper to replace than to migrate. A database from another schema is set aside
   under a `.schemaN.old` name and a fresh one started, so a schema change never stops the
@@ -49,12 +73,12 @@ that builds, caches, database rows and events all already carry the dimension th
   a failed load leaves the last good document on screen.
 - Bounded viewer memory: page bitmaps are released once a page scrolls well clear of the
   viewport, and cached documents are evicted against a byte budget.
-- Full project CRUD, including rename, engine and main-file changes, and removal.
-- A **Launch Neovim** action that reuses one stable socket per project and supports Alacritty,
+- Project rename, engine change and removal. There is no "change the main file": a different
+  document is a different project, which is what lets several live in one folder.
+- A **Launch Neovim** action that reuses one stable socket per document and supports Alacritty,
   kitty, Ghostty and WezTerm.
-- Opening from the editor: `press <path>` opens whatever project that file belongs to. A second
-  launch does not start a second Press — its arguments are handed to the running instance, which
-  raises its window.
+- Opening from the editor: `press <path>` resolves whatever it is handed. A second launch does not
+  start a second Press — its arguments are handed to the running instance, which raises its window.
 - Startup sweep of interrupted staging files, unreferenced PDFs and storage belonging to deleted
   projects.
 
@@ -69,8 +93,8 @@ that builds, caches, database rows and events all already carry the dimension th
 MuPDF is AGPL-3.0. That binds Press only if it is distributed.
 
 Press deliberately does not enable `--shell-escape`. A `.latexmkrc` is still executable Perl, and
-latexmk loads one from its working directory as well as the project root, so every such file
-found in a folder is reported before the project is added. Only add folders you trust.
+latexmk loads one from the directory it runs in — the document's own — so such a file is reported
+before the document is opened for the first time. Only open documents in folders you trust.
 
 ## Development
 
@@ -99,7 +123,7 @@ The two build tests in `src-tauri/src/runner.rs` compile real documents and are 
 
 ## Backend boundaries
 
-The Svelte webview can open the native folder picker and invoke a small set of typed commands. It
+The Svelte webview can open the native file picker and invoke a small set of typed commands. It
 has no generic filesystem, shell, or SQL access. Rust owns path validation, discovery,
 persistence, process execution, cache publication, and lifecycle cleanup. PDFs are addressed by
 artifact id, and their paths are checked to be inside Press-managed storage before any bytes are
@@ -123,33 +147,32 @@ files are named by the hash of their contents, so a hundred versions of a thesis
 never change store those figures once. A version's `revision` is the hash of its manifest, so two
 snapshots of identical content share a revision and therefore share one cached build.
 
-Only project source is stored. `files.rs` holds the single set of rules that both the watcher and
-the snapshot store use, so "worth rebuilding for" and "worth keeping" cannot drift apart. Build
-output, editor scratch files and anyone else's `.git` are skipped. **Nothing is ever written to
-the project folder**; a version is compiled from a temporary checkout that is removed with the
-build.
+Only this document's source is stored. `files.rs` holds the single rule that both the watcher and
+the snapshot store use — `belongs_to_project` — so "worth rebuilding for" and "worth keeping"
+cannot drift apart. Build output, editor scratch files and anyone else's `.git` are skipped, and
+so are the documents belonging to other projects in the same folder: a neighbour's draft is not
+this document's version, and saving it does not rebuild this one. Everything else there is shared
+and counts for both — a figure, a `.bib`, a chapter one of them `\input`s.
+
+**Nothing is ever written to the project folder**; a version is compiled from a temporary checkout
+that is removed with the build.
 
 Discarding a version drops its build, and file contents no longer referenced by any version are
 swept at the next start.
 
 ## Markdown
 
-**Markdown is never inferred from a folder, only ever from being named.** LaTeX files carry
-evidence of being a document root — `\documentclass`, `\begin{document}`, a `% !TEX root`
-directive, an inclusion graph that tells parts from wholes. Markdown carries none of it, so
-ranking the markdown files in a folder would be invention dressed up as discovery, and it was
-unreliable in exactly the way invention is. The one reliable signal is the user naming the file,
-which is what `:Press` from a markdown buffer does.
+Markdown needs no special case any more. It is a document with a path, like any other, and it gets
+the same history, watcher, viewer and picker.
 
-So: `:Press` in a markdown buffer compiles that file, and **Add file** in the library does the
-same from the app. Everything else — a folder, a directory argument, the folder picker — looks for
-LaTeX only, and when it finds none it says so and says that a document is opened from the file
-itself.
-
-Because a markdown project is a document rather than a folder, two things follow. Its history
-holds that document and the assets beside it, not the other markdown files in the same directory —
-those are other projects. And a save to one of those neighbours does not rebuild it, while a save
-to a shared image does.
+The one place the two differ is *listing*. A LaTeX file carries evidence of being a document root
+— `\documentclass`, a `% !TEX root` directive, an inclusion graph that tells parts from wholes —
+so a directory scan can say which `.tex` files are documents and which are chapters. Markdown
+carries none of that, so every markdown file in a directory is listed as a candidate and the user
+picks. Listing is not guessing: what was unreliable before was *auto-selecting* one, and Press
+still never does that. Only `README`, `CHANGELOG`, `CONTRIBUTING`, `LICENSE` and `AUTHORS` are left
+out of a directory listing, and naming one of those directly still compiles it — naming a file is
+always the last word.
 
 `pandoc --pdf-engine` is already two stages: markdown to LaTeX, then a TeX run. Press runs the
 stages itself — pandoc writes `<work>/<jobname>.tex`, latexmk builds it — because pandoc driving
@@ -173,11 +196,17 @@ line number would point somewhere plausible and wrong.
 ## Opening from Neovim
 
 `:Press` in the companion plugin hands Press the path of the file being edited and nothing else.
-Working out which project that file belongs to is Press's job: `intake.rs` matches the path
-against known projects first, and otherwise walks up running the same discovery the folder picker
-uses, until a document root appears or a repository boundary stops it. Editing
-`chapters/three.tex` opens the paper; a paper inside a large repository opens as the paper, not
-the repository.
+Working out what that path means is Press's job, and `documents.rs` is the only place that answers
+it — for `:Press`, for `press <path>`, and for the library's own button.
+
+A named file resolves to its document root: itself if nothing includes it, otherwise the document
+that does, found through `% !TEX root` and then the inclusion graph, walking up until a document
+appears or a repository boundary stops it. Editing `chapters/three.tex` opens the paper; a paper
+inside a large repository opens as the paper, not the repository; `supplementary.tex` beside that
+paper opens as itself, because nothing includes it.
+
+`:Press` from an empty buffer sends the working directory, and a directory always opens the
+picker: the documents Press already keeps first, then the ones it found.
 
 The transport is `tauri-plugin-single-instance`, which was already in place. Launching the binary
 a second time delivers its arguments to the instance already running, so there is no socket, no

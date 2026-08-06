@@ -10,8 +10,9 @@
     WORKTREE,
     type BuildProgress,
     type BuildUpdate,
-    type DiscoveryReport,
     type Engine,
+    type OpenCandidate,
+    type OpenRequest,
     type ProjectSummary,
     type VersionSummary,
     type WatcherError
@@ -35,9 +36,10 @@
 
   let projects = $state<ProjectSummary[]>([]);
   let activeProject = $state<ProjectSummary | null>(null);
-  let discovery = $state<DiscoveryReport | null>(null);
-  let selectedMain = $state('');
-  let selectedEngine = $state<Engine>('pdflatex');
+  /** Documents a path resolved to, shown when there is a choice to make. */
+  let choosing = $state<OpenRequest | null>(null);
+  let chosen = $state('');
+  let chosenEngine = $state<Engine>('pdflatex');
   let busy = $state(false);
   let error = $state('');
   let notice = $state('');
@@ -47,7 +49,6 @@
   let progress = $state<BuildProgress | null>(null);
   let settingsFor = $state<ProjectSummary | null>(null);
   let settingsName = $state('');
-  let settingsMain = $state('');
   let settingsEngine = $state<Engine>('pdflatex');
   let confirmDelete = $state<ProjectSummary | null>(null);
 
@@ -77,14 +78,73 @@
   type Panel = 'none' | 'diagnostics' | 'log' | 'keys';
   let panel = $state<Panel>('none');
 
-  /** Whether the main file chosen in the add dialog is markdown. */
-  const selectedIsMarkdown = $derived(
-    discovery?.candidates.find((candidate) => candidate.relativePath === selectedMain)?.kind ===
-      'markdown'
+  // -- context menu ---------------------------------------------------------
+  type MenuItem = { label: string; run: () => void; disabled?: boolean };
+  let menu = $state<{ x: number; y: number; items: MenuItem[] } | null>(null);
+
+  /// Opens the menu where it was asked for. Right-click and the `⋯` button both
+  /// come here, so there is one list of actions per thing rather than two.
+  function openMenu(event: MouseEvent, items: MenuItem[]) {
+    event.preventDefault();
+    event.stopPropagation();
+    menu = { x: event.clientX, y: event.clientY, items };
+  }
+
+  function runMenuItem(item: MenuItem) {
+    menu = null;
+    item.run();
+  }
+
+  function projectMenu(project: ProjectSummary): MenuItem[] {
+    return [
+      { label: 'Rename…', run: () => openSettings(project) },
+      {
+        label: 'Download PDF',
+        run: () => void downloadArtifact(project.artifact?.id),
+        disabled: !project.artifact
+      },
+      { label: 'Remove…', run: () => (confirmDelete = project) }
+    ];
+  }
+
+  function versionMenu(version: VersionSummary): MenuItem[] {
+    const items: MenuItem[] = [
+      {
+        label: 'Download PDF',
+        run: () => void downloadArtifact(version.artifact?.id),
+        disabled: !version.artifact
+      }
+    ];
+    // The working tree is not a stored version, so it has neither of these.
+    if (version.snapshot) {
+      items.unshift({
+        label: 'Rename…',
+        run: () => {
+          renaming = version;
+          renameTitle = version.title;
+        }
+      });
+      items.push({ label: 'Discard', run: () => void discardVersion(version) });
+    }
+    return items;
+  }
+
+  async function downloadArtifact(artifactId: number | undefined) {
+    if (artifactId === undefined) return;
+    clearMessages();
+    try {
+      notice = `Saved ${await api.exportArtifact(artifactId)}`;
+    } catch (reason) {
+      error = errorMessage(reason);
+    }
+  }
+
+  const chosenCandidate = $derived(
+    choosing?.candidates.find((candidate) => candidate.documentPath === chosen) ?? null
   );
 
   const dialogOpen = $derived(
-    Boolean(discovery || settingsFor || confirmDelete || snapshotOpen || renaming)
+    Boolean(choosing || settingsFor || confirmDelete || snapshotOpen || renaming || menu)
   );
 
   onMount(() => {
@@ -145,6 +205,11 @@
     })();
 
     const shortcuts = (event: KeyboardEvent) => {
+      // Before the guards below, which treat an open menu as a dialog.
+      if (menu && event.key === 'Escape') {
+        menu = null;
+        return;
+      }
       if (!activeProject || dialogOpen) return;
       const target = event.target;
       const typing =
@@ -205,17 +270,23 @@
     }
   }
 
-  async function chooseProjectFolder() {
+  /// Point at the document. A folder is never a project, so there is nothing to
+  /// pick a folder for: `:Press` and `press <path>` can still hand over a
+  /// directory, and it opens the same picker this does.
+  async function chooseDocument() {
     clearMessages();
     try {
       const selected = await open({
-        directory: true,
+        directory: false,
         multiple: false,
-        title: 'Add a LaTeX project'
+        title: 'Open a document',
+        filters: [
+          { name: 'Documents', extensions: ['tex', 'ltx', 'Rnw', 'md', 'markdown', 'qmd', 'mkd'] }
+        ]
       });
       if (!selected || Array.isArray(selected)) return;
       busy = true;
-      await presentReport(await api.inspectProject(selected));
+      await present(await api.resolvePath(selected));
     } catch (reason) {
       error = errorMessage(reason);
     } finally {
@@ -223,24 +294,37 @@
     }
   }
 
-  /// Adds a project outright when the answer is obvious, and asks when it is not.
-  /// Shared by the folder picker and by a path arriving from the editor.
-  async function presentReport(report: DiscoveryReport) {
-    if (!report.toolchain.latexmk.available) {
+  /// Acts on what a path resolved to. One candidate and nothing to warn about
+  /// opens it; anything else asks. Shared by every way into Press.
+  async function present(request: OpenRequest) {
+    if (!request.toolchain.latexmk.available) {
       error = 'latexmk was not found. Install a TeX distribution or add latexmk to PATH.';
       return;
     }
-    if (report.candidates.length === 0) {
-      error = report.warnings[0] ?? 'No LaTeX document root was found in this folder.';
+    if (request.candidates.length === 0) {
+      error = request.warnings[0] ?? `Press found no document in ${request.path}.`;
       return;
     }
-    discovery = report;
-    selectedMain = report.recommendedMain ?? report.candidates[0]?.relativePath ?? '';
-    selectedEngine = report.detectedEngine ?? 'pdflatex';
-    // A confident match with no executable configuration needs no dialog.
-    if (report.recommendedMain && !report.requiresSelection && report.latexmkrcPaths.length === 0) {
-      await saveAndOpenProject(report, report.recommendedMain, selectedEngine);
+    const only = request.candidates.length === 1 ? request.candidates[0] : null;
+    // A `.latexmkrc` is executable Perl, so it is shown before it ever runs —
+    // but only once: a document Press already keeps was accepted when it was
+    // added, and asking again on every `:Press` would train the answer away.
+    const consented = only?.projectId !== null || only.latexmkrcPaths.length === 0;
+    if (only && consented && request.warnings.length === 0) {
+      await openCandidate(only);
+      return;
     }
+    choosing = request;
+    selectCandidate(only?.documentPath ?? request.candidates[0].documentPath);
+  }
+
+  /// The engine follows the document: it is detected per document, so it cannot
+  /// stay behind on the previous one's.
+  function selectCandidate(documentPath: string) {
+    chosen = documentPath;
+    chosenEngine =
+      choosing?.candidates.find((candidate) => candidate.documentPath === documentPath)?.engine ??
+      'pdflatex';
   }
 
   /// Collects a path Press was launched with, from `:Press` or the command line.
@@ -249,62 +333,23 @@
       const request = await api.takePendingOpen();
       if (!request) return;
       clearMessages();
-
-      if (request.projectId !== null) {
-        // The project list may not hold it yet if it was added elsewhere.
-        let project = projects.find((item) => item.id === request.projectId);
-        if (!project) {
-          await refreshProjects();
-          project = projects.find((item) => item.id === request.projectId);
-        }
-        if (project) await openProject(project);
-        return;
-      }
-      if (request.report) {
-        busy = true;
-        try {
-          await presentReport(request.report);
-        } finally {
-          busy = false;
-        }
-        return;
-      }
-      error = request.message ?? `Press could not open ${request.path}.`;
-    } catch (reason) {
-      error = errorMessage(reason);
-    }
-  }
-
-  /// Adds one named document. A markdown file is always a document in its own
-  /// right — several can share a folder — and a named `.tex` skips discovery for
-  /// the same reason: the file has already been chosen.
-  async function chooseDocumentFile() {
-    clearMessages();
-    try {
-      const selected = await open({
-        directory: false,
-        multiple: false,
-        title: 'Add a document',
-        filters: [
-          { name: 'Documents', extensions: ['md', 'markdown', 'qmd', 'tex', 'ltx', 'Rnw'] }
-        ]
-      });
-      if (!selected || Array.isArray(selected)) return;
       busy = true;
-      await presentReport(await api.inspectDocument(selected));
+      try {
+        await present(request);
+      } finally {
+        busy = false;
+      }
     } catch (reason) {
       error = errorMessage(reason);
-    } finally {
-      busy = false;
     }
   }
 
-  async function confirmProject() {
-    if (!discovery || !selectedMain) return;
+  async function confirmChoice() {
+    if (!chosenCandidate) return;
     busy = true;
     clearMessages();
     try {
-      await saveAndOpenProject(discovery, selectedMain, selectedEngine);
+      await openCandidate(chosenCandidate, chosenEngine);
     } catch (reason) {
       error = errorMessage(reason);
     } finally {
@@ -312,10 +357,16 @@
     }
   }
 
-  async function saveAndOpenProject(report: DiscoveryReport, mainFile: string, engine: Engine) {
-    const project = await api.addProject(report.rootPath, mainFile, engine);
-    discovery = null;
-    selectedMain = '';
+  /// Opens a document, keeping it first if Press does not have it yet. Adding a
+  /// document it already has just touches it, so both paths are one call.
+  async function openCandidate(candidate: OpenCandidate, engine?: Engine) {
+    const project = await api.addProject(
+      candidate.documentPath,
+      candidate.name,
+      engine ?? candidate.engine ?? undefined
+    );
+    choosing = null;
+    chosen = '';
     projects = [project, ...projects.filter((item) => item.id !== project.id)];
     await openProject(project);
   }
@@ -486,7 +537,6 @@
   function openSettings(project: ProjectSummary) {
     settingsFor = project;
     settingsName = project.name;
-    settingsMain = project.mainFile;
     settingsEngine = project.engine;
   }
 
@@ -500,18 +550,11 @@
       if (name && name !== project.name) {
         mergeProject(await api.renameProject(project.id, name));
       }
-      const mainChanged = settingsMain !== project.mainFile;
-      const engineChanged = settingsEngine !== project.engine;
-      if (mainChanged || engineChanged) {
-        // Both discard every cached PDF. The new build produces a new artifact
-        // id, so nothing stale can be shown.
-        mergeProject(
-          await api.updateProjectSettings(project.id, {
-            mainFile: mainChanged ? settingsMain : undefined,
-            engineOverride: engineChanged ? settingsEngine : undefined
-          })
-        );
-        notice = 'Settings changed. Cached PDFs were discarded and a rebuild has started.';
+      if (settingsEngine !== project.engine) {
+        // Discards every cached PDF. The new build produces a new artifact id,
+        // so nothing stale can be shown.
+        mergeProject(await api.setProjectEngine(project.id, settingsEngine));
+        notice = 'Engine changed. Cached PDFs were discarded and a rebuild has started.';
       }
       settingsFor = null;
     } catch (reason) {
@@ -535,7 +578,7 @@
         progress = null;
       }
       confirmDelete = null;
-      notice = `Removed ${project.name} from Press. The project folder was not touched.`;
+      notice = `Removed ${project.name} from Press. The document itself was not touched.`;
     } catch (reason) {
       error = errorMessage(reason);
     } finally {
@@ -624,7 +667,11 @@
           <div class="history-head quiet">{activeProject.name}</div>
           {#each versions as version (version.sourceRef)}
             <div class="version" class:current={version.sourceRef === selectedRef}>
-              <button class="version-open" onclick={() => selectVersion(version)}>
+              <button
+                class="version-open"
+                onclick={() => selectVersion(version)}
+                oncontextmenu={(event) => openMenu(event, versionMenu(version))}
+              >
                 <strong>{version.title}</strong>
                 <span class="quiet">
                   {version.snapshot ? age(version.snapshot.createdAt) : 'live'}
@@ -634,23 +681,14 @@
                   <span class="quiet body">{version.snapshot.body}</span>
                 {/if}
               </button>
-              {#if version.snapshot}
-                <div class="version-actions">
-                  <button
-                    class="link"
-                    onclick={() => {
-                      renaming = version;
-                      renameTitle = version.title;
-                    }}
-                    disabled={busy}
-                  >
-                    Rename
-                  </button>
-                  <button class="link" onclick={() => discardVersion(version)} disabled={busy}>
-                    Discard
-                  </button>
-                </div>
-              {/if}
+              <button
+                class="link"
+                aria-label="Actions for {version.title}"
+                onclick={(event) => openMenu(event, versionMenu(version))}
+                disabled={busy}
+              >
+                ⋯
+              </button>
             </div>
           {/each}
         </nav>
@@ -753,13 +791,12 @@
     <header class="library-header">
       <div>
         <h1>Press</h1>
-        <p class="quiet">LaTeX projects and their last successful builds</p>
+        <p class="quiet">Documents and their last successful builds</p>
       </div>
       <div class="library-actions">
-        <button onclick={chooseProjectFolder} disabled={busy}>
-          {busy ? 'Inspecting…' : 'Add folder'}
+        <button onclick={chooseDocument} disabled={busy}>
+          {busy ? 'Opening…' : 'Open document'}
         </button>
-        <button onclick={chooseDocumentFile} disabled={busy}>Add file</button>
       </div>
     </header>
 
@@ -768,25 +805,26 @@
 
     {#if projects.length === 0}
       <section class="empty-library">
-        <h2>No projects yet</h2>
+        <h2>No documents yet</h2>
         <p>
-          Add a folder holding a LaTeX document and Press locates its main file. Add a file to
-          compile that document by itself, which is how markdown works: several documents can
-          share a folder. Press writes nothing into the folder either way.
+          Point Press at a document — a <code>.tex</code> or a <code>.md</code> — and it compiles
+          that document. Several documents can share a folder and each is its own project, with
+          its own history. Naming a chapter opens the paper that includes it. Press writes nothing
+          into the folder.
         </p>
         <div class="library-actions">
-          <button onclick={chooseProjectFolder} disabled={busy}>Add folder</button>
-          <button onclick={chooseDocumentFile} disabled={busy}>Add file</button>
+          <button onclick={chooseDocument} disabled={busy}>Open document</button>
         </div>
       </section>
     {:else}
-      <section class="project-grid" aria-label="Saved projects">
+      <section class="project-grid" aria-label="Saved documents">
         {#each projects as project (project.id)}
           <article class="project-card">
             <button
               class="project-open"
               onclick={() => openProject(project)}
-              disabled={busy || !project.pathAvailable}
+              oncontextmenu={(event) => openMenu(event, projectMenu(project))}
+              disabled={busy || !project.available}
             >
               {#if project.artifact}
                 {#key project.artifact.revision}
@@ -796,20 +834,20 @@
                 <div class="missing-thumbnail">No compiled PDF</div>
               {/if}
               <strong>{project.name}</strong>
-              <span class="quiet">{project.mainFile} · {project.engine}</span>
+              <span class="quiet">{project.kind} · {project.engine}</span>
               <span class="quiet">{lastBuilt(project)}</span>
-              {#if !project.pathAvailable}
-                <span class="bad">Folder unavailable</span>
-              {:else if !project.mainFileAvailable}
-                <span class="bad">Main file missing</span>
+              {#if !project.available}
+                <span class="bad">Document missing</span>
               {/if}
             </button>
             <div class="project-actions">
-              <button class="link" onclick={() => openSettings(project)} disabled={busy}>
-                Settings
-              </button>
-              <button class="link" onclick={() => (confirmDelete = project)} disabled={busy}>
-                Remove
+              <button
+                class="link"
+                aria-label="Actions for {project.name}"
+                onclick={(event) => openMenu(event, projectMenu(project))}
+                disabled={busy}
+              >
+                ⋯
               </button>
             </div>
           </article>
@@ -819,52 +857,67 @@
   </main>
 {/if}
 
-{#if discovery}
-  <dialog open aria-labelledby="main-file-title">
-    <h2 id="main-file-title">
-      {discovery.requiresSelection ? 'Choose the main document' : 'Confirm project'}
+{#if menu}
+  <!-- A button rather than a div: it is a real click target, and Escape is
+       handled with the other shortcuts. -->
+  <button class="menu-backdrop" aria-label="Close menu" onclick={() => (menu = null)}></button>
+  <menu class="context-menu" style="left: {menu.x}px; top: {menu.y}px">
+    {#each menu.items as item}
+      <li>
+        <button onclick={() => runMenuItem(item)} disabled={item.disabled}>{item.label}</button>
+      </li>
+    {/each}
+  </menu>
+{/if}
+
+{#if choosing}
+  <dialog open aria-labelledby="choose-title">
+    <h2 id="choose-title">
+      {choosing.candidates.length > 1 ? 'Which document?' : 'Open this document'}
     </h2>
-    {#if discovery.requiresSelection}
-      <p>Several files could be compiled in <strong>{discovery.projectName}</strong>.</p>
-    {:else}
-      <p>Press found <strong>{selectedMain}</strong> in {discovery.projectName}.</p>
+    {#if choosing.candidates.length > 1}
+      <p>Press found {choosing.candidates.length} documents in <code>{choosing.path}</code>.</p>
     {/if}
-    {#if selectedIsMarkdown && !discovery.toolchain.pandoc.available}
+    {#each choosing.warnings as warning}
+      <p class="quiet">{warning}</p>
+    {/each}
+    {#if chosenCandidate?.kind === 'markdown' && !choosing.toolchain.pandoc.available}
       <p class="bad" role="alert">
         pandoc was not found. Markdown is converted to LaTeX with pandoc before latexmk builds it.
       </p>
     {/if}
-    {#if discovery.latexmkrcPaths.length > 0}
+    {#if chosenCandidate && chosenCandidate.latexmkrcPaths.length > 0}
       <p class="bad" role="alert">
-        This folder contains executable latexmk configuration
-        ({discovery.latexmkrcPaths.join(', ')}). It is Perl and it will run. Add this folder only
-        if you trust it.
+        There is executable latexmk configuration beside this document
+        ({chosenCandidate.latexmkrcPaths.join(', ')}). It is Perl and it will run. Open this
+        document only if you trust the folder.
       </p>
     {/if}
     <label>
-      Main file
-      <select bind:value={selectedMain}>
-        {#each discovery.candidates as candidate}
-          <option value={candidate.relativePath}>{candidate.relativePath}</option>
+      Document
+      <select
+        value={chosen}
+        onchange={(event) => selectCandidate(event.currentTarget.value)}
+      >
+        {#each choosing.candidates as candidate}
+          <option value={candidate.documentPath}>
+            {candidate.name}{candidate.projectId === null ? '' : ' — already in Press'}
+          </option>
         {/each}
       </select>
     </label>
+    {#if chosenCandidate}
+      <p class="quiet"><code>{chosenCandidate.documentPath}</code></p>
+    {/if}
     <label>
       Engine
-      <select bind:value={selectedEngine}>
+      <select bind:value={chosenEngine}>
         {#each ENGINES as engine}<option value={engine}>{engine}</option>{/each}
       </select>
     </label>
-    {#if selectedMain}
-      <ul class="quiet">
-        {#each discovery.candidates.find((candidate) => candidate.relativePath === selectedMain)?.reasons ?? [] as reason}
-          <li>{reason}</li>
-        {/each}
-      </ul>
-    {/if}
     <div class="dialog-actions">
-      <button onclick={() => (discovery = null)} disabled={busy}>Cancel</button>
-      <button onclick={confirmProject} disabled={busy || !selectedMain}>Add and build</button>
+      <button onclick={() => (choosing = null)} disabled={busy}>Cancel</button>
+      <button onclick={confirmChoice} disabled={busy || !chosen}>Open and build</button>
     </div>
   </dialog>
 {/if}
@@ -931,10 +984,7 @@
       Name
       <input bind:value={settingsName} maxlength="80" />
     </label>
-    <label>
-      Main file
-      <input bind:value={settingsMain} />
-    </label>
+    <p class="quiet"><code>{settingsFor.documentPath}</code></p>
     <label>
       Engine
       <select bind:value={settingsEngine}>
@@ -942,8 +992,9 @@
       </select>
     </label>
     <p class="quiet">
-      Changing the main file or the engine discards every cached PDF for this project: versions
-      built by different engines cannot be compared.
+      Changing the engine discards every cached PDF for this project: versions built by different
+      engines cannot be compared. To compile a different document, open that document — it is its
+      own project.
     </p>
     <div class="dialog-actions">
       <button onclick={() => (settingsFor = null)} disabled={busy}>Cancel</button>
@@ -956,8 +1007,8 @@
   <dialog open aria-labelledby="delete-title">
     <h2 id="delete-title">Remove {confirmDelete.name}?</h2>
     <p>
-      Press forgets this project and deletes the PDFs it built. Nothing inside
-      <code>{confirmDelete.rootPath}</code> is touched.
+      Press forgets this document and deletes the PDFs it built.
+      <code>{confirmDelete.documentPath}</code> and everything beside it are untouched.
     </p>
     <div class="dialog-actions">
       <button onclick={() => (confirmDelete = null)} disabled={busy}>Cancel</button>
@@ -977,6 +1028,16 @@
     margin: 0;
     font-family: system-ui, sans-serif;
     font-size: 14px;
+  }
+
+  /* Scrollbars take no layout space.
+     WebKit has no middle setting here: an unstyled scrollbar reserves 15px of
+     gutter, and styling it to be thinner still reserves whatever width it is
+     given — there is no CSS that produces the overlay kind. So they are hidden,
+     and position is read from the page counter in the footer instead. */
+  :global(::-webkit-scrollbar) {
+    width: 0;
+    height: 0;
   }
 
   :global(button),
@@ -1034,6 +1095,10 @@
     grid-template-rows: minmax(0, 1fr) auto auto auto;
     height: 100vh;
     position: relative;
+    /* A fixed app shell: the PDF scrolls inside its own pane and the rows above
+       and below are sized to fit, so nothing here should ever scroll the window
+       itself. Without this one long message drags the whole layout sideways. */
+    overflow: hidden;
   }
 
   /* Overlaid rather than laid out, so it costs no vertical space. Kept narrow:
@@ -1076,11 +1141,20 @@
   }
 
   .meta,
+  /* The one part of the footer that gives way. Everything else is a control
+     whose label stops meaning anything once it is clipped, so the version line
+     absorbs the whole squeeze and ellipsises. */
   .build {
+    min-width: 0;
     overflow: hidden;
     color: #767676;
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+
+  .bar > button,
+  .bar > .quiet {
+    flex: none;
   }
 
   .dot {
@@ -1128,6 +1202,8 @@
   }
 
   .version {
+    display: flex;
+    align-items: flex-start;
     border-bottom: 1px solid #0000000d;
   }
 
@@ -1138,7 +1214,8 @@
   .version-open {
     display: grid;
     gap: 0.15rem;
-    width: 100%;
+    flex: 1;
+    min-width: 0;
     padding: 0.4rem 0.6rem;
     border: 0;
     background: none;
@@ -1148,12 +1225,6 @@
 
   .version-open .body {
     white-space: pre-wrap;
-  }
-
-  .version-actions {
-    display: flex;
-    gap: 0.25rem;
-    padding: 0 0.35rem 0.3rem;
   }
 
   dialog textarea {
@@ -1232,6 +1303,11 @@
 
   .strip span {
     flex: 1;
+    /* Both matter: a flex item will not shrink below its content without
+       min-width, and a filesystem path has no spaces to break at, so without
+       these one notice widens the whole window. */
+    min-width: 0;
+    overflow-wrap: anywhere;
   }
 
   /* -- library --------------------------------------------------------- */
@@ -1251,6 +1327,9 @@
 
   .library-header {
     justify-content: space-between;
+    /* At a narrow window the Add button drops below the title rather than
+       squeezing it off the screen. */
+    flex-wrap: wrap;
   }
 
   .project-grid {
@@ -1274,6 +1353,9 @@
     background: none;
     text-align: left;
     cursor: pointer;
+    /* A document name is a path fragment with no spaces to break at, so without
+       this a long one widens its card and the whole grid with it. */
+    overflow-wrap: anywhere;
   }
 
   .project-open > :global(strong),
@@ -1307,8 +1389,60 @@
     text-align: center;
   }
 
+  /* -- context menu ----------------------------------------------------- */
+
+  .menu-backdrop {
+    position: fixed;
+    inset: 0;
+    z-index: 30;
+    padding: 0;
+    border: 0;
+    background: none;
+    cursor: default;
+  }
+
+  .context-menu {
+    position: fixed;
+    z-index: 31;
+    margin: 0;
+    padding: 0.2rem 0;
+    list-style: none;
+    background: #fff;
+    border: 1px solid #0000002a;
+  }
+
+  .context-menu button {
+    display: block;
+    width: 100%;
+    padding: 0.25rem 1rem;
+    border: 0;
+    background: none;
+    text-align: left;
+    white-space: nowrap;
+    cursor: pointer;
+  }
+
+  .context-menu button:hover:not(:disabled) {
+    background: #0000000d;
+  }
+
+  .context-menu button:disabled {
+    color: #aaa;
+    cursor: default;
+  }
+
+  /* A non-modal <dialog open> defaults to its static position, which in the
+     reader lands a full viewport below a 100vh grid — open and unreachable.
+     Fixed and centred is what makes it visible at all. */
   dialog {
+    position: fixed;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    z-index: 20;
     width: min(34rem, calc(100% - 2rem));
+    max-height: calc(100vh - 2rem);
+    overflow-y: auto;
     border: 1px solid #0000002a;
     border-radius: 6px;
   }

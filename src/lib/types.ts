@@ -50,29 +50,26 @@ export type ArtifactSummary = {
   revision: number;
 };
 
-/** A project plus the state of its working tree. */
+/**
+ * A project plus the state of its working tree.
+ *
+ * A project is a document: `documentPath` is its identity, and `directory`,
+ * `fileName` and `kind` are derived from it by the backend.
+ */
 export type ProjectSummary = {
   id: number;
   name: string;
-  rootPath: string;
-  mainFile: string;
-  workingDirectory: string;
+  documentPath: string;
+  directory: string;
+  fileName: string;
   kind: DocumentKind;
   engine: Engine;
   createdAt: number;
   lastOpenedAt: number;
   build: BuildState;
   artifact: ArtifactSummary | null;
-  pathAvailable: boolean;
-  mainFileAvailable: boolean;
-};
-
-/** A path handed to Press from outside: the command line, or `:Press`. */
-export type OpenRequest = {
-  path: string;
-  projectId: number | null;
-  report: DiscoveryReport | null;
-  message: string | null;
+  /** The document is still where Press left it. */
+  available: boolean;
 };
 
 /** A stored version of a project's source. */
@@ -121,29 +118,31 @@ export type SearchHit = {
   height: number;
 };
 
-export type MainCandidate = {
-  relativePath: string;
-  kind: DocumentKind;
-  score: number;
-  reasons: string[];
-};
-
 export type ToolInfo = {
   available: boolean;
   path: string | null;
   version: string | null;
 };
 
-export type DiscoveryReport = {
-  rootPath: string;
-  projectName: string;
-  texFileCount: number;
-  candidates: MainCandidate[];
-  recommendedMain: string | null;
-  requiresSelection: boolean;
-  /** Every latexmk configuration file in the folder; these are executable Perl. */
+/** One document a path resolved to. `projectId` is set when Press has it already. */
+export type OpenCandidate = {
+  documentPath: string;
+  /** Suggested `<folder>/<file>` name, ignored when the project exists. */
+  name: string;
+  kind: DocumentKind;
+  engine: Engine | null;
+  projectId: number | null;
+  /** latexmk configuration beside this document; these are executable Perl. */
   latexmkrcPaths: string[];
-  detectedEngine: Engine | null;
+};
+
+/**
+ * What a path resolved to. The Add button, `:Press` and `press <path>` all ask
+ * the same question and all get this back.
+ */
+export type OpenRequest = {
+  path: string;
+  candidates: OpenCandidate[];
   warnings: string[];
   toolchain: {
     latexmk: ToolInfo;

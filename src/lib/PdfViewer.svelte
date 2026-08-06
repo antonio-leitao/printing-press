@@ -44,14 +44,19 @@
   /** Time constant of the scroll glide. Short enough to feel immediate. */
   const GLIDE_TAU = 55;
   /**
-   * Gap left above a page when jumping to it. Matches the top padding of
-   * `.pages` below, because the window has no titlebar and the traffic lights
-   * are drawn over this corner: a page landed on by `G` or `12G` has to clear
-   * them the same way the first page does at rest.
+   * The gap around a page, which is the `margin` on `.page` in `PdfPage.svelte`
+   * and the only spacing there is: `.pages` adds no padding of its own, so a
+   * document opens flush against the top of the window.
+   *
+   * Changing it there means changing it here, because the two have to agree for
+   * a fit to leave no leftover and for a jumped-to page to land where the first
+   * page sits at rest.
    */
-  const PAGE_LEAD = 36;
-  /** Breathing room either side when fitting a page to the window. */
-  const FIT_MARGIN = 48;
+  const PAGE_GUTTER = 16;
+  /** Gap left above a page when jumping to it, so `G` matches the resting view. */
+  const PAGE_LEAD = PAGE_GUTTER;
+  /** Both gutters, which is exactly the width a fitted page cannot use. */
+  const FIT_MARGIN = PAGE_GUTTER * 2;
 
   // Only ever replaced once the new document's geometry has arrived; blanking
   // it first is what made every rebuild flash an empty viewer.
@@ -367,18 +372,31 @@
   }
 
   /**
-   * A document opens at the width of the window, which is how a page sits on a
-   * desk. Only ever on open: a rebuild, or switching to a stored version, must
-   * not override a zoom the reader chose.
+   * A document opens filling the width of the window, at the top of the first
+   * page. Only ever on open: a rebuild, or switching to a stored version, must
+   * not override a zoom the reader chose or scroll them away from where they
+   * were reading.
    */
   async function fitWidthOnOpen(sizes: PageSize[]) {
     await tick();
+    // A frame after the DOM update, because the viewer has no measurable width
+    // until it has been laid out at least once.
+    await nextFrame();
     if (!viewer || sizes.length === 0) return;
     const available = viewer.clientWidth - FIT_MARGIN;
-    // The viewer may not be laid out yet on the very first frame.
+    // Still not laid out. Leaving `sized` false means the next document to
+    // arrive tries again rather than being stuck at the default zoom.
     if (available <= 0) return;
     zoom = normalizeZoom(available / sizes[0].width);
     sized = true;
+
+    // After the new zoom has been laid out, or the reset would race the taller
+    // content and leave the document a little way down.
+    await tick();
+    if (!viewer) return;
+    stopGlide();
+    viewer.scrollTop = 0;
+    viewer.scrollLeft = 0;
   }
 
   // -- keyboard ---------------------------------------------------------
@@ -559,11 +577,14 @@
   }
 
   .pages {
+    /* Contains the pages' own margins rather than letting the first one collapse
+       out of the top and the last one fall outside the scrollable area. With
+       that, the only gap around a document is `.page`'s margin — one gutter, the
+       same on all four sides, and PAGE_GUTTER above is that number. */
+    display: flow-root;
     width: max-content;
     min-width: 100%;
-    /* Enough headroom that the first page clears the traffic lights at rest.
-       Unlike a bar, this scrolls away. */
-    padding: 2.25rem 16px 16px;
+    padding: 0;
   }
 
   .pages.zooming {

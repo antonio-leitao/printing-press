@@ -12,6 +12,7 @@
 //! Nothing here writes to the project folder. It only ever reads.
 
 use std::{
+    collections::HashSet,
     fmt::Write as _,
     fs::File,
     io::{BufReader, Read},
@@ -52,34 +53,14 @@ pub struct Capture {
     pub byte_size: i64,
 }
 
-/// What a snapshot of this project should hold.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Scope<'a> {
-    /// Everything in the folder belongs to the document. A LaTeX project owns
-    /// its directory.
-    Folder,
-    /// One document plus the assets beside it. Other markdown files in the same
-    /// folder are other documents, and storing them here would put another
-    /// project's drafts in this project's history.
-    Document { main_file: &'a str },
-}
-
-impl Scope<'_> {
-    fn includes(&self, relative: &Path) -> bool {
-        match self {
-            Self::Folder => true,
-            Self::Document { main_file } => {
-                crate::model::DocumentKind::of(relative) != crate::model::DocumentKind::Markdown
-                    || relative == Path::new(main_file)
-            }
-        }
-    }
-}
-
-/// Reads every source file under `root` into the object store and returns the
-/// manifest. Generated files, editor scratch and other tools' history are
-/// skipped, so a snapshot holds what the author wrote and nothing else.
-pub fn capture(root: &Path, objects: &Path, scope: Scope<'_>) -> AppResult<Capture> {
+/// Reads every source file in the document's directory into the object store and
+/// returns the manifest.
+///
+/// Generated files, editor scratch, other tools' history and the documents of
+/// other projects are all skipped, so a snapshot holds what this document needs
+/// to compile and nothing else. `foreign` names those other documents, relative
+/// to `root`.
+pub fn capture(root: &Path, objects: &Path, foreign: &HashSet<String>) -> AppResult<Capture> {
     if !root.is_dir() {
         return Err(AppError::NotFound(format!(
             "{} is no longer a directory",
@@ -107,7 +88,7 @@ pub fn capture(root: &Path, objects: &Path, scope: Scope<'_>) -> AppResult<Captu
         let Ok(relative) = entry.path().strip_prefix(root) else {
             continue;
         };
-        if !files::is_project_source(relative) || !scope.includes(relative) {
+        if !files::belongs_to_project(relative, foreign) {
             continue;
         }
 
@@ -134,7 +115,7 @@ pub fn capture(root: &Path, objects: &Path, scope: Scope<'_>) -> AppResult<Captu
 
         let object = store(entry.path(), objects)?;
         files_seen.push(StoredFile {
-            path: portable(relative),
+            path: files::portable(relative),
             object,
             byte_size: size as i64,
         });
@@ -245,15 +226,6 @@ fn manifest_revision(files: &[StoredFile]) -> String {
     hex(&hasher.finalize())
 }
 
-/// Forward slashes regardless of platform, so a manifest means the same thing
-/// wherever it is read.
-fn portable(path: &Path) -> String {
-    path.components()
-        .filter_map(|component| component.as_os_str().to_str())
-        .collect::<Vec<_>>()
-        .join("/")
-}
-
 fn hex(bytes: &[u8]) -> String {
     let mut out = String::with_capacity(bytes.len() * 2);
     for byte in bytes {
@@ -292,7 +264,7 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         project(&root);
 
-        let capture = capture(&root, &objects, Scope::Folder).unwrap();
+        let capture = capture(&root, &objects, &HashSet::new()).unwrap();
         let paths = capture
             .files
             .iter()
@@ -316,7 +288,7 @@ mod tests {
             .filter_map(Result::ok)
             .map(|entry| entry.path().to_path_buf())
             .collect::<Vec<_>>();
-        capture(&root, &objects, Scope::Folder).unwrap();
+        capture(&root, &objects, &HashSet::new()).unwrap();
         let after = WalkDir::new(&root)
             .into_iter()
             .filter_map(Result::ok)
@@ -336,8 +308,8 @@ mod tests {
             write(root, "main.tex", "same bytes\n");
         }
 
-        let one = capture(&first, &objects, Scope::Folder).unwrap();
-        let two = capture(&second, &objects, Scope::Folder).unwrap();
+        let one = capture(&first, &objects, &HashSet::new()).unwrap();
+        let two = capture(&second, &objects, &HashSet::new()).unwrap();
         assert_eq!(one.revision, two.revision);
 
         // Stored once, not twice.
@@ -356,15 +328,15 @@ mod tests {
         let objects = directory.path().join("objects");
         std::fs::create_dir_all(&root).unwrap();
         write(&root, "main.tex", "before\n");
-        let before = capture(&root, &objects, Scope::Folder).unwrap();
+        let before = capture(&root, &objects, &HashSet::new()).unwrap();
 
         write(&root, "main.tex", "after\n");
-        let after = capture(&root, &objects, Scope::Folder).unwrap();
+        let after = capture(&root, &objects, &HashSet::new()).unwrap();
         assert_ne!(before.revision, after.revision);
 
         // Renaming a file changes the manifest even though the bytes are the same.
         std::fs::rename(root.join("main.tex"), root.join("paper.tex")).unwrap();
-        let renamed = capture(&root, &objects, Scope::Folder).unwrap();
+        let renamed = capture(&root, &objects, &HashSet::new()).unwrap();
         assert_ne!(after.revision, renamed.revision);
     }
 
@@ -377,7 +349,7 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         project(&root);
 
-        let capture = capture(&root, &objects, Scope::Folder).unwrap();
+        let capture = capture(&root, &objects, &HashSet::new()).unwrap();
         // The working tree moves on; the snapshot must not.
         write(&root, "main.tex", "edited after the snapshot\n");
 
@@ -401,7 +373,7 @@ mod tests {
         let root = directory.path().join("project");
         std::fs::create_dir_all(&root).unwrap();
         std::fs::write(root.join("main.aux"), "generated").unwrap();
-        let error = capture(&root, &directory.path().join("objects"), Scope::Folder).unwrap_err();
+        let error = capture(&root, &directory.path().join("objects"), &HashSet::new()).unwrap_err();
         assert!(error.to_string().contains("no source files"));
     }
 
@@ -415,30 +387,37 @@ mod tests {
         let file = File::create(&big).unwrap();
         file.set_len(MAX_FILE_BYTES + 1).unwrap();
 
-        let error = capture(&root, &directory.path().join("objects"), Scope::Folder)
+        let error = capture(&root, &directory.path().join("objects"), &HashSet::new())
             .unwrap_err()
             .to_string();
         assert!(error.contains("huge.png"), "{error}");
     }
 
+    /// A snapshot of one document does not store the neighbouring documents,
+    /// whatever they are written in — otherwise editing the talk would put a new
+    /// revision in the essay's history and rebuild it.
     #[test]
-    fn a_document_snapshot_leaves_the_other_documents_out() {
+    fn a_snapshot_leaves_the_other_projects_documents_out() {
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path().join("writing");
         let objects = directory.path().join("objects");
         std::fs::create_dir_all(&root).unwrap();
         write(&root, "essay.md", "# An essay\n");
         write(&root, "talk.md", "# A talk, a different project\n");
+        write(&root, "poster/poster.tex", "\\documentclass{article}\n");
         write(&root, "figures/plot.png", "not really a png\n");
         write(&root, "references.bib", "@book{a,title={A}}\n");
 
-        let capture = capture(&root, &objects, Scope::Document { main_file: "essay.md" }).unwrap();
+        let foreign = ["talk.md".to_owned(), "poster/poster.tex".to_owned()]
+            .into_iter()
+            .collect::<HashSet<_>>();
+        let capture = capture(&root, &objects, &foreign).unwrap();
         let paths = capture
             .files
             .iter()
             .map(|file| file.path.as_str())
             .collect::<Vec<_>>();
-        // The document, and the assets beside it — but not the neighbour.
+        // The document, and the assets beside it — but neither neighbour.
         assert_eq!(paths, ["essay.md", "figures/plot.png", "references.bib"]);
     }
 

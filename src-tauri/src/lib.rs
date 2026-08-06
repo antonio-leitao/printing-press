@@ -2,11 +2,10 @@ mod build;
 mod commands;
 mod database;
 mod diagnostics;
-mod discovery;
+mod documents;
 mod editor;
 mod error;
 mod files;
-mod intake;
 mod model;
 mod protocol;
 mod render;
@@ -111,14 +110,13 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::list_projects,
-            commands::inspect_project,
-            commands::inspect_document,
+            commands::resolve_path,
             commands::add_project,
             commands::open_project,
             commands::close_project,
             commands::build_project,
             commands::rename_project,
-            commands::update_project_settings,
+            commands::set_project_engine,
             commands::delete_project,
             commands::page_layout,
             commands::page_words,
@@ -127,6 +125,7 @@ pub fn run() {
             commands::list_versions,
             commands::rename_snapshot,
             commands::delete_snapshot,
+            commands::export_artifact,
             commands::get_build_log,
             commands::launch_neovim,
             commands::editor_status,
@@ -168,7 +167,7 @@ fn accept_open_request(app: tauri::AppHandle, path: PathBuf) {
         let handle = app.clone();
         let resolved = tauri::async_runtime::spawn_blocking(move || {
             let state = handle.state::<AppState>();
-            intake::resolve(&path, &state.repository)
+            documents::resolve(&path, &state.repository)
         })
         .await;
 
@@ -176,9 +175,9 @@ fn accept_open_request(app: tauri::AppHandle, path: PathBuf) {
             Ok(Ok(request)) => request,
             Ok(Err(error)) => model::OpenRequest {
                 path: String::new(),
-                project_id: None,
-                report: None,
-                message: Some(error.to_string()),
+                candidates: Vec::new(),
+                warnings: vec![error.to_string()],
+                toolchain: documents::toolchain(),
             },
             Err(error) => {
                 eprintln!("Press could not resolve a path from the command line: {error}");
@@ -288,7 +287,7 @@ mod tests {
     use super::*;
     use crate::{
         database::{NewArtifact, NewProject},
-        model::{DocumentKind, Engine, SourceRef},
+        model::{Engine, SourceRef},
     };
 
     #[test]
@@ -328,14 +327,12 @@ mod tests {
         let objects_root = directory.path().join("objects");
         std::fs::create_dir(&source).unwrap();
 
+        std::fs::write(source.join("main.tex"), "\\documentclass{article}").unwrap();
         let repository = Repository::open(&directory.path().join("press.db")).unwrap();
         let project = repository
             .upsert_project(NewProject {
-                name: "Source",
-                root_path: source.to_str().unwrap(),
-                main_file: "main.tex",
-                working_directory: ".",
-                kind: DocumentKind::Latex,
+                name: "source/main.tex",
+                document_path: source.join("main.tex").to_str().unwrap(),
                 engine: Engine::PdfLatex,
             })
             .unwrap();
@@ -367,8 +364,8 @@ mod tests {
         std::fs::create_dir_all(&ghost_work).unwrap();
 
         // One object is still referenced by a snapshot; the other is not.
-        std::fs::write(source.join("main.tex"), "\\documentclass{article}").unwrap();
-        let capture = crate::snapshot::capture(&source, &objects_root, crate::snapshot::Scope::Folder).unwrap();
+        let capture =
+            crate::snapshot::capture(&source, &objects_root, &HashSet::new()).unwrap();
         repository
             .create_snapshot(project.id, &capture, "First", None)
             .unwrap();
