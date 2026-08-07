@@ -6,7 +6,7 @@ import type {
   PageSize,
   ProjectSummary,
   SearchHit,
-  SnapshotSummary,
+  SnapshotOutcome,
   SourceRef,
   TextBox,
   VersionSummary
@@ -46,7 +46,7 @@ export const api = {
 
   /** Stores the project's source as it is now, under a title. */
   createSnapshot: (projectId: number, title: string, body?: string) =>
-    invoke<SnapshotSummary>('create_snapshot', { projectId, title, body }),
+    invoke<SnapshotOutcome>('create_snapshot', { projectId, title, body }),
 
   /** The working tree pinned at the top, then every snapshot. */
   listVersions: (projectId: number) =>

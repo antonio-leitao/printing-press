@@ -10,8 +10,8 @@ use rusqlite::{Connection, OptionalExtension, Row, Transaction, params};
 use crate::{
     error::{AppError, AppResult},
     model::{
-        ArtifactSummary, BuildState, Diagnostic, Engine, Project, ProjectSummary, SnapshotSummary,
-        SourceRef, VersionSummary,
+        ArtifactSummary, BuildState, Diagnostic, Engine, Project, ProjectSummary, SnapshotOutcome,
+        SnapshotSummary, SourceRef, VersionSummary,
     },
 };
 
@@ -413,13 +413,17 @@ impl Repository {
 
     /// Records a captured snapshot. The objects are already in the store; this
     /// is what makes them findable again.
+    ///
+    /// Content that is already kept is turned away instead: the revision is a
+    /// hash of the manifest, so a snapshot whose revision is on file would be a
+    /// second name for a version that exists.
     pub fn create_snapshot(
         &self,
         project_id: i64,
         capture: &crate::snapshot::Capture,
         title: &str,
         body: Option<&str>,
-    ) -> AppResult<SnapshotSummary> {
+    ) -> AppResult<SnapshotOutcome> {
         let title = title.trim();
         if title.is_empty() {
             return Err(AppError::InvalidInput("a version needs a title".into()));
@@ -434,6 +438,21 @@ impl Repository {
 
         let mut connection = self.lock()?;
         let transaction = connection.transaction()?;
+        // Checked inside the transaction, so two snapshots asked for at once
+        // cannot both find nothing and both store it.
+        let existing: Option<String> = transaction
+            .query_row(
+                "SELECT title FROM snapshots
+                  WHERE project_id = ?1 AND revision = ?2
+                  ORDER BY created_at DESC, id DESC
+                  LIMIT 1",
+                params![project_id, &capture.revision],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if let Some(title) = existing {
+            return Ok(SnapshotOutcome::Unchanged { title });
+        }
         transaction.execute(
             "INSERT INTO snapshots (
                 project_id, revision, title, body, created_at, file_count, byte_size
@@ -460,15 +479,17 @@ impl Repository {
         }
         transaction.commit()?;
 
-        Ok(SnapshotSummary {
-            id,
-            project_id,
-            revision: capture.revision.clone(),
-            title: title.to_owned(),
-            body: body.map(ToOwned::to_owned),
-            created_at: now,
-            file_count: capture.files.len() as i64,
-            byte_size: capture.byte_size,
+        Ok(SnapshotOutcome::Stored {
+            snapshot: SnapshotSummary {
+                id,
+                project_id,
+                revision: capture.revision.clone(),
+                title: title.to_owned(),
+                body: body.map(ToOwned::to_owned),
+                created_at: now,
+                file_count: capture.files.len() as i64,
+                byte_size: capture.byte_size,
+            },
         })
     }
 
@@ -1308,7 +1329,9 @@ mod tests {
         let capture = crate::snapshot::capture(&root, &objects, &HashSet::new()).unwrap();
         let first = database
             .create_snapshot(project.id, &capture, "First", None)
-            .unwrap();
+            .unwrap()
+            .stored()
+            .expect("the first snapshot of this content");
         std::fs::write(root.join("main.tex"), "\\documentclass{book}").unwrap();
         let capture = crate::snapshot::capture(&root, &objects, &HashSet::new()).unwrap();
         database
@@ -1324,6 +1347,62 @@ mod tests {
 
         database.delete_snapshot(first.id).unwrap();
         assert_eq!(count(), 1, "discarding a version takes it out of the count");
+    }
+
+    /// A version that holds nothing new is not a version. The revision is a
+    /// hash of the manifest, so content already on file is turned away and the
+    /// version it already is gets named — and once the content moves on, the
+    /// same title works.
+    #[test]
+    fn content_that_is_already_kept_is_not_stored_twice() {
+        let directory = tempfile::tempdir().unwrap();
+        let objects = directory.path().join("objects");
+        let database = Repository::open(&directory.path().join("press.db")).unwrap();
+        let root = project_fixture(directory.path(), "thesis");
+        let project = add(&database, &root.join("main.tex"));
+
+        let capture = crate::snapshot::capture(&root, &objects, &HashSet::new()).unwrap();
+        let stored = database
+            .create_snapshot(project.id, &capture, "Before the meeting", None)
+            .unwrap();
+        assert!(matches!(stored, SnapshotOutcome::Stored { .. }));
+
+        let again = database
+            .create_snapshot(project.id, &capture, "After the meeting", None)
+            .unwrap();
+        assert_eq!(
+            again,
+            SnapshotOutcome::Unchanged {
+                title: "Before the meeting".into()
+            },
+            "the same content names the version it already is"
+        );
+        assert_eq!(
+            database.list_versions(project.id).unwrap().len(),
+            2,
+            "the working tree and the one snapshot"
+        );
+
+        // Reverting to content that was stored earlier is the same case: it is
+        // that version, whatever has happened since.
+        std::fs::write(root.join("main.tex"), "\\documentclass{book}").unwrap();
+        let moved_on = crate::snapshot::capture(&root, &objects, &HashSet::new()).unwrap();
+        assert!(matches!(
+            database
+                .create_snapshot(project.id, &moved_on, "After the meeting", None)
+                .unwrap(),
+            SnapshotOutcome::Stored { .. }
+        ));
+        std::fs::write(root.join("main.tex"), "\\documentclass{article}").unwrap();
+        let reverted = crate::snapshot::capture(&root, &objects, &HashSet::new()).unwrap();
+        assert_eq!(
+            database
+                .create_snapshot(project.id, &reverted, "Back again", None)
+                .unwrap(),
+            SnapshotOutcome::Unchanged {
+                title: "Before the meeting".into()
+            }
+        );
     }
 
     #[test]

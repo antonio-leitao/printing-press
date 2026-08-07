@@ -1,11 +1,13 @@
 <script lang="ts">
-  import { onMount, type Component } from 'svelte';
+  import { onMount, untrack, type Component } from 'svelte';
+  import { fade } from 'svelte/transition';
   import { Download, Pencil, Pin, PinOff, Trash2 } from '@lucide/svelte';
   import { listen } from '@tauri-apps/api/event';
   import { open } from '@tauri-apps/plugin-dialog';
   import PdfThumbnail from '$lib/PdfThumbnail.svelte';
   import PdfViewer from '$lib/PdfViewer.svelte';
   import { api, errorMessage } from '$lib/api';
+  import { fail, notify } from '$lib/messages.svelte';
   import {
     ENGINES,
     WORKTREE,
@@ -47,9 +49,6 @@
   let chosen = $state('');
   let chosenEngine = $state<Engine>('pdflatex');
   let busy = $state(false);
-  let error = $state('');
-  let notice = $state('');
-  let watcherNotice = $state('');
   let buildLog = $state('');
   let editorState = $state('closed');
   let progress = $state<BuildProgress | null>(null);
@@ -57,11 +56,12 @@
   let settingsName = $state('');
   let settingsEngine = $state<Engine>('pdflatex');
   let confirmDelete = $state<ProjectSummary | null>(null);
+  let confirmDiscard = $state<VersionSummary | null>(null);
 
   // -- history -------------------------------------------------------------
   let versions = $state<VersionSummary[]>([]);
-  /** Which version the viewer is showing. */
-  let selectedRef = $state<string>(WORKTREE);
+  /** Which row of the history the viewer is showing. */
+  let selectedKey = $state<string>(WORKTREE);
   let showHistory = $state(false);
   let snapshotOpen = $state(false);
   let snapshotTitle = $state('');
@@ -69,9 +69,20 @@
   let renaming = $state<VersionSummary | null>(null);
   let renameTitle = $state('');
 
+  /// What identifies a row of the history. Not the source ref: a ref carries a
+  /// revision, and a revision is a content hash, so any two snapshots of the
+  /// same source answer to the same ref. Press no longer stores a second one —
+  /// see `create_snapshot` — but databases written before that rule have
+  /// pairs in them, and a duplicate key takes the whole panel down.
+  function versionKey(version: VersionSummary) {
+    return version.snapshot ? `snapshot-${version.snapshot.id}` : WORKTREE;
+  }
+
   const selected = $derived(
-    versions.find((version) => version.sourceRef === selectedRef) ?? versions[0] ?? null
+    versions.find((version) => versionKey(version) === selectedKey) ?? versions[0] ?? null
   );
+  /** What the viewer builds and shows — shared by versions that hold the same source. */
+  const selectedRef = $derived(selected?.sourceRef ?? WORKTREE);
   /** The working tree's artifact is the fallback while a version is still building. */
   const shownArtifact = $derived(selected?.artifact ?? null);
 
@@ -132,14 +143,13 @@
   }
 
   async function setPinned(project: ProjectSummary, pinned: boolean) {
-    clearMessages();
     try {
       await api.setProjectPinned(project.id, pinned);
       // Refetched rather than merged: pinning changes the order, and the
       // backend is what decides the order.
       await refreshProjects();
     } catch (reason) {
-      error = errorMessage(reason);
+      fail(reason);
     }
   }
 
@@ -163,10 +173,10 @@
         }
       });
       items.push({
-        label: 'Discard',
+        label: 'Discard…',
         icon: Trash2,
         danger: true,
-        run: () => void discardVersion(version)
+        run: () => (confirmDiscard = version)
       });
     }
     return items;
@@ -174,11 +184,10 @@
 
   async function downloadArtifact(artifactId: number | undefined) {
     if (artifactId === undefined) return;
-    clearMessages();
     try {
-      notice = `Saved ${await api.exportArtifact(artifactId)}`;
+      notify(`Saved ${await api.exportArtifact(artifactId)}`);
     } catch (reason) {
-      error = errorMessage(reason);
+      fail(reason);
     }
   }
 
@@ -192,7 +201,9 @@
   const unpinned = $derived(projects.filter((project) => !project.pinned));
 
   const dialogOpen = $derived(
-    Boolean(choosing || settingsFor || confirmDelete || snapshotOpen || renaming || menu)
+    Boolean(
+      choosing || settingsFor || confirmDelete || confirmDiscard || snapshotOpen || renaming || menu
+    )
   );
 
   onMount(() => {
@@ -229,8 +240,9 @@
       );
       unlisteners.push(
         await listen<WatcherError>('watcher-error', (event) => {
-          // Not a build failure: the document is fine, Press just cannot see saves.
-          watcherNotice = event.payload.message;
+          // Not a build failure: the document is fine, Press just cannot see
+          // saves. A warning, because nothing is broken but something is lost.
+          notify(event.payload.message, 'warning');
         })
       );
       unlisteners.push(
@@ -243,7 +255,7 @@
         // why the list is empty.
         try {
           const startup = await api.takeStartupNotice();
-          if (startup) notice = startup;
+          if (startup) notify(startup);
         } catch {
           // A missing notice is not worth reporting.
         }
@@ -301,6 +313,7 @@
       for (const unlisten of unlisteners) unlisten();
       window.removeEventListener('keydown', shortcuts);
       window.clearInterval(editorPoll);
+      clearTimeout(barHide);
     };
   });
 
@@ -317,7 +330,7 @@
     try {
       projects = await api.listProjects();
     } catch (reason) {
-      error = errorMessage(reason);
+      fail(reason);
     }
   }
 
@@ -325,7 +338,6 @@
   /// pick a folder for: `:Press` and `press <path>` can still hand over a
   /// directory, and it opens the same picker this does.
   async function chooseDocument() {
-    clearMessages();
     try {
       const selected = await open({
         directory: false,
@@ -339,7 +351,7 @@
       busy = true;
       await present(await api.resolvePath(selected));
     } catch (reason) {
-      error = errorMessage(reason);
+      fail(reason);
     } finally {
       busy = false;
     }
@@ -349,11 +361,11 @@
   /// opens it; anything else asks. Shared by every way into Press.
   async function present(request: OpenRequest) {
     if (!request.toolchain.latexmk.available) {
-      error = 'latexmk was not found. Install a TeX distribution or add latexmk to PATH.';
+      notify('latexmk was not found. Install a TeX distribution or add latexmk to PATH.', 'error');
       return;
     }
     if (request.candidates.length === 0) {
-      error = request.warnings[0] ?? `Press found no document in ${request.path}.`;
+      notify(request.warnings[0] ?? `Press found no document in ${request.path}.`, 'error');
       return;
     }
     const only = request.candidates.length === 1 ? request.candidates[0] : null;
@@ -383,7 +395,6 @@
     try {
       const request = await api.takePendingOpen();
       if (!request) return;
-      clearMessages();
       busy = true;
       try {
         await present(request);
@@ -391,18 +402,17 @@
         busy = false;
       }
     } catch (reason) {
-      error = errorMessage(reason);
+      fail(reason);
     }
   }
 
   async function confirmChoice() {
     if (!chosenCandidate) return;
     busy = true;
-    clearMessages();
     try {
       await openCandidate(chosenCandidate, chosenEngine);
     } catch (reason) {
-      error = errorMessage(reason);
+      fail(reason);
     } finally {
       busy = false;
     }
@@ -423,16 +433,15 @@
   }
 
   async function openProject(project: ProjectSummary) {
-    clearMessages();
     busy = true;
     try {
       activeProject = await api.openProject(project.id);
       editorState = await api.editorStatus(project.id);
       panel = 'none';
-      selectedRef = WORKTREE;
+      selectedKey = WORKTREE;
       await refreshVersions();
     } catch (reason) {
-      error = errorMessage(reason);
+      fail(reason);
       activeProject = null;
     } finally {
       busy = false;
@@ -447,13 +456,12 @@
       editorState = 'closed';
       buildLog = '';
       progress = null;
-      watcherNotice = '';
       panel = 'none';
       versions = [];
       showHistory = false;
       await refreshProjects();
     } catch (reason) {
-      error = errorMessage(reason);
+      fail(reason);
     } finally {
       busy = false;
     }
@@ -463,11 +471,11 @@
     if (!activeProject) return;
     try {
       versions = await api.listVersions(activeProject.id);
-      if (!versions.some((version) => version.sourceRef === selectedRef)) {
-        selectedRef = WORKTREE;
+      if (!versions.some((version) => versionKey(version) === selectedKey)) {
+        selectedKey = WORKTREE;
       }
     } catch (reason) {
-      error = errorMessage(reason);
+      fail(reason);
     }
   }
 
@@ -481,21 +489,26 @@
   async function takeSnapshot() {
     if (!activeProject || !snapshotTitle.trim()) return;
     busy = true;
-    clearMessages();
     try {
-      const snapshot = await api.createSnapshot(
+      const outcome = await api.createSnapshot(
         activeProject.id,
         snapshotTitle.trim(),
         snapshotBody.trim() || undefined
       );
       snapshotOpen = false;
+      // Nothing was stored, because there was nothing new to store. Not a
+      // failure: the source is kept already, under the name this carries.
+      if (outcome.status === 'unchanged') {
+        notify(`Nothing has changed since “${outcome.title}”.`);
+        return;
+      }
       await refreshVersions();
       // Show what was just stored; it is already building.
-      selectedRef = `snapshot:${snapshot.revision}`;
+      selectedKey = `snapshot-${outcome.id}`;
       showHistory = true;
-      notice = `Stored “${snapshot.title}” — ${snapshot.fileCount} files.`;
+      notify(`Stored “${outcome.title}” — ${outcome.fileCount} files.`);
     } catch (reason) {
-      error = errorMessage(reason);
+      fail(reason);
     } finally {
       busy = false;
     }
@@ -503,7 +516,7 @@
 
   /** Shows a version, building it first if it has never been compiled. */
   async function selectVersion(version: VersionSummary) {
-    selectedRef = version.sourceRef;
+    selectedKey = versionKey(version);
     progress = null;
     buildLog = '';
     if (version.artifact || !activeProject) return;
@@ -511,7 +524,7 @@
     try {
       await api.buildProject(activeProject.id, version.sourceRef);
     } catch (reason) {
-      error = errorMessage(reason);
+      fail(reason);
     }
   }
 
@@ -524,22 +537,24 @@
       renaming = null;
       await refreshVersions();
     } catch (reason) {
-      error = errorMessage(reason);
+      fail(reason);
     } finally {
       busy = false;
     }
   }
 
-  async function discardVersion(version: VersionSummary) {
-    if (!version.snapshot) return;
+  async function discardVersion() {
+    const version = confirmDiscard;
+    if (!version?.snapshot) return;
     busy = true;
-    clearMessages();
     try {
       await api.deleteSnapshot(version.snapshot.id);
-      if (selectedRef === version.sourceRef) selectedRef = WORKTREE;
+      if (selectedKey === versionKey(version)) selectedKey = WORKTREE;
+      confirmDiscard = null;
       await refreshVersions();
+      notify(`Discarded “${version.title}”. The document itself was not touched.`);
     } catch (reason) {
-      error = errorMessage(reason);
+      fail(reason);
     } finally {
       busy = false;
     }
@@ -559,9 +574,13 @@
       ? 'building…'
       : age(project.artifact?.builtAt) ||
         (status === 'error' ? 'does not compile' : 'never built');
-    const versions = project.snapshotCount;
-    if (versions === 0) return state;
-    return `${state} · ${versions} version${versions === 1 ? '' : 's'}`;
+    // Snapshots, not versions: every project has a version — the working tree
+    // is one — so a count of versions would never be lower than one and would
+    // say nothing. A count of snapshots is a count of the states this document
+    // can be put back into, which is why one of them is already worth saying.
+    const kept = project.snapshotCount;
+    if (kept === 0) return state;
+    return `${state} · ${kept} snapshot${kept === 1 ? '' : 's'}`;
   }
 
   function age(seconds: number | null | undefined) {
@@ -573,34 +592,38 @@
     return `${Math.floor(elapsed / 86400)}d ago`;
   }
 
-  /** What the sidebar says about a version's build. */
-  function versionState(version: VersionSummary) {
-    if (version.build.status === 'running' || version.build.status === 'queued') {
-      return 'building';
-    }
-    if (version.build.status === 'error') return 'fails to compile';
-    return version.artifact ? 'built' : 'not built';
+  /// The history's timestamp: one number and one letter, wide enough for a
+  /// glance and narrow enough to sit in a gutter beside the title. The units
+  /// are the ones the rest of the world abbreviates this way — s, m, h, d, w,
+  /// then `mo` for months, because `m` is already minutes, and y.
+  function shortAge(seconds: number) {
+    const elapsed = Math.max(0, Math.floor(Date.now() / 1000 - seconds));
+    if (elapsed < 60) return `${elapsed}s`;
+    if (elapsed < 3600) return `${Math.floor(elapsed / 60)}m`;
+    if (elapsed < 86400) return `${Math.floor(elapsed / 3600)}h`;
+    if (elapsed < 604800) return `${Math.floor(elapsed / 86400)}d`;
+    if (elapsed < 2592000) return `${Math.floor(elapsed / 604800)}w`;
+    if (elapsed < 31536000) return `${Math.floor(elapsed / 2592000)}mo`;
+    return `${Math.floor(elapsed / 31536000)}y`;
   }
 
   async function rebuild() {
     if (!activeProject) return;
-    clearMessages();
     try {
       await api.buildProject(activeProject.id, selectedRef);
     } catch (reason) {
-      error = errorMessage(reason);
+      fail(reason);
     }
   }
 
   async function launchEditor() {
     if (!activeProject) return;
-    clearMessages();
     try {
       const result = await api.launchNeovim(activeProject.id);
-      notice = result.message;
+      notify(result.message);
       editorState = result.status === 'connected' ? 'connected' : 'starting';
     } catch (reason) {
-      error = errorMessage(reason);
+      fail(reason);
     }
   }
 
@@ -614,7 +637,6 @@
     const project = settingsFor;
     if (!project) return;
     busy = true;
-    clearMessages();
     try {
       const name = settingsName.trim();
       if (name && name !== project.name) {
@@ -624,11 +646,11 @@
         // Discards every cached PDF. The new build produces a new artifact id,
         // so nothing stale can be shown.
         mergeProject(await api.setProjectEngine(project.id, settingsEngine));
-        notice = 'Engine changed. Cached PDFs were discarded and a rebuild has started.';
+        notify('Engine changed. Cached PDFs were discarded and a rebuild has started.');
       }
       settingsFor = null;
     } catch (reason) {
-      error = errorMessage(reason);
+      fail(reason);
     } finally {
       busy = false;
     }
@@ -638,7 +660,6 @@
     const project = confirmDelete;
     if (!project) return;
     busy = true;
-    clearMessages();
     try {
       await api.deleteProject(project.id);
       projects = projects.filter((item) => item.id !== project.id);
@@ -648,9 +669,9 @@
         progress = null;
       }
       confirmDelete = null;
-      notice = `Removed ${project.name} from Press. The document itself was not touched.`;
+      notify(`Removed ${project.name} from Press. The document itself was not touched.`);
     } catch (reason) {
-      error = errorMessage(reason);
+      fail(reason);
     } finally {
       busy = false;
     }
@@ -667,18 +688,84 @@
     }
   }
 
-  function clearMessages() {
-    error = '';
-    notice = '';
+  // -- build progress --------------------------------------------------------
+
+  /** The stage a markdown build starts in, named the same way in `runner.rs`. */
+  const PANDOC_STAGE = 'pandoc';
+
+  /// Where the bar stands at the end of each pdflatex pass. How many passes a
+  /// build needs is not knowable while it runs — latexmk reruns TeX until the
+  /// cross-references stop moving — so each pass covers a shorter stretch than
+  /// the one before it. The bar closes on the end without ever arriving, and
+  /// the build finishing is what fills it.
+  const PASS_MARKS = [0.06, 0.55, 0.78, 0.9, 0.96];
+
+  /// A guess at how far along a build is, in 0..1. Every input is something
+  /// latexmk actually said, so this is an estimate but never a fiction: the
+  /// pass tells us which stretch of the bar we are in, and the page within
+  /// that pass tells us how far across it.
+  function buildFraction() {
+    if (!progress) return PASS_MARKS[0];
+    if (progress.stage === PANDOC_STAGE) return 0.04;
+
+    // latexmk names the rule before TeX says which run it is, and says nothing
+    // at all until it starts. Neither is a finished pass.
+    const pass = progress.pass ?? 0;
+    if (pass === 0) return PASS_MARKS[0];
+
+    const started = PASS_MARKS[Math.min(pass - 1, PASS_MARKS.length - 1)];
+    const finished = PASS_MARKS[Math.min(pass, PASS_MARKS.length - 1)];
+    // biber, makeindex and friends ship no pages. They run between passes, so
+    // the pass that just ended is as far as we can honestly claim to be.
+    // Matched by prefix: `bibtex main` ends in tex without being an engine.
+    if (!ENGINES.some((engine) => progress?.stage.startsWith(engine))) return finished;
+    if (!progress.page) return started;
+
+    const expected = progress.expectedPages ?? 0;
+    // Without a page count from a previous build there is no denominator, so
+    // the pages approach the end of the stretch instead of dividing it.
+    const across =
+      expected > 0
+        ? Math.min(progress.page / expected, 1)
+        : 1 - Math.exp(-progress.page / 12);
+    return started + (finished - started) * across;
   }
 
-  function statusTone(project: ProjectSummary) {
-    const { status } = selected?.build ?? project.build;
-    if (status === 'success') return 'good';
-    if (status === 'error') return 'bad';
-    if (status === 'running' || status === 'queued') return 'busy';
-    return 'idle';
-  }
+  /// How full the bar is drawn. Held at whatever it reached, so a stage that
+  /// knows less than the one before it cannot walk the bar backwards.
+  let barValue = $state(0);
+  let barShown = $state(false);
+  let barBuilding = false;
+  /// Held outside the effect on purpose. As the effect's own cleanup it would
+  /// be cancelled by the next build update, and the finished bar would stay on
+  /// screen for good.
+  let barHide: ReturnType<typeof setTimeout> | undefined;
+
+  $effect(() => {
+    const status = selected?.build.status;
+    const building = status === 'running' || status === 'queued';
+    const next = building ? buildFraction() : 0;
+
+    untrack(() => {
+      if (building) {
+        clearTimeout(barHide);
+        // A new build starts the bar over rather than resuming the last one's.
+        if (!barBuilding) barValue = 0;
+        barBuilding = true;
+        barShown = true;
+        barValue = Math.max(barValue, status === 'queued' ? 0.02 : next);
+        return;
+      }
+      // Nothing is building. Either the bar is already on its way out — leave
+      // that timer alone — or this update is the one that ended the build.
+      if (!barBuilding) return;
+      barBuilding = false;
+      // Filled before it goes: a bar that vanishes at two thirds reads as a
+      // build that gave up.
+      barValue = 1;
+      barHide = setTimeout(() => (barShown = false), 260);
+    });
+  });
 
   /// What the footer says: which version, and whether it is current.
   function versionLabel() {
@@ -689,6 +776,7 @@
 
     if (build.status === 'queued') return `${name} · queued`;
     if (build.status === 'running') {
+      if (progress?.stage === PANDOC_STAGE) return `${name} · converting markdown`;
       if (progress) {
         const page = progress.page
           ? progress.expectedPages
@@ -716,7 +804,13 @@
   const warnings = $derived(
     activeProject?.build.diagnostics.filter((item) => item.severity === 'warning') ?? []
   );
-  const transient = $derived(error || viewerError || watcherNotice || notice);
+  // The viewer keeps its own load error, because it also decides what the pane
+  // shows when a document will not open. This only repeats it as a message, so
+  // a failure is not silent when the pane still has the previous document on
+  // screen.
+  $effect(() => {
+    if (viewerError) notify(viewerError, 'error');
+  });
 </script>
 
 <!-- What a document is, shared by the shelf and the grid so it reads the same
@@ -740,18 +834,19 @@
           <!-- Clears the traffic lights, which sit over this panel's top left
                whenever it is open. -->
           <div class="history-head quiet">{activeProject.name}</div>
-          {#each versions as version (version.sourceRef)}
-            <div class="version" class:current={version.sourceRef === selectedRef}>
+          {#each versions as version (versionKey(version))}
+            <div class="version" class:current={versionKey(version) === selectedKey}>
               <!-- Right-click for rename, download and discard. -->
               <button
                 class="version-open"
                 onclick={() => selectVersion(version)}
                 oncontextmenu={(event) => openMenu(event, versionMenu(version))}
               >
-                <strong>{version.title}</strong>
-                <span class="quiet">
-                  {version.snapshot ? age(version.snapshot.createdAt) : 'live'}
-                  · {versionState(version)}
+                <span class="version-head">
+                  <strong>{version.title}</strong>
+                  {#if version.snapshot}
+                    <span class="stamp quiet">{shortAge(version.snapshot.createdAt)}</span>
+                  {/if}
                 </span>
                 {#if version.snapshot?.body}
                   <span class="quiet body">{version.snapshot.body}</span>
@@ -815,28 +910,22 @@
       </section>
     {/if}
 
-    {#if transient}
-      <p class="strip" class:bad={Boolean(error || viewerError || watcherNotice)} role="status">
-        <span>{error || viewerError || watcherNotice || notice}</span>
-        <button
-          class="link"
-          onclick={() => {
-            error = '';
-            notice = '';
-            watcherNotice = '';
-            viewerError = '';
-          }}
-        >
-          ✕
-        </button>
-      </p>
-    {/if}
-
     <footer class="bar bottom">
+      {#if barShown}
+        <!-- Drawn over the footer's own hairline, so a build adds no height. -->
+        <span
+          class="progress"
+          style="--filled: {barValue}"
+          role="progressbar"
+          aria-valuemin="0"
+          aria-valuemax="100"
+          aria-valuenow={Math.round(barValue * 100)}
+          out:fade={{ duration: 200 }}
+        ></span>
+      {/if}
       <button class="link" onclick={() => (showHistory = !showHistory)} title="Version history">
         {showHistory ? '◀' : '☰'}
       </button>
-      <span class="dot {statusTone(activeProject)}"></span>
       <span class="build">{versionLabel()}</span>
       {#if errors.length > 0}
         <button class="link bad" onclick={() => togglePanel('diagnostics')}>
@@ -864,7 +953,7 @@
     <header class="library-header">
       <div>
         <h1>Printing Press</h1>
-        <p class="quiet">Documents and their last successful builds</p>
+        <p class="quiet">A reader and compiler for LaTeX and Markdown documents</p>
       </div>
       <div class="library-actions">
         <button onclick={chooseDocument} disabled={busy}>
@@ -872,9 +961,6 @@
         </button>
       </div>
     </header>
-
-    {#if error}<p class="strip bad" role="alert">{error}</p>{/if}
-    {#if notice}<p class="strip" role="status">{notice}</p>{/if}
 
     {#if projects.length === 0}
       <section class="empty-library">
@@ -909,10 +995,11 @@
                     <span class="missing-thumbnail">No PDF</span>
                   {/if}
                 </span>
-                <span class="pinned-lines">
-                  <strong class="name" title={project.documentPath}>{project.name}</strong>
-                  {@render kindLine(project)}
-                </span>
+                <!-- The name and nothing else. A shelf is read by its covers;
+                     what each document is and how it built is the grid's job. -->
+                <strong class="name pinned-name" title={project.documentPath}>
+                  {project.name}
+                </strong>
               </button>
             </article>
           {/each}
@@ -1117,6 +1204,20 @@
   </dialog>
 {/if}
 
+{#if confirmDiscard}
+  <dialog open aria-labelledby="discard-title">
+    <h2 id="discard-title">Discard “{confirmDiscard.title}”?</h2>
+    <p>
+      This version and the PDF built from it are deleted. Your project folder is not touched, and
+      the other versions stay as they are.
+    </p>
+    <div class="dialog-actions">
+      <button onclick={() => (confirmDiscard = null)} disabled={busy}>Cancel</button>
+      <button class="danger" onclick={discardVersion} disabled={busy}>Discard</button>
+    </div>
+  </dialog>
+{/if}
+
 <style>
   /* The reset, tokens, fonts and scrollbars all live in `src/app.css`. */
 
@@ -1202,9 +1303,26 @@
   }
 
   .bar.bottom {
+    position: relative;
     border-top: var(--bw) solid var(--line);
     background: var(--card-2);
     color: var(--ink-3);
+  }
+
+  /* Scaled rather than resized: the transition then runs on the compositor, so
+     a bar that updates on every shipped page does not lay out the footer with
+     it. */
+  .progress {
+    position: absolute;
+    top: calc(var(--bw) * -1);
+    left: 0;
+    width: 100%;
+    height: 2px;
+    transform: scaleX(var(--filled));
+    transform-origin: left center;
+    background: var(--accent);
+    transition: transform 220ms ease-out;
+    pointer-events: none;
   }
 
   .title {
@@ -1229,26 +1347,6 @@
   .bar > button,
   .bar > .quiet {
     flex: none;
-  }
-
-  .dot {
-    flex: none;
-    width: 7px;
-    height: 7px;
-    border-radius: var(--radius-pill);
-    background: var(--line-3);
-  }
-
-  .dot.good {
-    background: var(--accent);
-  }
-
-  .dot.bad {
-    background: var(--danger);
-  }
-
-  .dot.busy {
-    background: var(--amber);
   }
 
   /* The history sits beside the document rather than over it, so a version can
@@ -1310,10 +1408,45 @@
     background: none;
     text-align: left;
     cursor: pointer;
+    user-select: none;
+    -webkit-user-select: none;
   }
 
+  /* Title and age are one line. The age is pushed to the far end and never
+     shrinks; a long title wraps under itself rather than pressing on it. */
+  .version-head {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 0.5rem;
+    min-width: 0;
+  }
+
+  .version-head strong {
+    min-width: 0;
+    line-height: 1.35;
+    overflow-wrap: anywhere;
+  }
+
+  .version-head .stamp {
+    flex: none;
+    font-size: var(--fs-meta);
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+  }
+
+  /* Notes run under the title. Three lines is enough to tell two versions
+     apart; past that the version has to be opened. */
   .version-open .body {
+    display: -webkit-box;
+    overflow: hidden;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 3;
+    line-clamp: 3;
+    font-size: var(--fs-meta);
+    line-height: 1.4;
     white-space: pre-wrap;
+    overflow-wrap: anywhere;
   }
 
   dialog textarea {
@@ -1377,30 +1510,6 @@
     font-family: ui-monospace, monospace;
   }
 
-  .strip {
-    display: flex;
-    align-items: center;
-    gap: 0.5rem;
-    margin: 0;
-    padding: 0.35rem 0.5rem;
-    border-top: var(--bw) solid var(--line);
-    background: var(--paper-2);
-    font-size: var(--fs-card);
-  }
-
-  .strip.bad {
-    background: var(--danger-bg);
-  }
-
-  .strip span {
-    flex: 1;
-    /* Both matter: a flex item will not shrink below its content without
-       min-width, and a filesystem path has no spaces to break at, so without
-       these one notice widens the whole window. */
-    min-width: 0;
-    overflow-wrap: anywhere;
-  }
-
   /* -- library --------------------------------------------------------- */
 
     .library {
@@ -1442,14 +1551,14 @@
   color: var(--ink);
 }
 
-/* The subtitle is the eyebrow: uppercase, tracked, one tier down in ink. */
+/* A sentence about what Press is, not a label: read once and then ignored, so
+   it sits at body size in the quietest ink and takes no tracking of its own. */
 .library-header p {
   margin: 0;
-  font-size: var(--fs-label);
-  font-weight: var(--fw-label);
-  line-height: 1;
-  letter-spacing: var(--tracking-label);
-  text-transform: uppercase;
+  font-size: var(--fs-card);
+  font-weight: 400;
+  line-height: 1.35;
+  letter-spacing: normal;
   color: var(--ink-3);
 }
 
@@ -1466,9 +1575,9 @@
 .library-header > div {
   display: flex;
   flex-direction: column;
-  /* Both lines set line-height 1, so this gap is the whole space between
-     them: 4px read as a collision under a two-word title. */
-  gap: 0.5rem;
+  /* The title sets line-height 1, so most of the space between the two lines
+     is this gap; the sentence below brings a little of its own. */
+  gap: 0.375rem;
 }
 
 /* The one solid control on the page: ink fill, paper text, no shadow.
@@ -1499,7 +1608,9 @@
   display: flex;
   gap: var(--shelf-gap);
   margin: 0;
-  padding: var(--shelf-pad-y) var(--gutter) 1.875rem;
+  /* Even top and bottom. The deeper foot was there to balance a two-line
+     caption; with one line the shelf can close up. */
+  padding: var(--shelf-pad-y) var(--gutter);
   border-top: var(--bw) solid var(--line);
   border-bottom: var(--bw) solid var(--line);
   background: var(--paper-2);
@@ -1551,12 +1662,8 @@
   box-shadow: var(--shadow-sm);
 }
 
-/* Centred, name over kind — the shelf has the room the grid row does not,
-   and the two lines are the same recipe either way (see `.name` / `.kind`). */
-.pinned-lines {
-  display: grid;
-  gap: 0.375rem;
-  justify-items: center;
+/* Centred under the page image, and the only line on the card. */
+.pinned-name {
   width: 100%;
   min-width: 0;
   text-align: center;
@@ -1851,6 +1958,19 @@
     font-size: var(--fs-menu);
     letter-spacing: normal;
     text-transform: none;
+  }
+
+  /* The app's own focus, not the browser's: the field lifts to paper white,
+     its edge takes the accent, and a soft ring of the same colour sits under
+     it. The global blue outline is suppressed here — inside a dialog it is the
+     only blue on screen, and it reads as a browser artefact. */
+  dialog input:focus,
+  dialog select:focus,
+  dialog textarea:focus {
+    outline: none;
+    border-color: var(--accent);
+    background: var(--card);
+    box-shadow: 0 0 0 3px var(--accent-fill);
   }
 
   dialog summary {

@@ -44,6 +44,10 @@ const TERMINATE_GRACE: std::time::Duration = std::time::Duration::from_millis(12
 
 pub type ProgressSink = Arc<dyn Fn(ProgressSnapshot) + Send + Sync>;
 
+/// The stage a markdown build starts in. The webview matches on it, so it is
+/// named here rather than spelled out at the call site.
+pub const PANDOC_STAGE: &str = "pandoc";
+
 /// Trips once, for everyone watching. Used for hard cancellation only: closing a
 /// project or quitting. A build that has merely been superseded still finishes
 /// and publishes.
@@ -177,6 +181,14 @@ pub async fn run(
     let latex_input = match inputs.project.kind() {
         DocumentKind::Latex => PathBuf::from(&inputs.source.file_name),
         DocumentKind::Markdown => {
+            // pandoc says nothing a parser could use, and it runs before
+            // latexmk has said anything at all. Announcing the stage is what
+            // keeps a markdown build from looking stalled while it converts.
+            progress(ProgressSnapshot {
+                stage: PANDOC_STAGE.to_owned(),
+                pass: None,
+                page: None,
+            });
             match convert_markdown(&inputs, &job_name).await {
                 Ok(path) => path,
                 Err(summary) => {

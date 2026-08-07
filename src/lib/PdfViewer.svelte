@@ -369,22 +369,23 @@
   }
 
   /**
-   * A document opens filling the width of the window, at the top of the first
-   * page. Only ever on open: a rebuild, or switching to a stored version, must
+   * A document opens with its first page filling the height of the window, at
+   * the top of that page — so what you see on open is a page, not the top of
+   * one. Only ever on open: a rebuild, or switching to a stored version, must
    * not override a zoom the reader chose or scroll them away from where they
    * were reading.
    */
-  async function fitWidthOnOpen(sizes: PageSize[]) {
+  async function fitHeightOnOpen(sizes: PageSize[]) {
     await tick();
-    // A frame after the DOM update, because the viewer has no measurable width
+    // A frame after the DOM update, because the viewer has no measurable size
     // until it has been laid out at least once.
     await nextFrame();
     if (!viewer || sizes.length === 0) return;
-    const available = viewer.clientWidth - FIT_MARGIN;
+    const available = viewer.clientHeight - FIT_MARGIN;
     // Still not laid out. Leaving `sized` false means the next document to
     // arrive tries again rather than being stuck at the default zoom.
     if (available <= 0) return;
-    zoom = normalizeZoom(available / sizes[0].width);
+    zoom = normalizeZoom(available / sizes[0].height);
     sized = true;
 
     // After the new zoom has been laid out, or the reset would race the taller
@@ -527,7 +528,7 @@
         if (sized) {
           void restoreAnchor(anchor, ++zoomGeneration);
         } else {
-          void fitWidthOnOpen(sizes);
+          void fitHeightOnOpen(sizes);
         }
       })
       .catch((reason) => {

@@ -176,6 +176,8 @@
   --danger-menu-text: color-mix(in oklab, var(--brick) 78%, var(--ink));
   --danger-menu-hover-bg: color-mix(in oklab, var(--brick) 9%, var(--paper));
   --warning-bg: color-mix(in oklab, var(--amber) 10%, var(--paper));
+  --warning-border: color-mix(in oklab, var(--amber) 34%, var(--paper));
+  --warning-strong: color-mix(in oklab, var(--amber) 82%, var(--ink));
 
   --scrollbar-size: 0.75rem;
   --scrollbar-inset: 0.1875rem;

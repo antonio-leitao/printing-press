@@ -13,7 +13,7 @@ use crate::{
     error::{AppError, AppResult},
     model::{
         DocumentKind, EditorLaunchResult, Engine, OpenRequest, PageSize, ProjectSummary, SearchHit,
-        SnapshotSummary, SourceRef, TextBox, VersionSummary,
+        SnapshotOutcome, SourceRef, TextBox, VersionSummary,
     },
 };
 
@@ -250,10 +250,10 @@ pub async fn create_snapshot(
     body: Option<String>,
     app: AppHandle,
     state: State<'_, AppState>,
-) -> AppResult<SnapshotSummary> {
+) -> AppResult<SnapshotOutcome> {
     let repository = Arc::clone(&state.repository);
     let objects = state.objects_root.clone();
-    let snapshot = blocking(move || {
+    let outcome = blocking(move || {
         let project = repository.get_project(project_id)?;
         let directory = project.directory();
         // A document's history holds its directory minus the documents that are
@@ -267,6 +267,12 @@ pub async fn create_snapshot(
     })
     .await?;
 
+    // Nothing was stored, so there is nothing to build: the version this
+    // content already is was built when it was stored.
+    let SnapshotOutcome::Stored { snapshot } = &outcome else {
+        return Ok(outcome);
+    };
+
     // Build it straight away: a version you cannot see is not much of a version.
     let repository = Arc::clone(&state.repository);
     let project = blocking(move || repository.get_project(project_id)).await?;
@@ -277,7 +283,7 @@ pub async fn create_snapshot(
             SourceRef::Snapshot(snapshot.revision.clone()),
         )
         .await;
-    Ok(snapshot)
+    Ok(outcome)
 }
 
 /// The history: the working tree pinned at the top, then every snapshot.

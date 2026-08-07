@@ -369,7 +369,9 @@ mod tests {
             crate::snapshot::capture(&source, &objects_root, &HashSet::new()).unwrap();
         repository
             .create_snapshot(project.id, &capture, "First", None)
-            .unwrap();
+            .unwrap()
+            .stored()
+            .expect("nothing like it is stored yet");
         let orphan_object = objects_root.join("zz/orphaned");
         std::fs::create_dir_all(orphan_object.parent().unwrap()).unwrap();
         std::fs::write(&orphan_object, b"nothing refers to this").unwrap();

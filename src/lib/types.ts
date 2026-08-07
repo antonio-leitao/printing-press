@@ -78,6 +78,15 @@ export type ProjectSummary = {
   available: boolean;
 };
 
+/**
+ * What asking for a snapshot led to. Content Press already keeps is turned
+ * away rather than stored under a second name, and says which version it
+ * already is.
+ */
+export type SnapshotOutcome =
+  | ({ status: 'stored' } & SnapshotSummary)
+  | { status: 'unchanged'; title: string };
+
 /** A stored version of a project's source. */
 export type SnapshotSummary = {
   id: number;

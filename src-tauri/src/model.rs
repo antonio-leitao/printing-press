@@ -462,6 +462,40 @@ pub struct SnapshotSummary {
     pub byte_size: i64,
 }
 
+/// What asking for a snapshot led to.
+///
+/// A version that holds nothing new is not a version, so identical content is
+/// turned away rather than stored twice. That is not a failure — the source is
+/// already kept, under the name this carries — so it is an answer, not an
+/// error.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "status", rename_all = "camelCase")]
+pub enum SnapshotOutcome {
+    Stored {
+        #[serde(flatten)]
+        snapshot: SnapshotSummary,
+    },
+    Unchanged {
+        /// The version this content already is.
+        title: String,
+    },
+}
+
+impl SnapshotOutcome {
+    /// The snapshot that was stored, or `None` when this content was already
+    /// kept under another title.
+    ///
+    /// For tests. Everything else matches on the outcome, so that the case
+    /// where nothing was stored has to be answered rather than unwrapped past.
+    #[cfg(test)]
+    pub fn stored(self) -> Option<SnapshotSummary> {
+        match self {
+            Self::Stored { snapshot } => Some(snapshot),
+            Self::Unchanged { .. } => None,
+        }
+    }
+}
+
 /// One row of the history: the working tree, or a snapshot, together with what
 /// Press knows about building it.
 #[derive(Debug, Clone, PartialEq, Serialize)]

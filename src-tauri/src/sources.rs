@@ -156,7 +156,9 @@ mod tests {
         let capture = crate::snapshot::capture(&root, &objects, &HashSet::new()).unwrap();
         let snapshot = repository
             .create_snapshot(stored.id, &capture, "  First draft  ", Some("  "))
-            .unwrap();
+            .unwrap()
+            .stored()
+            .expect("nothing like it is stored yet");
         assert_eq!(snapshot.title, "First draft", "titles are trimmed");
         assert_eq!(snapshot.body, None, "a blank body is not stored");
         assert_eq!(snapshot.file_count, 2);
@@ -222,7 +224,9 @@ mod tests {
         let capture = crate::snapshot::capture(&root, &objects, &HashSet::new()).unwrap();
         let snapshot = repository
             .create_snapshot(stored.id, &capture, "Notes only", None)
-            .unwrap();
+            .unwrap()
+            .stored()
+            .expect("nothing like it is stored yet");
 
         let error = prepare(
             &stored,
