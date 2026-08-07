@@ -695,7 +695,8 @@ const SUMMARY_QUERY_BASE: &str = "
            b.duration_ms, b.error_summary, b.diagnostics,
            a.id AS artifact_id, a.project_id AS artifact_project_id,
            a.source_ref AS artifact_source_ref, a.engine AS artifact_engine,
-           a.page_count, a.byte_size, a.built_at, a.revision
+           a.page_count, a.byte_size, a.built_at, a.revision,
+           (SELECT COUNT(*) FROM snapshots s WHERE s.project_id = p.id) AS snapshot_count
       FROM projects p
       LEFT JOIN build_states b ON b.project_id = p.id AND b.source_ref = ?1
       LEFT JOIN artifacts a ON a.project_id = p.id AND a.source_ref = ?1
@@ -822,6 +823,7 @@ fn map_summary(row: &Row<'_>) -> rusqlite::Result<AppResult<ProjectSummary>> {
     let byte_size: Option<i64> = row.get("byte_size")?;
     let built_at: Option<i64> = row.get("built_at")?;
     let revision: Option<i64> = row.get("revision")?;
+    let snapshot_count: i64 = row.get("snapshot_count")?;
 
     Ok((|| {
         let project = project?;
@@ -867,6 +869,7 @@ fn map_summary(row: &Row<'_>) -> rusqlite::Result<AppResult<ProjectSummary>> {
             project,
             build,
             artifact,
+            snapshot_count,
         })
     })())
 }
@@ -1027,6 +1030,8 @@ fn companion_path(path: &Path, suffix: &str) -> PathBuf {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
+
     use super::*;
     use crate::model::BuildStatus;
 
@@ -1284,6 +1289,41 @@ mod tests {
         set_pinned(zzz, false);
         assert_eq!(listed(), [aaa, zzz]);
         assert!(!database.get_project(zzz).unwrap().pinned);
+    }
+
+    /// The library card reports how many versions a document has, so the count
+    /// follows the snapshots table — not the history list, which also carries
+    /// the live working tree.
+    #[test]
+    fn a_summary_counts_the_versions_a_project_has_stored() {
+        let directory = tempfile::tempdir().unwrap();
+        let objects = directory.path().join("objects");
+        let database = Repository::open(&directory.path().join("press.db")).unwrap();
+        let root = project_fixture(directory.path(), "thesis");
+        let project = add(&database, &root.join("main.tex"));
+
+        let count = || database.project_summary(project.id).unwrap().snapshot_count;
+        assert_eq!(count(), 0, "a document with no history counts none");
+
+        let capture = crate::snapshot::capture(&root, &objects, &HashSet::new()).unwrap();
+        let first = database
+            .create_snapshot(project.id, &capture, "First", None)
+            .unwrap();
+        std::fs::write(root.join("main.tex"), "\\documentclass{book}").unwrap();
+        let capture = crate::snapshot::capture(&root, &objects, &HashSet::new()).unwrap();
+        database
+            .create_snapshot(project.id, &capture, "Second", None)
+            .unwrap();
+
+        assert_eq!(count(), 2);
+        assert_eq!(
+            database.list_projects().unwrap()[0].snapshot_count,
+            2,
+            "the whole library says what a single summary says"
+        );
+
+        database.delete_snapshot(first.id).unwrap();
+        assert_eq!(count(), 1, "discarding a version takes it out of the count");
     }
 
     #[test]

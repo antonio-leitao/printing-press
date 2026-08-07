@@ -1,5 +1,6 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onMount, type Component } from 'svelte';
+  import { Download, Pencil, Pin, PinOff, Trash2 } from '@lucide/svelte';
   import { listen } from '@tauri-apps/api/event';
   import { open } from '@tauri-apps/plugin-dialog';
   import PdfThumbnail from '$lib/PdfThumbnail.svelte';
@@ -20,6 +21,8 @@
 
   /** Matches the `.pinned-card` track width below, so nothing larger is drawn. */
   const PINNED_THUMB_WIDTH = 150
+  /** Likewise for `.project-thumb`. */
+  const GRID_THUMB_WIDTH = 55
 
   const KEY_HELP: Array<[string, string]> = [
     ['j / k', 'scroll down / up'],
@@ -82,7 +85,14 @@
   let panel = $state<Panel>('none');
 
   // -- context menu ---------------------------------------------------------
-  type MenuItem = { label: string; run: () => void; disabled?: boolean };
+  type MenuItem = {
+    label: string;
+    icon: Component;
+    run: () => void;
+    disabled?: boolean;
+    /// Destructive: red on hover, and cut off from the items above by a rule.
+    danger?: boolean;
+  };
   let menu = $state<{ x: number; y: number; items: MenuItem[] } | null>(null);
 
   /// Opens the menu where it was asked for. Right-click and the `⋯` button both
@@ -102,15 +112,22 @@
     return [
       {
         label: project.pinned ? 'Unpin' : 'Pin to top',
+        icon: project.pinned ? PinOff : Pin,
         run: () => void setPinned(project, !project.pinned)
       },
-      { label: 'Rename…', run: () => openSettings(project) },
+      { label: 'Rename…', icon: Pencil, run: () => openSettings(project) },
       {
         label: 'Download PDF',
+        icon: Download,
         run: () => void downloadArtifact(project.artifact?.id),
         disabled: !project.artifact
       },
-      { label: 'Remove…', run: () => (confirmDelete = project) }
+      {
+        label: 'Remove…',
+        icon: Trash2,
+        danger: true,
+        run: () => (confirmDelete = project)
+      }
     ];
   }
 
@@ -130,6 +147,7 @@
     const items: MenuItem[] = [
       {
         label: 'Download PDF',
+        icon: Download,
         run: () => void downloadArtifact(version.artifact?.id),
         disabled: !version.artifact
       }
@@ -138,12 +156,18 @@
     if (version.snapshot) {
       items.unshift({
         label: 'Rename…',
+        icon: Pencil,
         run: () => {
           renaming = version;
           renameTitle = version.title;
         }
       });
-      items.push({ label: 'Discard', run: () => void discardVersion(version) });
+      items.push({
+        label: 'Discard',
+        icon: Trash2,
+        danger: true,
+        run: () => void discardVersion(version)
+      });
     }
     return items;
   }
@@ -521,6 +545,25 @@
     }
   }
 
+  /// A grid card's last line: when the PDF under the thumbnail was made, and
+  /// how much history there is behind it. An artifact wins over a failed build,
+  /// because that older PDF is what the thumbnail is showing.
+  ///
+  /// Kept to the sidebar's shorthand — `2h ago`, not `Built 2h ago` — because
+  /// the column is 137px wide at the default window and the version count has
+  /// to fit beside it.
+  function cardMeta(project: ProjectSummary) {
+    const { status } = project.build;
+    const building = status === 'queued' || status === 'running';
+    const state = building
+      ? 'building…'
+      : age(project.artifact?.builtAt) ||
+        (status === 'error' ? 'does not compile' : 'never built');
+    const versions = project.snapshotCount;
+    if (versions === 0) return state;
+    return `${state} · ${versions} version${versions === 1 ? '' : 's'}`;
+  }
+
   function age(seconds: number | null | undefined) {
     if (!seconds) return '';
     const elapsed = Math.max(0, Math.floor(Date.now() / 1000 - seconds));
@@ -676,6 +719,15 @@
   const transient = $derived(error || viewerError || watcherNotice || notice);
 </script>
 
+<!-- What a document is, shared by the shelf and the grid so it reads the same
+     wherever it is shown. One word, so it still fits a 150px shelf card once a
+     gone document has flagged itself. -->
+{#snippet kindLine(project: ProjectSummary)}
+  <span class="quiet kind"
+    >{project.kind}{#if !project.available} · <span class="bad">missing</span>{/if}</span
+  >
+{/snippet}
+
 {#if activeProject}
   <main class="reader">
     <!-- Not a bar: this takes no space in the layout. It sits over the grey
@@ -685,9 +737,12 @@
     <section class="document">
       {#if showHistory}
         <nav class="history" aria-label="Version history">
+          <!-- Clears the traffic lights, which sit over this panel's top left
+               whenever it is open. -->
           <div class="history-head quiet">{activeProject.name}</div>
           {#each versions as version (version.sourceRef)}
             <div class="version" class:current={version.sourceRef === selectedRef}>
+              <!-- Right-click for rename, download and discard. -->
               <button
                 class="version-open"
                 onclick={() => selectVersion(version)}
@@ -701,14 +756,6 @@
                 {#if version.snapshot?.body}
                   <span class="quiet body">{version.snapshot.body}</span>
                 {/if}
-              </button>
-              <button
-                class="link"
-                aria-label="Actions for {version.title}"
-                onclick={(event) => openMenu(event, versionMenu(version))}
-                disabled={busy}
-              >
-                ⋯
               </button>
             </div>
           {/each}
@@ -816,7 +863,7 @@
     <div class="titlebar" data-tauri-drag-region></div>
     <header class="library-header">
       <div>
-        <h1>Press</h1>
+        <h1>Printing Press</h1>
         <p class="quiet">Documents and their last successful builds</p>
       </div>
       <div class="library-actions">
@@ -862,7 +909,10 @@
                     <span class="missing-thumbnail">No PDF</span>
                   {/if}
                 </span>
-                <strong class="name" title={project.documentPath}>{project.name}</strong>
+                <span class="pinned-lines">
+                  <strong class="name" title={project.documentPath}>{project.name}</strong>
+                  {@render kindLine(project)}
+                </span>
               </button>
             </article>
           {/each}
@@ -884,19 +934,16 @@
               <span class="project-thumb">
                 {#if project.artifact}
                   {#key project.artifact.revision}
-                    <PdfThumbnail artifact={project.artifact} />
+                    <PdfThumbnail artifact={project.artifact} width={GRID_THUMB_WIDTH} />
                   {/key}
                 {:else}
                   <span class="missing-thumbnail">No PDF</span>
                 {/if}
               </span>
               <span class="project-lines">
-                <span class="quiet where" title={project.directory}>{project.location}</span>
-                <strong class="name">{project.name}</strong>
-                <span class="quiet kind">
-                  {project.kind}{#if !project.available}<span class="bad"> · document missing</span
-                    >{/if}
-                </span>
+                <strong class="name" title={project.documentPath}>{project.name}</strong>
+                {@render kindLine(project)}
+                <span class="quiet when">{cardMeta(project)}</span>
               </span>
             </button>
           </article>
@@ -912,8 +959,12 @@
   <button class="menu-backdrop" aria-label="Close menu" onclick={() => (menu = null)}></button>
   <menu class="context-menu" style="left: {menu.x}px; top: {menu.y}px">
     {#each menu.items as item}
-      <li>
-        <button onclick={() => runMenuItem(item)} disabled={item.disabled}>{item.label}</button>
+      {@const Icon = item.icon}
+      <li class:danger={item.danger}>
+        <button onclick={() => runMenuItem(item)} disabled={item.disabled}>
+          <Icon size={15} strokeWidth={1.75} aria-hidden="true" />
+          {item.label}
+        </button>
       </li>
     {/each}
   </menu>
@@ -1061,7 +1112,7 @@
     </p>
     <div class="dialog-actions">
       <button onclick={() => (confirmDelete = null)} disabled={busy}>Cancel</button>
-      <button onclick={removeProject} disabled={busy}>Remove</button>
+      <button class="danger" onclick={removeProject} disabled={busy}>Remove</button>
     </div>
   </dialog>
 {/if}
@@ -1204,6 +1255,7 @@
      be picked while still reading. */
   .document {
     display: flex;
+    position: relative;
     min-height: 0;
   }
 
@@ -1212,15 +1264,29 @@
     min-width: 0;
   }
 
+  /* Deep enough to clear the traffic lights, which the panel opens underneath.
+     Only the history needs it: everywhere else the lights sit over the PDF's
+     own margin. */
   .history-head {
-    padding: 0.4rem 0.6rem;
+    padding: 2.25rem 0.6rem 0.4rem;
     border-bottom: var(--bw) solid var(--line);
   }
 
+  /* Over the document rather than beside it. Laid out in the flex row the
+     panel took a column of its own, which narrowed the viewer and pushed the
+     footer wider than the window. */
   .history {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    left: 0;
+    z-index: 4;
     width: 15rem;
     overflow-y: auto;
     border-right: var(--bw) solid var(--line);
+    /* Opaque, because there is now a page underneath it. */
+    background: var(--card-2);
+    box-shadow: var(--shadow-menu);
     font-size: var(--fs-card);
   }
 
@@ -1366,22 +1432,21 @@
    1c's title is Spectral 34px over a mono uppercase eyebrow, and the
    header baseline sits on the shelf rather than floating. */
 
-/* NEW — h1 has no rule today, so it renders at the browser's 2em bold. */
 .library-header h1 {
   margin: 0;
-  font-family: var(--font-serif);
+  font-family: var(--font-display);
   font-size: var(--fs-title);
-  font-weight: 400;
+  font-weight: var(--fw-title);
   line-height: 1;
-  letter-spacing: -0.01em;
+  letter-spacing: var(--tracking-title);
   color: var(--ink);
 }
 
-/* NEW — the subtitle becomes the eyebrow: mono, uppercase, tracked. */
+/* The subtitle is the eyebrow: uppercase, tracked, one tier down in ink. */
 .library-header p {
   margin: 0;
-  font-family: var(--font-mono);
-  font-size: var(--fs-meta);
+  font-size: var(--fs-label);
+  font-weight: var(--fw-label);
   line-height: 1;
   letter-spacing: var(--tracking-label);
   text-transform: uppercase;
@@ -1399,9 +1464,11 @@
 }
 
 .library-header > div {
-  display: flex;             /* NEW — 4px between title and eyebrow */
+  display: flex;
   flex-direction: column;
-  gap: 0.25rem;
+  /* Both lines set line-height 1, so this gap is the whole space between
+     them: 4px read as a collision under a two-word title. */
+  gap: 0.5rem;
 }
 
 /* The one solid control on the page: ink fill, paper text, no shadow.
@@ -1410,10 +1477,10 @@
   padding: 0.5625rem 0.9375rem;
   border: 0;
   border-radius: var(--radius);
-  background: var(--ink);
-  color: var(--paper);
+  background: var(--accent);
+  color: var(--on-brand);
   font-family: var(--font-sans);
-  font-size: 0.8125rem;
+  font-size: var(--fs-body);
   font-weight: 500;
   line-height: 1;
   box-shadow: var(--shadow-btn);
@@ -1422,7 +1489,7 @@
 }
 
 .library-actions button:hover:not(:disabled) {
-  background: #332f24;
+  background: var(--accent-strong);
 }
 
 
@@ -1459,6 +1526,14 @@
   cursor: pointer;
 }
 
+/* A card is a button, and dragging across one should not leave a smear of
+   selected filename behind. */
+.pinned-open,
+.project-open {
+  user-select: none;
+  -webkit-user-select: none;
+}
+
 /* NEW — the border, radius and shadow that used to be on the card now
    live on the page image, which is what actually looks like paper. */
 .pinned-thumb {
@@ -1466,35 +1541,28 @@
   width: var(--shelf-thumb-w);
   height: var(--shelf-thumb-h);
   overflow: hidden;
-  border: var(--bw) solid var(--line-2);
-  border-radius: var(--radius-thumb);
+  border-radius: var(--radius);
   background: var(--card);
-  box-shadow: var(--shadow-page);
+  box-shadow: var(--shadow-md);
   transition: box-shadow var(--ease);
 }
 
 .pinned-open:hover:not(:disabled) .pinned-thumb {
-  box-shadow: var(--shadow-page-hover);   /* NEW — no --lift, just depth */
+  box-shadow: var(--shadow-sm);
 }
 
-.pinned-open .name {
-  /* was: margin-inline .5rem (the card had padding; now it does not) */
-  margin-inline: 0;
-  font-family: var(--font-serif);
-  font-size: var(--fs-card-sm);
-  font-weight: 400;
-  line-height: var(--lh-name);
-  color: var(--ink);
-  overflow-wrap: anywhere;
+/* Centred, name over kind — the shelf has the room the grid row does not,
+   and the two lines are the same recipe either way (see `.name` / `.kind`). */
+.pinned-lines {
+  display: grid;
+  gap: 0.375rem;
+  justify-items: center;
+  width: 100%;
+  min-width: 0;
+  text-align: center;
 }
 
-/* NEW — folder + kind/engine under a shelf name, mono, two lines. */
-.pinned-open .meta {
-  font-family: var(--font-mono);
-  font-size: var(--fs-label);
-  line-height: 1.4;
-  color: var(--ink-4);
-}
+
 
 .project-grid {
   /* was: auto-fill minmax(240px, 1fr), gap .5rem */
@@ -1505,27 +1573,26 @@
 }
 
 .project-card {
-  /* was: border + --radius + overflow hidden + padding .5rem.
-     The padding becomes an equal negative margin so the hover plate
-     bleeds past the text without moving anything on the grid. */
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   gap: 0.8125rem;
   padding: var(--row-pad);
   margin: calc(var(--row-pad) * -1);
   border: 0;
-  border-radius: var(--radius-plate);
+  border-radius: var(--radius-sm);
   overflow: visible;
   transition: background var(--ease), box-shadow var(--ease);
 }
 
 .project-card:hover {
   background: var(--card);          /* NEW */
-  box-shadow: var(--shadow-plate);
+  /* box-shadow: var(--shadow-plate); */
 }
 
 .project-open {
-  align-items: flex-start;   /* was: center */
+  /* The text block is shorter than the page image, so it is centred against
+     it rather than hung from the top edge. */
+  align-items: center;
   gap: 0.8125rem;            /* was: .5rem */
   display: flex;
   flex: 1;
@@ -1544,10 +1611,11 @@
   width: var(--grid-thumb-w);
   height: var(--grid-thumb-h);
   overflow: hidden;
-  border: var(--bw) solid var(--line-2);
-  border-radius: var(--radius-chip);
+  /* border: var(--bw) solid var(--line-2); */
+  border-radius: var(--radius-sm);
   background: var(--card);
   box-shadow: var(--shadow-sm);
+  /* box-shadow: 0 1px 2px rgba(0, 0, 0, 0.25); */
 }
 
 .project-lines {
@@ -1555,46 +1623,42 @@
   display: grid;
   flex: 1;
   min-width: 0;
-  padding-top: 0.125rem;
 }
 
-/* The two meta lines split: the folder path is the faintest tier, the
-   kind/engine line one step darker. Both mono now. */
-.project-lines .where {
+/* When the PDF under the thumbnail was made, and how many versions are kept —
+   the faintest tier, and the only line that changes on its own. */
+.project-lines .when {
   overflow: hidden;
-  font-family: var(--font-mono);
   font-size: var(--fs-meta);
   line-height: 1;
-  color: var(--ink-4);       /* was: var(--ink-3) via .quiet */
+  color: var(--ink-3);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.project-lines .kind {
-  display: flex;             /* was: block, truncating */
-  align-items: center;
-  gap: 0.4375rem;
-  font-family: var(--font-mono);
-  font-size: var(--fs-label);
-  line-height: 1;
+/* One recipe for both shelf and grid: a document's name and its kind read the
+   same wherever it is shown. */
+.kind {
+  overflow: hidden;
   color: var(--ink-3);
+  font: 600 var(--fs-label) var(--font-sans);
+  letter-spacing: var(--tracking-label);
+  text-transform: uppercase;
+  /* A narrow column clips this line rather than pushing into its neighbour;
+     the name above it is the part that has to survive. */
+  text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-/* NEW — the status dot that opens the kind line, and the "/" between
-   kind and engine. Markup: <span class="dot {statusTone}"></span>
-   kind <span class="sep">/</span> engine. .dot already exists in the
-   footer and picks up the new accents on its own. */
-.project-lines .kind .sep {
-  color: var(--line-3);
-}
-
-.project-lines .name {
-  /* was: font-size var(--fs-card) only */
-  font-family: var(--font-serif);
-  font-size: var(--fs-card);
-  font-weight: 400;
-  line-height: var(--lh-name);
+.name {
+    display: -webkit-box;
+    overflow: hidden;
+    font-size: var(--fs-card);
+    font-weight: 600;
+    line-height: 1.25;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    line-clamp: 2;
   color: var(--ink);
   overflow-wrap: anywhere;
 }
@@ -1607,7 +1671,6 @@
   place-items: center;
   background: var(--paper-3);
   color: var(--ink-4);
-  font-family: var(--font-mono);
   font-size: var(--fs-label);
   text-align: center;
 }
@@ -1640,65 +1703,212 @@
   .context-menu {
     position: fixed;
     z-index: 31;
+    min-width: 11rem;
     margin: 0;
-    padding: 0.2rem 0;
+    padding: 0.25rem;
     list-style: none;
     background: var(--card);
     border: var(--bw) solid var(--line-2);
     border-radius: var(--radius);
     box-shadow: var(--shadow-menu);
+    font-size: var(--fs-menu);
+    user-select: none;
   }
 
   .context-menu button {
-    display: block;
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
     width: 100%;
-    padding: 0.25rem 1rem;
+    padding: 0.3rem 0.5rem;
     border: 0;
+    border-radius: var(--radius-sm);
     background: none;
+    color: var(--ink-2);
     text-align: left;
     white-space: nowrap;
     cursor: pointer;
   }
 
-  .context-menu button:hover:not(:disabled) {
-    background: var(--paper-2);
+  /* The icon is the quieter half of the item until the row is under the
+     pointer, when both halves move together. */
+  .context-menu button :global(svg) {
+    flex: none;
+    color: var(--ink-3);
   }
 
-  .context-menu button:disabled {
+  .context-menu button:hover:not(:disabled) {
+    background: var(--paper-2);
+    color: var(--ink);
+  }
+
+  .context-menu button:hover:not(:disabled) :global(svg) {
+    color: var(--ink-2);
+  }
+
+  /* Destructive items sit below a rule and turn red whole — icon included —
+     so the one item that cannot be undone never looks like the others. */
+  .context-menu li.danger {
+    margin-top: 0.25rem;
+    padding-top: 0.25rem;
+    border-top: var(--bw) solid var(--line);
+  }
+
+  .context-menu li.danger button:hover:not(:disabled) {
+    background: var(--danger-bg);
+    color: var(--danger);
+  }
+
+  .context-menu li.danger button:hover:not(:disabled) :global(svg) {
+    color: var(--danger);
+  }
+
+  .context-menu button:disabled,
+  .context-menu button:disabled :global(svg) {
     color: var(--line-3);
     cursor: default;
   }
 
   /* A non-modal <dialog open> defaults to its static position, which in the
      reader lands a full viewport below a 100vh grid — open and unreachable.
-     Fixed and centred is what makes it visible at all. */
+     Fixed and centred is what makes it visible at all.
+     `right` and `margin` are reset with it: the user agent sets
+     `inset-inline-end: 0` and `margin: auto` on every dialog, and left:50%
+     against right:0 leaves the box centred in the right half of the window
+     rather than in the window. */
   dialog {
     position: fixed;
     top: 50%;
     left: 50%;
+    right: auto;
+    bottom: auto;
+    margin: 0;
     transform: translate(-50%, -50%);
     z-index: 20;
-    width: min(34rem, calc(100% - 2rem));
-    max-height: calc(100vh - 2rem);
+    width: min(30rem, calc(100% - 2rem));
+    max-height: calc(100vh - 3rem);
     overflow-y: auto;
+    padding: 1.25rem;
     background: var(--card);
     border: var(--bw) solid var(--line-2);
     border-radius: var(--radius);
     box-shadow: var(--shadow-popover);
+    color: var(--ink);
+    font-size: var(--fs-menu);
+  }
+
+  /* One step above the dialog's own text, and well below the library's
+     title — a dialog announces itself without shouting. */
+  dialog h2 {
+    margin-bottom: 0.75rem;
+    font-size: 0.9375rem;
+    font-weight: 600;
+    letter-spacing: var(--tracking-title);
+  }
+
+  dialog p {
+    margin-bottom: 0.75rem;
+    color: var(--ink-2);
+    line-height: 1.45;
+  }
+
+  dialog p.quiet {
+    color: var(--ink-3);
+  }
+
+  dialog code {
+    font-size: var(--fs-meta);
+    overflow-wrap: anywhere;
   }
 
   dialog label,
   dialog select,
-  dialog input {
+  dialog input,
+  dialog textarea {
     display: block;
     width: 100%;
   }
 
+  /* The field name is the same eyebrow the library cards use. */
   dialog label {
-    margin-bottom: 0.6rem;
+    margin-bottom: 0.85rem;
+    color: var(--ink-3);
+    font-size: var(--fs-label);
+    font-weight: var(--fw-label);
+    letter-spacing: var(--tracking-label);
+    text-transform: uppercase;
+  }
+
+  dialog input,
+  dialog select,
+  dialog textarea {
+    margin-top: 0.3rem;
+    padding: 0.4rem 0.5rem;
+    border: var(--bw) solid var(--line-2);
+    border-radius: var(--radius-sm);
+    background: var(--paper);
+    color: var(--ink);
+    font-size: var(--fs-menu);
+    letter-spacing: normal;
+    text-transform: none;
+  }
+
+  dialog summary {
+    margin-bottom: 0.5rem;
+    color: var(--ink-3);
+    cursor: pointer;
+  }
+
+  dialog details {
+    margin-bottom: 0.85rem;
   }
 
   .dialog-actions {
     justify-content: flex-end;
+    gap: 0.5rem;
+  }
+
+  /* Cancel is an outline, the action beside it is the one filled control —
+     the same pair the library header uses for its primary button. */
+  .dialog-actions button {
+    padding: 0.4rem 0.85rem;
+    border: var(--bw) solid var(--line-2);
+    border-radius: var(--radius);
+    background: var(--card);
+    color: var(--ink-2);
+    font-size: var(--fs-menu);
+    line-height: 1.2;
+    cursor: pointer;
+    transition: background var(--ease);
+  }
+
+  .dialog-actions button:hover:not(:disabled) {
+    background: var(--paper-2);
+    color: var(--ink);
+  }
+
+  .dialog-actions button:last-child {
+    border-color: transparent;
+    background: var(--accent);
+    color: var(--on-brand);
+  }
+
+  .dialog-actions button:last-child:hover:not(:disabled) {
+    background: var(--accent-strong);
+    color: var(--on-brand);
+  }
+
+  /* Removing a document is the one confirm that undoes something. */
+  .dialog-actions button.danger {
+    background: var(--danger);
+  }
+
+  .dialog-actions button.danger:hover:not(:disabled) {
+    background: var(--danger-strong);
+  }
+
+  .dialog-actions button:disabled {
+    opacity: 0.5;
+    cursor: default;
   }
 </style>

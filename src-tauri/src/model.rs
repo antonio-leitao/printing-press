@@ -382,6 +382,9 @@ pub struct ProjectSummary {
     pub file_name: String,
     pub build: BuildState,
     pub artifact: Option<ArtifactSummary>,
+    /// Stored versions. The working tree is live rather than stored, so it is
+    /// not counted: this is how many snapshots the library card reports.
+    pub snapshot_count: i64,
     /// The document is still where Press left it.
     pub available: bool,
 }
@@ -618,6 +621,7 @@ mod tests {
                 built_at: 300,
                 revision: 5,
             }),
+            snapshot_count: 3,
             available: true,
         };
 
@@ -633,6 +637,7 @@ mod tests {
         assert_eq!(json["engine"], "lualatex");
         assert_eq!(json["kind"], "latex");
         assert_eq!(json["lastOpenedAt"], 200);
+        assert_eq!(json["snapshotCount"], 3);
         assert_eq!(json["available"], true);
         assert!(json.get("project").is_none());
         // Everything a folder used to be stored for is derived now.

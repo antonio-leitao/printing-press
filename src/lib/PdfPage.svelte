@@ -98,7 +98,7 @@
   .page {
     margin: 0 auto 16px;
     background: var(--card);
-    box-shadow: var(--shadow-page);
+    box-shadow: var(--shadow-md);
   }
 
   canvas {

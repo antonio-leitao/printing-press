@@ -72,6 +72,8 @@ export type ProjectSummary = {
   lastOpenedAt: number;
   build: BuildState;
   artifact: ArtifactSummary | null;
+  /** Stored versions. The live working tree is not one of them. */
+  snapshotCount: number;
   /** The document is still where Press left it. */
   available: boolean;
 };
