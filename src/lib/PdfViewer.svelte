@@ -570,7 +570,7 @@
     overflow: auto;
     outline: none;
     overscroll-behavior: contain;
-    background: #f8f8f6;
+    background: var(--paper);
   }
 
   .pages {
@@ -590,6 +590,6 @@
   .placeholder {
     margin: 2rem;
     /* Dark, because the viewer's background is now nearly white. */
-    color: #767676;
+    color: var(--ink-3);
   }
 </style>

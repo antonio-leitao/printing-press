@@ -167,6 +167,28 @@ pub async fn rename_project(
     .await
 }
 
+/// Pins a project to the top of the library, or unpins it. Nothing else changes,
+/// so no cached build is affected.
+#[tauri::command]
+pub async fn set_project_pinned(
+    project_id: i64,
+    pinned: bool,
+    state: State<'_, AppState>,
+) -> AppResult<ProjectSummary> {
+    let repository = Arc::clone(&state.repository);
+    blocking(move || {
+        repository.update_project(
+            project_id,
+            ProjectEdit {
+                pinned: Some(pinned),
+                ..ProjectEdit::default()
+            },
+        )?;
+        repository.project_summary(project_id)
+    })
+    .await
+}
+
 /// Changes the engine, which invalidates every cached PDF, so the discarded ones
 /// are deleted here.
 ///
@@ -185,8 +207,8 @@ pub async fn set_project_engine(
         let (_, discarded) = repository.update_project(
             project_id,
             ProjectEdit {
-                name: None,
                 engine: requested,
+                ..ProjectEdit::default()
             },
         )?;
         Ok((repository.project_summary(project_id)?, discarded))

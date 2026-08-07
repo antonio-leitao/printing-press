@@ -1,0 +1,224 @@
+/* Global reset, shared design tokens, and reusable interaction styles. */
+
+/* Public Sans, served locally from /static/fonts (no network fetch at runtime). */
+@font-face {
+  font-family: "Public Sans";
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("/fonts/public-sans-latin-400-normal.woff2") format("woff2");
+}
+
+@font-face {
+  font-family: "Public Sans";
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url("/fonts/public-sans-latin-500-normal.woff2") format("woff2");
+}
+
+@font-face {
+  font-family: "Public Sans";
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url("/fonts/public-sans-latin-600-normal.woff2") format("woff2");
+}
+
+@font-face {
+  font-family: "Public Sans";
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url("/fonts/public-sans-latin-700-normal.woff2") format("woff2");
+}
+
+:root {
+  /* Paper — warm, one step warmer and lighter than today */
+  --paper: #f7f6f3; /* was #f8f8f6 — page ground */
+  --paper-2: #efece5; /* was #f1f1ee — the recent-shelf band */
+  --paper-3: #e6e2d9; /* was #e8e8e4 — "No PDF" placeholder fill */
+  --desk: #eae7df; /* was #efeee9 */
+
+  /* Cards */
+  --card: #ffffff; /* unchanged */
+  --card-2: #fbfaf7; /* was #f7f7f5 — warm the footer/strip */
+
+  /* Ink — darker and browner; one extra tier for mono meta */
+  --ink: #17150f; /* was #20201e */
+  --ink-2: #4a463b; /* was #4b4a47 */
+  --ink-3: #8b877c; /* was #797873 — kind / engine line */
+  --ink-4: #a5a094; /* NEW — folder path, faint mono meta */
+
+  /* Lines — warm hairlines (= #17150f at 8% / 15% / 24% over paper) */
+  --line: #e9e6df; /* was #ebeae6 */
+  --line-2: #d8d4c8; /* was #d5d3cd */
+  --line-3: #cfcabd; /* was #b3b1a9 — also the "/" separator */
+
+  /* Accents — 1c has no green chrome; these survive only as status dots */
+  --accent: #3f7d4f; /* was #1f6b52 — built */
+  --amber: #c8901f; /* was #9a7526 — building */
+  --brick: #a4262c; /* was #94402f — fails to compile */
+  --never: #d3cfc4; /* NEW — never built */
+
+  /* Typography — three families, not one. Public Sans stays for controls;
+     Spectral carries document names and the title; mono carries all meta. */
+  --font-sans: "Public Sans", system-ui, sans-serif;
+  --font-serif: "Spectral", Georgia, serif; /* NEW */
+  --font-mono: "IBM Plex Mono", ui-monospace, monospace; /* NEW */
+
+  --fs-title: 2.125rem; /* 34px — was 20px. "Press" */
+  --fs-card: 1rem; /* 16px — was 13px. Grid document name (serif) */
+  --fs-card-sm: 0.9375rem; /* 15px — NEW. Shelf document name (serif) */
+  --fs-body: 0.8125rem; /* 13px — was 12.5px */
+  --fs-meta: 0.6875rem; /* 11px — unchanged. Mono folder line */
+  --fs-label: 0.65625rem; /* 10.5px — unchanged. Mono kind/engine */
+  --lh-name: 1.25; /* NEW — serif names set tight */
+  --tracking-label: 0.09em; /* was 0.14em */
+
+  /* Borders — --bw stays px on purpose (see header note) */
+  --bw: 1px;
+  --bw-2: 1.5px;
+  --bw-accent: 0.25rem;
+  --radius: 0.3125rem; /* 5px — button */
+  --radius-chip: 0.125rem; /* 2px — 46×60 grid thumbnail */
+  --radius-thumb: 0.1875rem; /* 3px — NEW, shelf thumbnail */
+  --radius-plate: 0.5rem; /* 8px — NEW, white hover plate under a grid row */
+  --radius-pill: 50%;
+
+  /* Shadows — soft paper, not hard e-ink. The biggest single change.
+     Geometry in px: these are optical, and scaling them with text size
+     makes a 1px contact shadow smear. */
+  --shadow-sm: 0 1px 2px #17150f14; /* was 2px 2px 0 var(--line-3) */
+  --shadow-plate: 0 1px 3px #17150f14; /* NEW — grid row hover */
+  --shadow-page: 0 2px 6px #17150f1a, 0 12px 24px -14px #17150f2e;
+  --shadow-page-hover: 0 3px 10px #17150f26, 0 18px 34px -14px #17150f3d;
+  --shadow-btn: none; /* was 3px 3px 0 var(--accent) */
+  --shadow-drag: 0 8px 28px -6px #17150f47;
+  --shadow-menu: 0 2px 10px #17150f1f;
+  --shadow-popover: 0 6px 24px -8px #17150f38;
+
+  /* Motion — hover deepens the shadow instead of nudging the element */
+  --lift: none; /* was translate(-1px, -1px) */
+  --ease: 0.14s;
+
+  /* Layout */
+  --gutter: 2.5rem; /* 40px — page gutter, was .library padding 1.5rem */
+  --shelf-thumb-w: 9.375rem; /* 150px — was PINNED_THUMB_WIDTH = 190 */
+  --shelf-thumb-h: 12.125rem; /* 194px */
+  --shelf-gap: 1.875rem; /* 30px — was .75rem */
+  --shelf-pad-y: 1.75rem; /* 28px top, 1.875rem bottom */
+  --grid-thumb-w: 2.875rem; /* 46px — was .project-thumb 3.5rem */
+  --grid-thumb-h: 3.75rem; /* 60px */
+  --grid-cols: 5; /* was auto-fill minmax(240px, 1fr) */
+  --grid-gap-y: 1.625rem; /* 26px */
+  --grid-gap-x: 1.5rem; /* 24px */
+  --row-pad: 0.6875rem; /* 11px — padding + equal negative margin */
+  --card-h: 5rem;
+  --card-pad: 0.5rem;
+  --col-w: 16.875rem;
+  --sidebar-w: 18.875rem;
+  --window-titlebar-height: 0rem;
+  --grain-op: 0.35;
+
+  /* Derived — unchanged formulas, they just follow the new accents */
+  --card-content-h: calc(
+    var(--card-h) - var(--card-pad) - var(--card-pad) - var(--bw) - var(--bw)
+  );
+  --accent-strong: #2f6440;
+  --accent-link: #35704a;
+  --accent-soft-bg: color-mix(in oklab, var(--accent) 8%, var(--paper));
+  --accent-outline: color-mix(in oklab, var(--accent) 45%, transparent);
+  --accent-fill: color-mix(in oklab, var(--accent) 12%, transparent);
+  --accent-fill-strong: color-mix(in oklab, var(--accent) 25%, transparent);
+  --progress-track: var(--paper-3);
+  --danger: var(--brick);
+  --danger-strong: color-mix(in oklab, var(--brick) 82%, var(--ink));
+  --danger-bg: color-mix(in oklab, var(--brick) 10%, var(--paper));
+  --danger-border: color-mix(in oklab, var(--brick) 42%, var(--paper));
+  --danger-menu-border: color-mix(in oklab, var(--brick) 72%, var(--ink));
+  --danger-menu-text: color-mix(in oklab, var(--brick) 80%, var(--ink));
+  --danger-menu-hover-bg: color-mix(in oklab, var(--brick) 12%, var(--paper));
+  --warning-bg: color-mix(in oklab, var(--amber) 12%, var(--paper));
+
+  /* Highlights unchanged */
+  --highlight: #ffcd45;
+  --highlight-strong: #ffd033;
+  --highlight-menu-bg: #ffdf65;
+  --highlight-menu-border: #8a741f;
+  --highlight-menu-text: #211a05;
+  --highlight-status-bg: #fff6cf;
+  --highlight-status-border: #c6b56c;
+  --highlight-status-text: #4d4211;
+
+  --scrollbar-size: 0.75rem;
+  --scrollbar-inset: 0.1875rem;
+  --scrollbar-thumb: color-mix(in oklab, var(--line-3) 58%, transparent);
+  --scrollbar-thumb-hover: color-mix(in oklab, var(--ink-3) 50%, transparent);
+}
+
+*::-webkit-scrollbar {
+  width: var(--scrollbar-size);
+  height: var(--scrollbar-size);
+  background: transparent;
+}
+
+*::-webkit-scrollbar-track,
+*::-webkit-scrollbar-track-piece,
+*::-webkit-scrollbar-corner,
+*::-webkit-scrollbar-button {
+  background: transparent;
+  border: 0;
+  box-shadow: none;
+}
+
+*::-webkit-scrollbar-thumb {
+  border: var(--scrollbar-inset) solid transparent;
+  border-radius: 999px;
+  background-color: var(--scrollbar-thumb);
+  background-clip: padding-box;
+  box-shadow: none;
+}
+
+*::-webkit-scrollbar-thumb:hover {
+  background-color: var(--scrollbar-thumb-hover);
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  font-family: var(--font-sans);
+}
+
+html {
+  background: var(--desk);
+}
+
+body {
+  min-height: 100%;
+  background: var(--paper);
+  color: var(--ink);
+  font-size: var(--fs-body);
+}
+
+/* Press's shell is a fixed 100vh grid, so html and body have to be exactly the
+   viewport rather than growing with their content. */
+html,
+body {
+  height: 100%;
+}
+
+/* Controls do not inherit the document font on their own. */
+button,
+select,
+input,
+textarea {
+  font: inherit;
+  color: inherit;
+}

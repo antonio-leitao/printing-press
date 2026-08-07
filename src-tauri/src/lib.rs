@@ -117,6 +117,7 @@ pub fn run() {
             commands::build_project,
             commands::rename_project,
             commands::set_project_engine,
+            commands::set_project_pinned,
             commands::delete_project,
             commands::page_layout,
             commands::page_words,

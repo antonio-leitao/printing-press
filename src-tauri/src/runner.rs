@@ -644,6 +644,7 @@ mod tests {
             name: "Fixture".into(),
             document_path: document.to_string_lossy().into_owned(),
             engine: Engine::PdfLatex,
+            pinned: false,
             created_at: 0,
             last_opened_at: 0,
         }

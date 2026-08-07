@@ -97,8 +97,8 @@
      PdfViewer.svelte is this number. */
   .page {
     margin: 0 auto 16px;
-    background: white;
-    box-shadow: 0 0.4px 2px rgba(0, 0, 0, 0.25);
+    background: var(--card);
+    box-shadow: var(--shadow-page);
   }
 
   canvas {
@@ -110,6 +110,6 @@
   .render-error {
     margin: 0;
     padding: 1rem;
-    color: #900;
+    color: var(--danger-strong);
   }
 </style>

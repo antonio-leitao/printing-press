@@ -307,6 +307,8 @@ pub struct Project {
     pub name: String,
     pub document_path: String,
     pub engine: Engine,
+    /// Kept at the top of the library, ahead of whatever was opened last.
+    pub pinned: bool,
     pub created_at: i64,
     pub last_opened_at: i64,
 }
@@ -322,6 +324,22 @@ impl Project {
             .parent()
             .map(Path::to_path_buf)
             .unwrap_or_else(|| PathBuf::from("/"))
+    }
+
+    /// The folder the project's own folder sits in, which is the line the
+    /// library shows above the name.
+    ///
+    /// For `/Users/a/Projects/ProjectName/thesis/main.tex` that is
+    /// `ProjectName`: the name already carries `thesis/main.tex`, so this is
+    /// one step further out and no more. Empty when there is no step to take.
+    pub fn location(&self) -> String {
+        self.document()
+            .parent()
+            .and_then(Path::parent)
+            .and_then(Path::file_name)
+            .and_then(|name| name.to_str())
+            .unwrap_or_default()
+            .to_owned()
     }
 
     /// The document's own name, which is the argument latexmk receives.
@@ -350,8 +368,8 @@ impl Project {
 /// A project plus everything the library and the viewer need about its working
 /// tree. Snapshot state is fetched separately so this payload stays small.
 ///
-/// `kind`, `directory` and `file_name` are derived from the document path and
-/// sent along so the interface never has to take a path apart itself.
+/// `kind`, `directory`, `location` and `file_name` are derived from the document
+/// path and sent along so the interface never has to take a path apart itself.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProjectSummary {
@@ -359,6 +377,8 @@ pub struct ProjectSummary {
     pub project: Project,
     pub kind: DocumentKind,
     pub directory: String,
+    /// The enclosing folder's name, shown above the project's own name.
+    pub location: String,
     pub file_name: String,
     pub build: BuildState,
     pub artifact: Option<ArtifactSummary>,
@@ -564,12 +584,14 @@ mod tests {
             name: "thesis/main.tex".into(),
             document_path: "/projects/thesis/main.tex".into(),
             engine: Engine::LuaLatex,
+            pinned: true,
             created_at: 100,
             last_opened_at: 200,
         };
         let summary = ProjectSummary {
             kind: project.kind(),
             directory: "/projects/thesis".into(),
+            location: project.location(),
             file_name: project.file_name(),
             project,
             build: BuildState {
@@ -604,7 +626,10 @@ mod tests {
         assert_eq!(json["id"], 3);
         assert_eq!(json["documentPath"], "/projects/thesis/main.tex");
         assert_eq!(json["directory"], "/projects/thesis");
+        // The step above the name, which already carries `thesis/main.tex`.
+        assert_eq!(json["location"], "projects");
         assert_eq!(json["fileName"], "main.tex");
+        assert_eq!(json["pinned"], true);
         assert_eq!(json["engine"], "lualatex");
         assert_eq!(json["kind"], "latex");
         assert_eq!(json["lastOpenedAt"], 200);
@@ -649,9 +674,10 @@ mod tests {
     fn a_project_derives_its_whole_location_from_the_document() {
         let project = Project {
             id: 1,
-            name: "thesis/main.tex".into(),
+            name: "papers/main.tex".into(),
             document_path: "/projects/thesis/papers/main.tex".into(),
             engine: Engine::PdfLatex,
+            pinned: false,
             created_at: 0,
             last_opened_at: 0,
         };
@@ -659,6 +685,8 @@ mod tests {
         assert_eq!(project.file_name(), "main.tex");
         assert_eq!(project.job_name(), "main");
         assert_eq!(project.kind(), DocumentKind::Latex);
+        // One step beyond the name, which is already `papers/main.tex`.
+        assert_eq!(project.location(), "thesis");
 
         let essay = Project {
             document_path: "/writing/essay.md".into(),
@@ -666,5 +694,7 @@ mod tests {
         };
         assert_eq!(essay.directory(), Path::new("/writing"));
         assert_eq!(essay.kind(), DocumentKind::Markdown);
+        // Nothing above the folder to name.
+        assert_eq!(essay.location(), "");
     }
 }

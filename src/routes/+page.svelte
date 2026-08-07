@@ -18,6 +18,9 @@
     type WatcherError
   } from '$lib/types';
 
+  /** Matches the `.pinned-card` track width below, so nothing larger is drawn. */
+  const PINNED_THUMB_WIDTH = 150
+
   const KEY_HELP: Array<[string, string]> = [
     ['j / k', 'scroll down / up'],
     ['h / l', 'scroll left / right'],
@@ -97,6 +100,10 @@
 
   function projectMenu(project: ProjectSummary): MenuItem[] {
     return [
+      {
+        label: project.pinned ? 'Unpin' : 'Pin to top',
+        run: () => void setPinned(project, !project.pinned)
+      },
       { label: 'Rename…', run: () => openSettings(project) },
       {
         label: 'Download PDF',
@@ -105,6 +112,18 @@
       },
       { label: 'Remove…', run: () => (confirmDelete = project) }
     ];
+  }
+
+  async function setPinned(project: ProjectSummary, pinned: boolean) {
+    clearMessages();
+    try {
+      await api.setProjectPinned(project.id, pinned);
+      // Refetched rather than merged: pinning changes the order, and the
+      // backend is what decides the order.
+      await refreshProjects();
+    } catch (reason) {
+      error = errorMessage(reason);
+    }
   }
 
   function versionMenu(version: VersionSummary): MenuItem[] {
@@ -142,6 +161,11 @@
   const chosenCandidate = $derived(
     choosing?.candidates.find((candidate) => candidate.documentPath === chosen) ?? null
   );
+
+  // Two sections, one list: the backend already returns pinned first, so
+  // splitting it here keeps both in the order it decided.
+  const pinned = $derived(projects.filter((project) => project.pinned));
+  const unpinned = $derived(projects.filter((project) => !project.pinned));
 
   const dialogOpen = $derived(
     Boolean(choosing || settingsFor || confirmDelete || snapshotOpen || renaming || menu)
@@ -638,12 +662,6 @@
     return version && version.sourceRef !== WORKTREE ? name : `${name} · up to date`;
   }
 
-  function lastBuilt(project: ProjectSummary) {
-    const at = project.build.finishedAt ?? project.artifact?.builtAt;
-    if (!at) return 'Never built';
-    return new Date(at * 1000).toLocaleString();
-  }
-
   function location(file: string | null, line: number | null) {
     if (!file) return '';
     return line ? `${file}:${line}` : file;
@@ -825,39 +843,62 @@
         </div>
       </section>
     {:else}
+      {#if pinned.length > 0}
+        <section class="pinned-row" aria-label="Pinned documents">
+          {#each pinned as project (project.id)}
+            <article class="pinned-card">
+              <button
+                class="pinned-open"
+                onclick={() => openProject(project)}
+                oncontextmenu={(event) => openMenu(event, projectMenu(project))}
+                disabled={busy || !project.available}
+              >
+                <span class="pinned-thumb">
+                  {#if project.artifact}
+                    {#key project.artifact.revision}
+                      <PdfThumbnail artifact={project.artifact} width={PINNED_THUMB_WIDTH} />
+                    {/key}
+                  {:else}
+                    <span class="missing-thumbnail">No PDF</span>
+                  {/if}
+                </span>
+                <strong class="name" title={project.documentPath}>{project.name}</strong>
+              </button>
+            </article>
+          {/each}
+        </section>
+      {/if}
+
       <section class="project-grid" aria-label="Saved documents">
-        {#each projects as project (project.id)}
+        {#each unpinned as project (project.id)}
           <article class="project-card">
+            <!-- Right-click anywhere on the row for pin, rename, download and
+                 remove. There is no ⋯ button: the menu is the only place those
+                 live, so there is nothing to keep in step with it. -->
             <button
               class="project-open"
               onclick={() => openProject(project)}
               oncontextmenu={(event) => openMenu(event, projectMenu(project))}
               disabled={busy || !project.available}
             >
-              {#if project.artifact}
-                {#key project.artifact.revision}
-                  <PdfThumbnail artifact={project.artifact} />
-                {/key}
-              {:else}
-                <div class="missing-thumbnail">No compiled PDF</div>
-              {/if}
-              <strong>{project.name}</strong>
-              <span class="quiet">{project.kind} · {project.engine}</span>
-              <span class="quiet">{lastBuilt(project)}</span>
-              {#if !project.available}
-                <span class="bad">Document missing</span>
-              {/if}
+              <span class="project-thumb">
+                {#if project.artifact}
+                  {#key project.artifact.revision}
+                    <PdfThumbnail artifact={project.artifact} />
+                  {/key}
+                {:else}
+                  <span class="missing-thumbnail">No PDF</span>
+                {/if}
+              </span>
+              <span class="project-lines">
+                <span class="quiet where" title={project.directory}>{project.location}</span>
+                <strong class="name">{project.name}</strong>
+                <span class="quiet kind">
+                  {project.kind}{#if !project.available}<span class="bad"> · document missing</span
+                    >{/if}
+                </span>
+              </span>
             </button>
-            <div class="project-actions">
-              <button
-                class="link"
-                aria-label="Actions for {project.name}"
-                onclick={(event) => openMenu(event, projectMenu(project))}
-                disabled={busy}
-              >
-                ⋯
-              </button>
-            </div>
           </article>
         {/each}
       </section>
@@ -1026,33 +1067,7 @@
 {/if}
 
 <style>
-  :global(*) {
-    box-sizing: border-box;
-  }
-
-  :global(html),
-  :global(body) {
-    height: 100%;
-    margin: 0;
-    font-family: system-ui, sans-serif;
-    font-size: 14px;
-  }
-
-  /* Scrollbars take no layout space.
-     WebKit has no middle setting here: an unstyled scrollbar reserves 15px of
-     gutter, and styling it to be thinner still reserves whatever width it is
-     given — there is no CSS that produces the overlay kind. So they are hidden,
-     and position is read from the page counter in the footer instead. */
-  :global(::-webkit-scrollbar) {
-    width: 0;
-    height: 0;
-  }
-
-  :global(button),
-  :global(select),
-  :global(input) {
-    font: inherit;
-  }
+  /* The reset, tokens, fonts and scrollbars all live in `src/app.css`. */
 
   h1,
   h2,
@@ -1061,11 +1076,11 @@
   }
 
   .quiet {
-    color: #767676;
+    color: var(--ink-3);
   }
 
   .bad {
-    color: #a4262c;
+    color: var(--danger);
   }
 
   .spacer {
@@ -1076,24 +1091,24 @@
   .link {
     padding: 0.15rem 0.35rem;
     border: 0;
-    border-radius: 3px;
+    border-radius: var(--radius-chip);
     background: none;
-    color: #444;
+    color: var(--ink-2);
     cursor: pointer;
   }
 
   .link:hover:not(:disabled) {
-    background: #0000000d;
-    color: #000;
+    background: var(--paper-2);
+    color: var(--ink);
   }
 
   .link:disabled {
-    color: #aaa;
+    color: var(--line-3);
     cursor: default;
   }
 
   .link.bad {
-    color: #a4262c;
+    color: var(--danger);
   }
 
   /* -- reader ---------------------------------------------------------- */
@@ -1132,18 +1147,18 @@
     gap: 0.5rem;
     min-width: 0;
     padding: 0.25rem 0.5rem;
-    font-size: 0.8125rem;
+    font-size: var(--fs-card);
   }
 
   .bar.bottom {
-    border-top: 1px solid #0000001a;
-    background: #fafafa;
-    color: #767676;
+    border-top: var(--bw) solid var(--line);
+    background: var(--card-2);
+    color: var(--ink-3);
   }
 
   .title {
     overflow: hidden;
-    color: #111;
+    color: var(--ink);
     text-overflow: ellipsis;
     white-space: nowrap;
   }
@@ -1155,7 +1170,7 @@
   .build {
     min-width: 0;
     overflow: hidden;
-    color: #767676;
+    color: var(--ink-3);
     text-overflow: ellipsis;
     white-space: nowrap;
   }
@@ -1169,20 +1184,20 @@
     flex: none;
     width: 7px;
     height: 7px;
-    border-radius: 50%;
-    background: #bbb;
+    border-radius: var(--radius-pill);
+    background: var(--line-3);
   }
 
   .dot.good {
-    background: #2d8a4e;
+    background: var(--accent);
   }
 
   .dot.bad {
-    background: #a4262c;
+    background: var(--danger);
   }
 
   .dot.busy {
-    background: #d18b1f;
+    background: var(--amber);
   }
 
   /* The history sits beside the document rather than over it, so a version can
@@ -1199,24 +1214,24 @@
 
   .history-head {
     padding: 0.4rem 0.6rem;
-    border-bottom: 1px solid #0000001a;
+    border-bottom: var(--bw) solid var(--line);
   }
 
   .history {
     width: 15rem;
     overflow-y: auto;
-    border-right: 1px solid #0000001a;
-    font-size: 0.8125rem;
+    border-right: var(--bw) solid var(--line);
+    font-size: var(--fs-card);
   }
 
   .version {
     display: flex;
     align-items: flex-start;
-    border-bottom: 1px solid #0000000d;
+    border-bottom: var(--bw) solid var(--line);
   }
 
   .version.current {
-    background: #0000000d;
+    background: var(--paper-2);
   }
 
   .version-open {
@@ -1245,17 +1260,17 @@
     display: grid;
     height: 100%;
     place-items: center;
-    background: #f8f8f6;
-    color: #767676;
+    background: var(--paper);
+    color: var(--ink-3);
   }
 
   .panel {
     max-height: 14rem;
     overflow: auto;
     padding: 0.5rem 0.75rem;
-    border-top: 1px solid #0000001a;
-    background: #f4f4f4;
-    font-size: 0.8125rem;
+    border-top: var(--bw) solid var(--line);
+    background: var(--paper-2);
+    font-size: var(--fs-card);
   }
 
   .panel pre {
@@ -1269,11 +1284,11 @@
   }
 
   .diagnostics li.error {
-    color: #a4262c;
+    color: var(--danger);
   }
 
   .diagnostics li.warning {
-    color: #7a6320;
+    color: var(--amber);
   }
 
   .diagnostics code {
@@ -1289,7 +1304,7 @@
 
   .keys dd {
     margin: 0;
-    color: #555;
+    color: var(--ink-2);
   }
 
   kbd {
@@ -1302,13 +1317,13 @@
     gap: 0.5rem;
     margin: 0;
     padding: 0.35rem 0.5rem;
-    border-top: 1px solid #0000001a;
-    background: #f4f4f4;
-    font-size: 0.8125rem;
+    border-top: var(--bw) solid var(--line);
+    background: var(--paper-2);
+    font-size: var(--fs-card);
   }
 
   .strip.bad {
-    background: #fdf2f2;
+    background: var(--danger-bg);
   }
 
   .strip span {
@@ -1322,9 +1337,15 @@
 
   /* -- library --------------------------------------------------------- */
 
-  .library {
-    padding: 0 1.5rem 1.5rem;
-  }
+    .library {
+      /* was: padding: 0 1.5rem 1.5rem; */
+      padding: 0 0 var(--gutter);
+      background: var(--paper);
+    }
+
+    .titlebar {
+      height: 2.375rem;   /* was 2.5rem — 1c opens on 38px */
+    }
 
   .library-header,
   .library-actions,
@@ -1341,63 +1362,268 @@
        squeezing it off the screen. */
     flex-wrap: wrap;
   }
+/* ── 2. Header ───────────────────────────────────────────────────────
+   1c's title is Spectral 34px over a mono uppercase eyebrow, and the
+   header baseline sits on the shelf rather than floating. */
 
-  .project-grid {
-    display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
-    gap: 1rem;
-  }
+/* NEW — h1 has no rule today, so it renders at the browser's 2em bold. */
+.library-header h1 {
+  margin: 0;
+  font-family: var(--font-serif);
+  font-size: var(--fs-title);
+  font-weight: 400;
+  line-height: 1;
+  letter-spacing: -0.01em;
+  color: var(--ink);
+}
 
-  .project-card {
-    display: grid;
-    border: 1px solid #0000001a;
-    border-radius: 4px;
-    overflow: hidden;
-  }
+/* NEW — the subtitle becomes the eyebrow: mono, uppercase, tracked. */
+.library-header p {
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: var(--fs-meta);
+  line-height: 1;
+  letter-spacing: var(--tracking-label);
+  text-transform: uppercase;
+  color: var(--ink-3);
+}
 
-  .project-open {
-    display: grid;
-    gap: 0.3rem;
-    padding: 0;
-    border: 0;
-    background: none;
-    text-align: left;
-    cursor: pointer;
-    /* A document name is a path fragment with no spaces to break at, so without
-       this a long one widens its card and the whole grid with it. */
-    overflow-wrap: anywhere;
-  }
+.library-header {
+  /* was: align-items: center — 1c hangs both off the same baseline */
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 1.5rem;
+  flex-wrap: wrap;
+  padding: 0 var(--gutter) 1.625rem;  /* was: no padding of its own */
+}
 
-  .project-open > :global(strong),
-  .project-open > :global(span) {
-    margin-inline: 0.75rem;
-  }
+.library-header > div {
+  display: flex;             /* NEW — 4px between title and eyebrow */
+  flex-direction: column;
+  gap: 0.25rem;
+}
 
-  .project-open > :global(span:last-child) {
-    margin-bottom: 0.5rem;
-  }
+/* The one solid control on the page: ink fill, paper text, no shadow.
+   NEW rule — today it is a bare <button> on UA styling. */
+.library-actions button {
+  padding: 0.5625rem 0.9375rem;
+  border: 0;
+  border-radius: var(--radius);
+  background: var(--ink);
+  color: var(--paper);
+  font-family: var(--font-sans);
+  font-size: 0.8125rem;
+  font-weight: 500;
+  line-height: 1;
+  box-shadow: var(--shadow-btn);
+  cursor: pointer;
+  transition: background var(--ease);
+}
 
-  .project-actions {
-    gap: 0.25rem;
-    padding: 0.25rem 0.5rem;
-    border-top: 1px solid #0000001a;
-  }
+.library-actions button:hover:not(:disabled) {
+  background: #332f24;
+}
 
-  .missing-thumbnail {
-    display: grid;
-    min-height: 180px;
-    place-items: center;
-    background: #ededed;
-    color: #767676;
-  }
 
-  .empty-library {
-    display: grid;
-    place-items: center;
-    align-content: center;
-    min-height: 55vh;
-    text-align: center;
-  }
+
+.pinned-row {
+  /* was: grid, auto-fill 190px tracks, gap .75rem, margin-bottom 1.25rem */
+  display: flex;
+  gap: var(--shelf-gap);
+  margin: 0;
+  padding: var(--shelf-pad-y) var(--gutter) 1.875rem;
+  border-top: var(--bw) solid var(--line);
+  border-bottom: var(--bw) solid var(--line);
+  background: var(--paper-2);
+}
+
+.pinned-card {
+  /* was: border + --radius + overflow hidden — 1c has no card chrome */
+  border: 0;
+  border-radius: 0;
+  overflow: visible;
+  width: var(--shelf-thumb-w);
+  flex: none;
+}
+
+.pinned-open {
+  display: flex;               /* was: grid, gap .4rem, padding 0 0 .5rem */
+  flex-direction: column;
+  gap: 0.75rem;
+  width: 100%;
+  padding: 0;
+  border: 0;
+  background: none;
+  text-align: left;
+  cursor: pointer;
+}
+
+/* NEW — the border, radius and shadow that used to be on the card now
+   live on the page image, which is what actually looks like paper. */
+.pinned-thumb {
+  display: block;
+  width: var(--shelf-thumb-w);
+  height: var(--shelf-thumb-h);
+  overflow: hidden;
+  border: var(--bw) solid var(--line-2);
+  border-radius: var(--radius-thumb);
+  background: var(--card);
+  box-shadow: var(--shadow-page);
+  transition: box-shadow var(--ease);
+}
+
+.pinned-open:hover:not(:disabled) .pinned-thumb {
+  box-shadow: var(--shadow-page-hover);   /* NEW — no --lift, just depth */
+}
+
+.pinned-open .name {
+  /* was: margin-inline .5rem (the card had padding; now it does not) */
+  margin-inline: 0;
+  font-family: var(--font-serif);
+  font-size: var(--fs-card-sm);
+  font-weight: 400;
+  line-height: var(--lh-name);
+  color: var(--ink);
+  overflow-wrap: anywhere;
+}
+
+/* NEW — folder + kind/engine under a shelf name, mono, two lines. */
+.pinned-open .meta {
+  font-family: var(--font-mono);
+  font-size: var(--fs-label);
+  line-height: 1.4;
+  color: var(--ink-4);
+}
+
+.project-grid {
+  /* was: auto-fill minmax(240px, 1fr), gap .5rem */
+  display: grid;
+  grid-template-columns: repeat(var(--grid-cols), minmax(0, 1fr));
+  gap: var(--grid-gap-y) var(--grid-gap-x);
+  padding: 1.875rem var(--gutter) 0;
+}
+
+.project-card {
+  /* was: border + --radius + overflow hidden + padding .5rem.
+     The padding becomes an equal negative margin so the hover plate
+     bleeds past the text without moving anything on the grid. */
+  display: flex;
+  align-items: flex-start;
+  gap: 0.8125rem;
+  padding: var(--row-pad);
+  margin: calc(var(--row-pad) * -1);
+  border: 0;
+  border-radius: var(--radius-plate);
+  overflow: visible;
+  transition: background var(--ease), box-shadow var(--ease);
+}
+
+.project-card:hover {
+  background: var(--card);          /* NEW */
+  box-shadow: var(--shadow-plate);
+}
+
+.project-open {
+  align-items: flex-start;   /* was: center */
+  gap: 0.8125rem;            /* was: .5rem */
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  text-align: left;
+  cursor: pointer;
+}
+
+.project-thumb {
+  /* was: width 3.5rem, no chrome of its own */
+  display: block;
+  flex: none;
+  width: var(--grid-thumb-w);
+  height: var(--grid-thumb-h);
+  overflow: hidden;
+  border: var(--bw) solid var(--line-2);
+  border-radius: var(--radius-chip);
+  background: var(--card);
+  box-shadow: var(--shadow-sm);
+}
+
+.project-lines {
+  gap: 0.375rem;             /* was: .1rem */
+  display: grid;
+  flex: 1;
+  min-width: 0;
+  padding-top: 0.125rem;
+}
+
+/* The two meta lines split: the folder path is the faintest tier, the
+   kind/engine line one step darker. Both mono now. */
+.project-lines .where {
+  overflow: hidden;
+  font-family: var(--font-mono);
+  font-size: var(--fs-meta);
+  line-height: 1;
+  color: var(--ink-4);       /* was: var(--ink-3) via .quiet */
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.project-lines .kind {
+  display: flex;             /* was: block, truncating */
+  align-items: center;
+  gap: 0.4375rem;
+  font-family: var(--font-mono);
+  font-size: var(--fs-label);
+  line-height: 1;
+  color: var(--ink-3);
+  white-space: nowrap;
+}
+
+/* NEW — the status dot that opens the kind line, and the "/" between
+   kind and engine. Markup: <span class="dot {statusTone}"></span>
+   kind <span class="sep">/</span> engine. .dot already exists in the
+   footer and picks up the new accents on its own. */
+.project-lines .kind .sep {
+  color: var(--line-3);
+}
+
+.project-lines .name {
+  /* was: font-size var(--fs-card) only */
+  font-family: var(--font-serif);
+  font-size: var(--fs-card);
+  font-weight: 400;
+  line-height: var(--lh-name);
+  color: var(--ink);
+  overflow-wrap: anywhere;
+}
+
+.missing-thumbnail {
+  /* was: aspect-ratio 1/1.414 — the parent sets the box now */
+  display: grid;
+  width: 100%;
+  height: 100%;
+  place-items: center;
+  background: var(--paper-3);
+  color: var(--ink-4);
+  font-family: var(--font-mono);
+  font-size: var(--fs-label);
+  text-align: center;
+}
+
+
+/* ── 7. Empty state ──────────────────────────────────────────────────
+   Only needs the gutter it no longer inherits from .library. */
+
+.empty-library {
+  padding-inline: var(--gutter);
+  display: grid;
+  place-items: center;
+  align-content: center;
+  min-height: 55vh;
+  text-align: center;
+}
 
   /* -- context menu ----------------------------------------------------- */
 
@@ -1417,8 +1643,10 @@
     margin: 0;
     padding: 0.2rem 0;
     list-style: none;
-    background: #fff;
-    border: 1px solid #0000002a;
+    background: var(--card);
+    border: var(--bw) solid var(--line-2);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow-menu);
   }
 
   .context-menu button {
@@ -1433,11 +1661,11 @@
   }
 
   .context-menu button:hover:not(:disabled) {
-    background: #0000000d;
+    background: var(--paper-2);
   }
 
   .context-menu button:disabled {
-    color: #aaa;
+    color: var(--line-3);
     cursor: default;
   }
 
@@ -1453,8 +1681,10 @@
     width: min(34rem, calc(100% - 2rem));
     max-height: calc(100vh - 2rem);
     overflow-y: auto;
-    border: 1px solid #0000002a;
-    border-radius: 6px;
+    background: var(--card);
+    border: var(--bw) solid var(--line-2);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow-popover);
   }
 
   dialog label,

@@ -61,9 +61,13 @@ export type ProjectSummary = {
   name: string;
   documentPath: string;
   directory: string;
+  /** The enclosing folder's name, shown above the project's own name. */
+  location: string;
   fileName: string;
   kind: DocumentKind;
   engine: Engine;
+  /** Kept at the top of the library, ahead of whatever was opened last. */
+  pinned: boolean;
   createdAt: number;
   lastOpenedAt: number;
   build: BuildState;

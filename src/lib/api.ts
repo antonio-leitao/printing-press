@@ -37,6 +37,10 @@ export const api = {
   setProjectEngine: (projectId: number, engineOverride: Engine) =>
     invoke<ProjectSummary>('set_project_engine', { projectId, engineOverride }),
 
+  /** Keeps a project at the top of the library. Touches nothing else. */
+  setProjectPinned: (projectId: number, pinned: boolean) =>
+    invoke<ProjectSummary>('set_project_pinned', { projectId, pinned }),
+
   deleteProject: (projectId: number) =>
     invoke<void>('delete_project', { projectId }),
 

@@ -35,6 +35,7 @@ pub struct NewProject<'a> {
 pub struct ProjectEdit {
     pub name: Option<String>,
     pub engine: Option<Engine>,
+    pub pinned: Option<bool>,
 }
 
 pub struct NewArtifact<'a> {
@@ -115,7 +116,7 @@ impl Repository {
         let connection = self.lock()?;
         connection
             .query_row(
-                "SELECT id, name, document_path, engine, created_at, last_opened_at
+                "SELECT id, name, document_path, engine, pinned, created_at, last_opened_at
                  FROM projects WHERE id = ?1",
                 [id],
                 map_project,
@@ -175,6 +176,12 @@ impl Repository {
                 transaction.execute(
                     "UPDATE projects SET engine = ?2 WHERE id = ?1",
                     params![id, engine.as_token()],
+                )?;
+            }
+            if let Some(pinned) = edit.pinned {
+                transaction.execute(
+                    "UPDATE projects SET pinned = ?2 WHERE id = ?1",
+                    params![id, i64::from(pinned)],
                 )?;
             }
             let discarded = if engine_changed {
@@ -683,7 +690,7 @@ impl Repository {
 }
 
 const SUMMARY_QUERY_BASE: &str = "
-    SELECT p.id, p.name, p.document_path, p.engine, p.created_at, p.last_opened_at,
+    SELECT p.id, p.name, p.document_path, p.engine, p.pinned, p.created_at, p.last_opened_at,
            b.source_ref AS state_source_ref, b.status, b.started_at, b.finished_at,
            b.duration_ms, b.error_summary, b.diagnostics,
            a.id AS artifact_id, a.project_id AS artifact_project_id,
@@ -695,7 +702,9 @@ const SUMMARY_QUERY_BASE: &str = "
                            AND a.engine = p.engine
 ";
 
-const SUMMARY_ORDER: &str = " ORDER BY p.last_opened_at DESC, p.name COLLATE NOCASE";
+/// Pinned first, then whatever was opened most recently.
+const SUMMARY_ORDER: &str =
+    " ORDER BY p.pinned DESC, p.last_opened_at DESC, p.name COLLATE NOCASE";
 
 fn summary_query(filter: &str) -> String {
     format!("{SUMMARY_QUERY_BASE}{filter}{SUMMARY_ORDER}")
@@ -739,6 +748,7 @@ fn map_project(row: &Row<'_>) -> rusqlite::Result<AppResult<Project>> {
             name: row_value(row, "name")?,
             document_path: row_value(row, "document_path")?,
             engine: engine.parse()?,
+            pinned: row_value::<i64>(row, "pinned")? != 0,
             created_at: row_value(row, "created_at")?,
             last_opened_at: row_value(row, "last_opened_at")?,
         })
@@ -851,6 +861,7 @@ fn map_summary(row: &Row<'_>) -> rusqlite::Result<AppResult<ProjectSummary>> {
         Ok(ProjectSummary {
             kind: project.kind(),
             directory: project.directory().to_string_lossy().into_owned(),
+            location: project.location(),
             file_name: project.file_name(),
             available: project.document().is_file(),
             project,
@@ -892,6 +903,8 @@ const SCHEMA: &str = "
         -- all derived from it. Nothing needs a stored folder.
         document_path TEXT NOT NULL UNIQUE,
         engine TEXT NOT NULL DEFAULT 'pdflatex',
+        -- Kept at the top of the library, ahead of what was opened last.
+        pinned INTEGER NOT NULL DEFAULT 0,
         created_at INTEGER NOT NULL,
         last_opened_at INTEGER NOT NULL
     );
@@ -958,7 +971,7 @@ const SCHEMA: &str = "
 /// There is no migration path by design: Press has one user, and a stale
 /// database is cheaper to delete than to migrate. The version exists so that a
 /// mismatch says so plainly instead of failing later with a confusing SQL error.
-const SCHEMA_VERSION: i32 = 4;
+const SCHEMA_VERSION: i32 = 5;
 
 fn initialize(connection: &Connection) -> AppResult<()> {
     connection.execute_batch(SCHEMA)?;
@@ -1213,6 +1226,64 @@ mod tests {
         foreign.sort();
         // Relative, forward-slashed, and never the project's own document.
         assert_eq!(foreign, ["supplementary.tex", "talks/talk.md"]);
+    }
+
+    /// The library reads top to bottom, so the order the query returns is the
+    /// order on screen, and pinning has to beat everything else in it.
+    ///
+    /// Both projects are added in the same second, so `last_opened_at` ties and
+    /// the name breaks it — which is exactly what makes this deterministic
+    /// without waiting on the clock.
+    #[test]
+    fn pinning_lifts_a_project_above_the_rest_of_the_order() {
+        let directory = tempfile::tempdir().unwrap();
+        let database = Repository::open(&directory.path().join("press.db")).unwrap();
+        let mut ids = Vec::new();
+        for (folder, name) in [("first", "aaa"), ("second", "zzz")] {
+            let root = project_fixture(directory.path(), folder);
+            ids.push(
+                database
+                    .upsert_project(NewProject {
+                        name,
+                        document_path: root.join("main.tex").to_str().unwrap(),
+                        engine: Engine::PdfLatex,
+                    })
+                    .unwrap()
+                    .id,
+            );
+        }
+        let (aaa, zzz) = (ids[0], ids[1]);
+
+        let listed = || {
+            database
+                .list_projects()
+                .unwrap()
+                .into_iter()
+                .map(|summary| summary.project.id)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(listed(), [aaa, zzz], "the name breaks the tie");
+
+        let set_pinned = |id, pinned| {
+            database
+                .update_project(
+                    id,
+                    ProjectEdit {
+                        pinned: Some(pinned),
+                        ..ProjectEdit::default()
+                    },
+                )
+                .unwrap();
+        };
+
+        set_pinned(zzz, true);
+        assert_eq!(listed(), [zzz, aaa], "pinned comes first regardless");
+        assert!(database.get_project(zzz).unwrap().pinned);
+
+        // Unpinning puts it back where the rest of the order says it belongs.
+        set_pinned(zzz, false);
+        assert_eq!(listed(), [aaa, zzz]);
+        assert!(!database.get_project(zzz).unwrap().pinned);
     }
 
     #[test]

@@ -191,6 +191,7 @@ mod tests {
             name: "Test".into(),
             document_path: document_path.into(),
             engine: Engine::PdfLatex,
+            pinned: false,
             created_at: 0,
             last_opened_at: 0,
         }

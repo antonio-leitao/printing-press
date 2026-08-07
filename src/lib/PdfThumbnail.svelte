@@ -4,7 +4,12 @@
   import { fetchPage, pageUrl } from '$lib/pdf';
   import type { ArtifactSummary } from '$lib/types';
 
-  let { artifact } = $props<{ artifact: ArtifactSummary }>();
+  /**
+   * `width` is roughly the width the thumbnail is shown at, so nothing larger
+   * than that is ever drawn. It has to be passed by whoever sizes the container,
+   * or a small thumbnail costs a full-page render and a large one is blurred.
+   */
+  let { artifact, width = 56 } = $props<{ artifact: ArtifactSummary; width?: number }>();
 
   let host = $state<HTMLDivElement | null>(null);
   let canvas = $state<HTMLCanvasElement | null>(null);
@@ -24,7 +29,7 @@
         const [first] = await api.pageLayout(artifact.id);
         if (!first || controller.signal.aborted) return;
         // Small enough to be cheap, sharp enough on a retina display.
-        const scale = Math.min(260 / first.width, 0.5) * (window.devicePixelRatio || 1);
+        const scale = Math.min(width / first.width, 1) * (window.devicePixelRatio || 1);
         const page = await fetchPage(
           pageUrl(artifact.id, artifact.revision, 0, scale),
           controller.signal
@@ -66,17 +71,20 @@
 </div>
 
 <style>
+  /* Sized by whatever contains it, so the caller decides how big a thumbnail is. */
   .thumbnail {
     display: grid;
-    min-height: 180px;
     place-items: center;
     overflow: hidden;
-    background: #e7e7e7;
+    font-size: var(--fs-meta);
   }
 
   canvas {
     display: block;
+    /* height:auto keeps the page's proportions once max-width has capped it;
+       without it the canvas keeps its attribute height and squashes. */
     max-width: 100%;
-    box-shadow: 0 1px 4px #0004;
+    height: auto;
+    box-shadow: var(--shadow-page);
   }
 </style>

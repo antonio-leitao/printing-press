@@ -132,8 +132,9 @@ fn describe(document: &Path, known: &HashMap<PathBuf, i64>) -> OpenCandidate {
 }
 
 /// `thesis/main.tex`. The folder alone repeats across a directory of documents
-/// and the file alone is a shelf of `main.tex`; together they read. Renaming is
-/// a user action, so this only ever has to be a good default.
+/// and the file alone is a shelf of `main.tex`; together they read. The library
+/// shows the folder *above* this one on its own line, so there is no repetition.
+/// Renaming is a user action, so this has to be a good default and no more.
 fn suggested_name(document: &Path) -> String {
     let file = document
         .file_name()
