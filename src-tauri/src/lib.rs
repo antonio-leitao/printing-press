@@ -1,3 +1,4 @@
+mod anchors;
 mod build;
 mod commands;
 mod database;
@@ -7,6 +8,7 @@ mod editor;
 mod error;
 mod files;
 mod model;
+mod peek;
 mod protocol;
 mod render;
 mod runner;
@@ -121,6 +123,7 @@ pub fn run() {
             commands::delete_project,
             commands::page_layout,
             commands::page_words,
+            commands::peek_source,
             commands::search_document,
             commands::create_snapshot,
             commands::list_versions,

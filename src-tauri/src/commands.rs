@@ -377,6 +377,33 @@ pub async fn page_words(
         .collect())
 }
 
+/// The source behind a point in a built PDF.
+///
+/// Read-only, and for that reason it works on a stored version as well as on
+/// the working tree: a snapshot's source comes out of the object store, and it
+/// is guaranteed to be the source this PDF was built from, which the working
+/// tree cannot promise once it has been edited.
+///
+/// `x` and `y` are PDF points from the top left of the page, which is what
+/// SyncTeX means by a position and what the viewer already works in.
+#[tauri::command]
+pub async fn peek_source(
+    artifact_id: i64,
+    page: u32,
+    x: f64,
+    y: f64,
+    state: State<'_, AppState>,
+) -> AppResult<Option<crate::model::SourcePeek>> {
+    let repository = Arc::clone(&state.repository);
+    let objects = state.objects_root.clone();
+    blocking(move || {
+        let stored = repository.artifact(artifact_id)?;
+        let project = repository.get_project(stored.summary.project_id)?;
+        crate::peek::resolve(&project, &stored, &repository, &objects, page, x, y)
+    })
+    .await
+}
+
 /// Full-document search, run by MuPDF itself.
 #[tauri::command]
 pub async fn search_document(

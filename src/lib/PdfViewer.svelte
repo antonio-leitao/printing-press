@@ -13,7 +13,8 @@
     pageCount = $bindable(0),
     zoomPercent = $bindable(100),
     loadError = $bindable(''),
-    enabled = true
+    enabled = true,
+    onPeek
   } = $props<{
     artifact: ArtifactSummary;
     page?: number;
@@ -22,7 +23,18 @@
     loadError?: string;
     /** False while a dialog owns the keyboard. */
     enabled?: boolean;
+    /** Cmd-click, in PDF points from the page's top left. */
+    onPeek?: (at: PeekRequest) => void;
   }>();
+
+  export type PeekRequest = {
+    page: number;
+    x: number;
+    y: number;
+    /** Where on screen it was asked for, so the answer can be shown there. */
+    clientX: number;
+    clientY: number;
+  };
 
   type ViewAnchor = {
     page: number;
@@ -482,6 +494,35 @@
     if (!scrollFrame) scrollFrame = requestAnimationFrame(updateCurrentPage);
   }
 
+  /**
+   * Cmd-click asks what made this. The point is reported in PDF points from the
+   * page's top left, which is the only thing outside this component that means
+   * anything: the zoom, the transient scale during a pinch and the device pixel
+   * ratio are all this viewer's business.
+   *
+   * Cmd rather than double-click, which belongs to selecting a word.
+   */
+  function handleClick(event: MouseEvent) {
+    if (!onPeek || !(event.metaKey || event.ctrlKey)) return;
+    const target = event.target as HTMLElement | null;
+    const element = target?.closest<HTMLElement>('[data-page]');
+    if (!element) return;
+    const pageNumber = Number(element.dataset.page ?? 0);
+    const size = layout[pageNumber - 1];
+    if (!size) return;
+
+    const rect = element.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) return;
+    event.preventDefault();
+    onPeek({
+      page: pageNumber,
+      x: ((event.clientX - rect.left) / rect.width) * size.width,
+      y: ((event.clientY - rect.top) / rect.height) * size.height,
+      clientX: event.clientX,
+      clientY: event.clientY
+    });
+  }
+
   onMount(() => {
     const element = viewer;
     if (!element) return;
@@ -492,6 +533,7 @@
     element.addEventListener('gestureend', handleGestureEnd, { passive: false });
     element.addEventListener('scroll', handleScroll, { passive: true });
     element.addEventListener('pointerdown', stopGlide);
+    element.addEventListener('click', handleClick);
     window.addEventListener('keydown', handleKeydown);
     return () => {
       element.removeEventListener('wheel', handleWheel);
@@ -500,6 +542,7 @@
       element.removeEventListener('gestureend', handleGestureEnd);
       element.removeEventListener('scroll', handleScroll);
       element.removeEventListener('pointerdown', stopGlide);
+      element.removeEventListener('click', handleClick);
       window.removeEventListener('keydown', handleKeydown);
       if (wheelTimer !== undefined) window.clearTimeout(wheelTimer);
       if (scrollFrame) cancelAnimationFrame(scrollFrame);

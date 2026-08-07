@@ -508,6 +508,20 @@ pub struct VersionSummary {
     pub artifact: Option<ArtifactSummary>,
 }
 
+/// The source behind a place in a built PDF.
+///
+/// `file` is project-relative and `text` is that file as this version has it —
+/// read from disk for the working tree, from the object store for a snapshot.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SourcePeek {
+    pub file: String,
+    /// 1-based and inclusive, so they read the way an editor numbers lines.
+    pub start_line: i64,
+    pub end_line: i64,
+    pub text: String,
+}
+
 /// A page's size in PDF points. The viewer lays the whole document out from
 /// these before a single page has been drawn, so scroll position and the page
 /// counter are correct immediately.

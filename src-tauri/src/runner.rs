@@ -343,7 +343,14 @@ pub async fn run(
         });
     }
 
-    let product = publish(&generated, &inputs.artifact_directory, analysis.page_count).await?;
+    let product = publish(
+        &generated,
+        &inputs.work_directory,
+        &job_name,
+        &inputs.artifact_directory,
+        analysis.page_count,
+    )
+    .await?;
     Ok(BuildOutcome::Succeeded {
         product,
         diagnostics: all,
@@ -389,24 +396,51 @@ async fn convert_markdown(inputs: &BuildInputs<'_>, job_name: &str) -> Result<Pa
     // file, and comparing before replacing is what preserves its cache.
     let staging = inputs.work_directory.join(format!("{job_name}.tex.next"));
 
-    let mut command = Command::new(&pandoc);
-    command.current_dir(&inputs.source.directory);
-    command.env("PATH", augmented_path(&pandoc));
-    command.args(["--from", "markdown", "--to", "latex"]);
-    // Standalone gives a full document rather than a fragment, and applies the
-    // YAML frontmatter — title, author, documentclass, geometry — through
-    // pandoc's default template.
-    command.arg("--standalone");
-    command.arg("--output").arg(&staging);
-    command.arg(&source);
-    command.stdin(Stdio::null());
-    command.stdout(Stdio::piped()).stderr(Stdio::piped());
-    command.kill_on_drop(true);
+    // pandoc reads a marked copy rather than the document itself, so that the
+    // LaTeX it writes says which line of the markdown each block came from.
+    // The copy sits in the work directory; pandoc still runs in the source
+    // directory, so images and includes resolve where the author put them.
+    let marked = inputs.work_directory.join(format!("{job_name}.marked.md"));
+    let read = tokio::fs::read_to_string(&source)
+        .await
+        .map_err(|error| format!("could not read {}: {error}", inputs.source.file_name))?;
+    let input = match tokio::fs::write(&marked, crate::anchors::mark(&read)).await {
+        Ok(()) => marked.clone(),
+        // Marking is an aid, not a requirement. A document that cannot be
+        // marked is still a document that should compile.
+        Err(_) => source.clone(),
+    };
 
-    let output = command
+    let run = |input: PathBuf| {
+        let mut command = Command::new(&pandoc);
+        command.current_dir(&inputs.source.directory);
+        command.env("PATH", augmented_path(&pandoc));
+        command.args(["--from", "markdown", "--to", "latex"]);
+        // Standalone gives a full document rather than a fragment, and applies
+        // the YAML frontmatter — title, author, documentclass, geometry —
+        // through pandoc's default template.
+        command.arg("--standalone");
+        command.arg("--output").arg(&staging);
+        command.arg(input);
+        command.stdin(Stdio::null());
+        command.stdout(Stdio::piped()).stderr(Stdio::piped());
+        command.kill_on_drop(true);
+        command
+    };
+
+    let mut output = run(input.clone())
         .output()
         .await
         .map_err(|error| format!("could not start pandoc: {error}"))?;
+    // pandoc counts lines in what it was given, so a complaint about the marked
+    // copy would name lines the author cannot find. Asking again with the
+    // document itself costs a second run only when something is already wrong.
+    if !output.status.success() && input != source {
+        output = run(source.clone())
+            .output()
+            .await
+            .map_err(|error| format!("could not start pandoc: {error}"))?;
+    }
     if !output.status.success() {
         let _ = tokio::fs::remove_file(&staging).await;
         let complaint = String::from_utf8_lossy(&output.stderr);
@@ -438,8 +472,16 @@ async fn convert_markdown(inputs: &BuildInputs<'_>, job_name: &str) -> Result<Pa
 
 /// Copies the PDF into Press-managed storage under a fresh name, staged and then
 /// renamed so a reader never sees a half-written file.
+///
+/// What SyncTeX wrote travels with it. The work directory is scratch space that
+/// the next build overwrites, so a sync file left there would describe a PDF
+/// nobody is looking at any more; beside the artifact it stays true for as long
+/// as the artifact does. `synctex` finds it by the PDF's own name, which is why
+/// it is copied under the same stem.
 async fn publish(
     generated: &Path,
+    work_directory: &Path,
+    job_name: &str,
     artifact_directory: &Path,
     page_count: Option<i64>,
 ) -> AppResult<BuildProduct> {
@@ -455,6 +497,36 @@ async fn publish(
     tokio::fs::rename(&staging, &destination).await.map_err(|error| {
         AppError::Build(format!("could not publish the built PDF: {error}"))
     })?;
+
+    // Best effort throughout: a build with no sync data is a build whose PDF
+    // cannot be clicked through to its source, which is worth nothing beside
+    // failing the build itself.
+    for extension in ["synctex.gz", "synctex"] {
+        let sync = work_directory.join(format!("{job_name}.{extension}"));
+        if tokio::fs::copy(
+            &sync,
+            artifact_directory.join(format!("build-{stamp}.{extension}")),
+        )
+        .await
+        .is_ok()
+        {
+            break;
+        }
+    }
+    // For markdown, SyncTeX can only name pandoc's output. The anchors in it
+    // are what carry an answer back to the markdown the author wrote.
+    if let Ok(latex) = tokio::fs::read_to_string(work_directory.join(format!("{job_name}.tex"))).await
+    {
+        let anchors = crate::anchors::collect(&latex);
+        if !anchors.is_empty() {
+            let _ = tokio::fs::write(
+                artifact_directory.join(format!("build-{stamp}.lines")),
+                crate::anchors::encode(&anchors),
+            )
+            .await;
+        }
+    }
+
     Ok(BuildProduct {
         pdf_path: destination,
         page_count,

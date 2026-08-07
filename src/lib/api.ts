@@ -7,6 +7,7 @@ import type {
   ProjectSummary,
   SearchHit,
   SnapshotOutcome,
+  SourcePeek,
   SourceRef,
   TextBox,
   VersionSummary
@@ -65,6 +66,14 @@ export const api = {
   /** Word boxes for the selection overlay. */
   pageWords: (artifactId: number, page: number) =>
     invoke<TextBox[]>('page_words', { artifactId, page }),
+
+  /**
+   * The source behind a point on a page, in PDF points from its top left.
+   * Null when the point resolves to something outside the document — a class
+   * file, or pandoc's own preamble.
+   */
+  peekSource: (artifactId: number, page: number, x: number, y: number) =>
+    invoke<SourcePeek | null>('peek_source', { artifactId, page, x, y }),
 
   searchDocument: (artifactId: number, needle: string) =>
     invoke<SearchHit[]>('search_document', { artifactId, needle }),

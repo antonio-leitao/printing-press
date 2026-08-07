@@ -5,7 +5,7 @@
   import { listen } from '@tauri-apps/api/event';
   import { open } from '@tauri-apps/plugin-dialog';
   import PdfThumbnail from '$lib/PdfThumbnail.svelte';
-  import PdfViewer from '$lib/PdfViewer.svelte';
+  import PdfViewer, { type PeekRequest } from '$lib/PdfViewer.svelte';
   import { api, errorMessage } from '$lib/api';
   import { fail, notify } from '$lib/messages.svelte';
   import {
@@ -17,6 +17,7 @@
     type OpenCandidate,
     type OpenRequest,
     type ProjectSummary,
+    type SourcePeek,
     type VersionSummary,
     type WatcherError
   } from '$lib/types';
@@ -37,6 +38,7 @@
     ['+ / -', 'zoom in / out'],
     ['0', 'actual size'],
     ['a / s', 'fit page / fit width'],
+    ['⌘click', 'the source behind a place in the PDF'],
     ['R', 'rebuild this version'],
     ['⌘K', 'snapshot the working tree'],
     ['?', 'this list']
@@ -266,8 +268,9 @@
 
     const shortcuts = (event: KeyboardEvent) => {
       // Before the guards below, which treat an open menu as a dialog.
-      if (menu && event.key === 'Escape') {
+      if (event.key === 'Escape' && (menu || peek)) {
         menu = null;
+        peek = null;
         return;
       }
       if (!activeProject || dialogOpen) return;
@@ -688,6 +691,62 @@
     }
   }
 
+  // -- peek ------------------------------------------------------------------
+
+  /// The source behind a place in the PDF, shown where it was asked for.
+  ///
+  /// Read-only on purpose. That is what makes it work on a stored version as
+  /// well as the live one: the source comes from whatever this PDF was built
+  /// from, and for a snapshot that is the object store rather than the folder,
+  /// which may have moved on years ago.
+  type Peek = {
+    x: number;
+    y: number;
+    /** Anchored by its foot when the click was in the lower half of the window. */
+    above: boolean;
+    version: string;
+    source: SourcePeek | null;
+    /** Set once the answer is in and there is nothing to show. */
+    empty: boolean;
+  };
+  let peek = $state<Peek | null>(null);
+  let peekRequest = 0;
+
+  async function peekSource(at: PeekRequest) {
+    const artifact = shownArtifact;
+    if (!artifact) return;
+    const request = ++peekRequest;
+    peek = {
+      x: at.clientX,
+      y: at.clientY,
+      above: at.clientY > window.innerHeight / 2,
+      version: selected?.title ?? 'Working tree',
+      source: null,
+      empty: false
+    };
+    try {
+      const source = await api.peekSource(artifact.id, at.page, at.x, at.y);
+      // A second click while the first was in flight wins.
+      if (request !== peekRequest || !peek) return;
+      peek = { ...peek, source, empty: source === null };
+    } catch (reason) {
+      if (request === peekRequest) peek = null;
+      fail(reason);
+    }
+  }
+
+  async function copyPeek() {
+    const text = peek?.source?.text;
+    if (!text) return;
+    try {
+      await navigator.clipboard.writeText(text);
+      peek = null;
+      notify('Copied.');
+    } catch (reason) {
+      fail(reason);
+    }
+  }
+
   // -- build progress --------------------------------------------------------
 
   /** The stage a markdown build starts in, named the same way in `runner.rs`. */
@@ -866,6 +925,7 @@
             bind:zoomPercent={viewerZoom}
             bind:loadError={viewerError}
             enabled={!dialogOpen}
+            onPeek={peekSource}
           />
         {:else}
           <div class="empty">
@@ -1038,6 +1098,37 @@
       </section>
     {/if}
   </main>
+{/if}
+
+{#if peek}
+  <!-- Dismissed by clicking anywhere else, including the next cmd-click, which
+       lands on the backdrop and reaches the page underneath it. -->
+  <button class="menu-backdrop" aria-label="Close the source" onclick={() => (peek = null)}
+  ></button>
+  <aside
+    class="peek"
+    class:above={peek.above}
+    style="left: {peek.x}px; top: {peek.y}px"
+    transition:fade={{ duration: 100 }}
+  >
+    {#if peek.source}
+      <header>
+        <span class="peek-where">{peek.source.file}:{peek.source.startLine}{peek.source.endLine >
+          peek.source.startLine
+            ? `-${peek.source.endLine}`
+            : ''}</span>
+        <span class="quiet peek-version">{peek.version}</span>
+        <button class="link" onclick={copyPeek}>Copy</button>
+      </header>
+      <pre>{peek.source.text}</pre>
+    {:else if peek.empty}
+      <p class="quiet peek-nothing">
+        Nothing here comes from the document — this is the class file or the preamble.
+      </p>
+    {:else}
+      <p class="quiet peek-nothing">Looking…</p>
+    {/if}
+  </aside>
 {/if}
 
 {#if menu}
@@ -1794,6 +1885,74 @@
   min-height: 55vh;
   text-align: center;
 }
+
+  /* -- peek --------------------------------------------------------------- */
+
+  /* Sits where it was asked for, and turns to open upwards once the click was
+     in the lower half of the window so it never runs off the bottom. The
+     translate keeps it clear of the pointer either way. */
+  .peek {
+    position: fixed;
+    z-index: 32;
+    width: max-content;
+    max-width: min(32rem, calc(100vw - 2rem));
+    transform: translate(-0.5rem, 0.75rem);
+    background: var(--card);
+    border: var(--bw) solid var(--line-2);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow-popover);
+    overflow: hidden;
+  }
+
+  .peek.above {
+    transform: translate(-0.5rem, calc(-100% - 0.75rem));
+  }
+
+  .peek header {
+    display: flex;
+    align-items: baseline;
+    gap: 0.5rem;
+    padding: 0.35rem 0.5rem 0.35rem 0.65rem;
+    border-bottom: var(--bw) solid var(--line);
+    background: var(--paper-2);
+    font-size: var(--fs-meta);
+  }
+
+  .peek-where {
+    color: var(--ink-2);
+    font-family: ui-monospace, monospace;
+    overflow-wrap: anywhere;
+  }
+
+  /* Which version this source is — the whole point when two of them are open
+     side by side. */
+  .peek-version {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    text-align: right;
+  }
+
+  .peek pre {
+    max-height: 22rem;
+    margin: 0;
+    padding: 0.6rem 0.65rem;
+    overflow: auto;
+    font-family: ui-monospace, monospace;
+    font-size: var(--fs-card);
+    line-height: 1.45;
+    tab-size: 2;
+    /* Source is read as it was written: wrapped, never reflowed. */
+    white-space: pre;
+  }
+
+  .peek-nothing {
+    margin: 0;
+    padding: 0.6rem 0.75rem;
+    font-size: var(--fs-menu);
+  }
 
   /* -- context menu ----------------------------------------------------- */
 

@@ -109,6 +109,19 @@ export type VersionSummary = {
   artifact: ArtifactSummary | null;
 };
 
+/**
+ * The source behind a place in a built PDF. `text` is that file as the version
+ * being read has it, so a snapshot answers with the source it was built from.
+ */
+export type SourcePeek = {
+  /** Project-relative. */
+  file: string;
+  /** 1-based and inclusive. */
+  startLine: number;
+  endLine: number;
+  text: string;
+};
+
 /** A page's size in PDF points. */
 export type PageSize = {
   width: number;
