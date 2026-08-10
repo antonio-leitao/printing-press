@@ -629,6 +629,9 @@
     selectedKey = versionKey(version);
     progress = null;
     buildLog = '';
+    // Open on the log and switching versions: read the one now being shown,
+    // rather than leaving the panel empty until it is closed and reopened.
+    if (panel === 'log') void loadBuildLog();
     if (version.artifact || !activeProject) return;
     if (version.build.status === 'running' || version.build.status === 'queued') return;
     try {
@@ -787,15 +790,20 @@
     }
   }
 
+  /// The version being read, so the log belongs to the build whose errors are
+  /// listed beside it. Each version keeps its own.
+  async function loadBuildLog() {
+    if (!activeProject) return;
+    try {
+      buildLog = await api.getBuildLog(activeProject.id, selectedRef);
+    } catch (reason) {
+      buildLog = errorMessage(reason);
+    }
+  }
+
   async function togglePanel(next: Panel) {
     panel = panel === next ? 'none' : next;
-    if (panel === 'log' && activeProject && !buildLog) {
-      try {
-        buildLog = await api.getBuildLog(activeProject.id);
-      } catch (reason) {
-        buildLog = errorMessage(reason);
-      }
-    }
+    if (panel === 'log' && !buildLog) await loadBuildLog();
   }
 
   // -- peek ------------------------------------------------------------------
@@ -1014,12 +1022,15 @@
     return line ? `${file}:${line}` : file;
   }
 
-  const errors = $derived(
-    activeProject?.build.diagnostics.filter((item) => item.severity === 'error') ?? []
+  // From the version being read, not from the project. The project's own build
+  // state is the working tree's, so selecting a snapshot that fails used to
+  // report "does not compile" over the working tree's errors — two different
+  // builds, side by side, reading as one.
+  const diagnostics = $derived(
+    (selected?.build ?? activeProject?.build)?.diagnostics ?? []
   );
-  const warnings = $derived(
-    activeProject?.build.diagnostics.filter((item) => item.severity === 'warning') ?? []
-  );
+  const errors = $derived(diagnostics.filter((item) => item.severity === 'error'));
+  const warnings = $derived(diagnostics.filter((item) => item.severity === 'warning'));
   // The viewer keeps its own load error, because it also decides what the pane
   // shows when a document will not open. This only repeats it as a message, so
   // a failure is not silent when the pane still has the previous document on

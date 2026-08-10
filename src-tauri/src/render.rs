@@ -36,10 +36,45 @@ pub struct PageGeometry {
 /// look like. The alpha channel is added here rather than in the webview: the
 /// browser needs RGBA for `ImageData`, and expanding three million pixels in
 /// JavaScript costs more than the render itself.
+///
+/// The buffer opens with [`RenderedPage::PREFIX`] free bytes. Whoever ships the
+/// page writes its dimensions there; see [`into_framed`](Self::into_framed).
 pub struct RenderedPage {
     pub width: u32,
     pub height: u32,
-    pub samples: Vec<u8>,
+    buffer: Vec<u8>,
+}
+
+impl RenderedPage {
+    /// Room kept at the front of the buffer for the dimensions the webview reads
+    /// before the samples.
+    ///
+    /// A page is twelve megabytes at ordinary zoom on a retina display. Building
+    /// the response by allocating a second buffer and copying the samples into
+    /// it behind a header cost as much as a tenth of the render that produced
+    /// them, for nothing: the space can simply be left at the front to begin
+    /// with, and the header written into it.
+    pub const PREFIX: usize = 8;
+
+    /// The samples alone, without the space kept in front of them.
+    ///
+    /// For tests. Everything on the way to the webview wants the whole buffer,
+    /// which is the point of the prefix.
+    #[cfg(test)]
+    pub fn samples(&self) -> &[u8] {
+        &self.buffer[Self::PREFIX..]
+    }
+
+    fn samples_mut(&mut self) -> &mut [u8] {
+        &mut self.buffer[Self::PREFIX..]
+    }
+
+    /// The whole buffer, with `prefix` written into the space kept for it. No
+    /// copy: this is the same allocation MuPDF's samples were expanded into.
+    pub fn into_framed(mut self, prefix: [u8; Self::PREFIX]) -> Vec<u8> {
+        self.buffer[..Self::PREFIX].copy_from_slice(&prefix);
+        self.buffer
+    }
 }
 
 /// A link on a page: where it is, and where it goes.
@@ -128,36 +163,45 @@ pub fn render_page(
     let pixmap = page
         .to_pixmap(&matrix, &Colorspace::device_rgb(), false, true)
         .map_err(|error| mupdf_error("could not rasterise the page", error))?;
-    let mut samples = to_rgba(pixmap.samples(), pixmap.n());
-    if invert {
-        darken(&mut samples);
-    }
-    Ok(RenderedPage {
+    let mut page = RenderedPage {
         width: pixmap.width(),
         height: pixmap.height(),
-        samples,
-    })
+        buffer: to_rgba(pixmap.samples(), pixmap.n()),
+    };
+    if invert {
+        darken(page.samples_mut());
+    }
+    Ok(page)
 }
 
+/// Expands MuPDF's samples to RGBA, behind the space [`RenderedPage::PREFIX`]
+/// keeps for the header.
 fn to_rgba(samples: &[u8], components: u8) -> Vec<u8> {
+    let pixels = match components {
+        4 => samples.len() / 4,
+        3 => samples.len() / 3,
+        1 => samples.len(),
+        _ => 0,
+    };
+    let mut rgba = vec![0_u8; RenderedPage::PREFIX];
+    rgba.reserve_exact(pixels * 4);
     match components {
-        4 => samples.to_vec(),
+        4 => rgba.extend_from_slice(samples),
         3 => {
-            let mut rgba = Vec::with_capacity(samples.len() / 3 * 4);
             for pixel in samples.chunks_exact(3) {
                 rgba.extend_from_slice(&[pixel[0], pixel[1], pixel[2], 255]);
             }
-            rgba
         }
         1 => {
-            let mut rgba = Vec::with_capacity(samples.len() * 4);
             for &grey in samples {
                 rgba.extend_from_slice(&[grey, grey, grey, 255]);
             }
-            rgba
         }
-        _ => Vec::new(),
+        // Nothing this can be read as. The header still travels, and the
+        // webview refuses a body that does not match the dimensions in it.
+        _ => {}
     }
+    rgba
 }
 
 /// Turns a page inside out for reading in the dark: paper goes black, ink goes
@@ -332,7 +376,7 @@ pub fn search_page(document: &Document, index: usize, needle: &str) -> AppResult
 
 use std::{
     collections::VecDeque,
-    sync::{Arc, Mutex, mpsc},
+    sync::{Arc, Condvar, Mutex},
 };
 
 use tokio::sync::oneshot;
@@ -340,6 +384,13 @@ use tokio::sync::oneshot;
 /// Documents kept open per worker. Reopening costs about 4ms, so a handful is
 /// plenty to keep scrolling and a side-by-side comparison warm.
 const DOCUMENTS_PER_WORKER: usize = 4;
+
+/// How many pages may be waiting to be drawn before the oldest is given up on.
+///
+/// Far more than can be near the window at once, which is what makes dropping
+/// safe: for a page to be given up on, this many *newer* pages must have been
+/// asked for since, and a reader that has moved that far has moved off it.
+const MOST_PENDING_RENDERS: usize = 32;
 
 pub enum Job {
     Render {
@@ -373,8 +424,12 @@ pub enum Job {
 }
 
 impl Job {
-    /// True when whoever asked has gone away, so the work can be skipped
-    /// entirely. Scrolling past a page before it is drawn costs nothing.
+    /// True when whoever asked has gone away.
+    ///
+    /// This catches a caller whose own future was dropped. It does *not* catch
+    /// the webview abandoning a page: those requests are served from a task
+    /// Tauri spawns for the `press:` scheme, and an aborted `fetch` never
+    /// reaches it. Which is why the queue below is ordered the way it is.
     fn abandoned(&self) -> bool {
         match self {
             Self::Render { reply, .. } => reply.is_closed(),
@@ -384,25 +439,97 @@ impl Job {
             Self::Search { reply, .. } => reply.is_closed(),
         }
     }
+
+    fn is_render(&self) -> bool {
+        matches!(self, Self::Render { .. })
+    }
+}
+
+/// What the workers take from, newest first.
+///
+/// A page is asked for when it comes near the window, and nothing ever un-asks
+/// it — see [`Job::abandoned`]. Drawn oldest-first, a fast scroll through a long
+/// document therefore leaves the page under the reader's eyes waiting behind
+/// every page they have already scrolled past: a hundred of them, at about ten
+/// milliseconds each.
+///
+/// Newest-first puts what is on screen at the front. The pages scrolled past are
+/// still drawn, harmlessly and last, unless more than [`MOST_PENDING_RENDERS`]
+/// are waiting — at which point the oldest is given up on, because by then it is
+/// certainly not being looked at.
+#[derive(Default)]
+struct Queue {
+    pending: Mutex<Pending>,
+    ready: Condvar,
+}
+
+#[derive(Default)]
+struct Pending {
+    jobs: VecDeque<Job>,
+    closed: bool,
+}
+
+impl Queue {
+    fn push(&self, job: Job) -> bool {
+        let Ok(mut pending) = self.pending.lock() else {
+            return false;
+        };
+        if pending.closed {
+            return false;
+        }
+        pending.jobs.push_back(job);
+        // Only pages are given up on. Geometry, links, words and search are each
+        // asked for once and waited on, so dropping one would fail something
+        // nobody has walked away from.
+        while pending.jobs.iter().filter(|job| job.is_render()).count() > MOST_PENDING_RENDERS {
+            let Some(oldest) = pending.jobs.iter().position(Job::is_render) else {
+                break;
+            };
+            pending.jobs.remove(oldest);
+        }
+        drop(pending);
+        self.ready.notify_one();
+        true
+    }
+
+    fn take(&self) -> Option<Job> {
+        let mut pending = self.pending.lock().ok()?;
+        loop {
+            if let Some(job) = pending.jobs.pop_back() {
+                return Some(job);
+            }
+            if pending.closed {
+                return None;
+            }
+            pending = self.ready.wait(pending).ok()?;
+        }
+    }
+
+    fn close(&self) {
+        if let Ok(mut pending) = self.pending.lock() {
+            pending.closed = true;
+            pending.jobs.clear();
+        }
+        self.ready.notify_all();
+    }
 }
 
 /// A few threads, each owning its own MuPDF context and open documents.
 pub struct RenderPool {
-    sender: mpsc::Sender<Job>,
+    queue: Arc<Queue>,
 }
 
 impl RenderPool {
     pub fn new(workers: usize) -> Self {
-        let (sender, receiver) = mpsc::channel::<Job>();
-        let receiver = Arc::new(Mutex::new(receiver));
+        let queue = Arc::new(Queue::default());
         for index in 0..workers.max(1) {
-            let receiver = Arc::clone(&receiver);
+            let queue = Arc::clone(&queue);
             std::thread::Builder::new()
                 .name(format!("press-render-{index}"))
-                .spawn(move || worker(receiver))
+                .spawn(move || worker(&queue))
                 .expect("could not start a render thread");
         }
-        Self { sender }
+        Self { queue }
     }
 
     /// Sized to keep a couple of pages in flight without starving the rest of
@@ -419,9 +546,9 @@ impl RenderPool {
         make: impl FnOnce(oneshot::Sender<AppResult<T>>) -> Job,
     ) -> AppResult<T> {
         let (reply, receive) = oneshot::channel();
-        self.sender
-            .send(make(reply))
-            .map_err(|_| AppError::Task("the render pool has stopped".into()))?;
+        if !self.queue.push(make(reply)) {
+            return Err(AppError::Task("the render pool has stopped".into()));
+        }
         receive
             .await
             .map_err(|_| AppError::Task("the render pool dropped a request".into()))?
@@ -466,10 +593,51 @@ impl RenderPool {
     }
 }
 
+/// Lets the workers finish. Only tests drop a pool — the application's lives as
+/// long as it does — but a thread per pool left parked on the condition variable
+/// would accumulate through a test run.
+impl Drop for RenderPool {
+    fn drop(&mut self) {
+        self.queue.close();
+    }
+}
+
+/// What makes a cached document still the document on disk.
+///
+/// A path alone cannot say. Press's own builds publish under a fresh
+/// `build-<stamp>.pdf` every time, so for those the path is enough — but a PDF
+/// Press is only showing is rebuilt under its own name by whatever owns it, and
+/// that is the whole point of watching one. MuPDF reads objects from the stream
+/// as they are asked for, so a handle held across a rewrite resolves the new
+/// bytes through the old cross-reference table: not a stale page, a wrong one.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct Stamp {
+    modified: Option<std::time::SystemTime>,
+    len: u64,
+}
+
+impl Stamp {
+    /// A file that cannot be measured gets a stamp that equals nothing, itself
+    /// included, so it is reopened rather than trusted.
+    fn of(path: &Path) -> Option<Self> {
+        let metadata = std::fs::metadata(path).ok()?;
+        Some(Self {
+            modified: metadata.modified().ok(),
+            len: metadata.len(),
+        })
+    }
+}
+
+struct Entry {
+    path: PathBuf,
+    stamp: Option<Stamp>,
+    document: Document,
+}
+
 /// Open documents for one thread. MuPDF's context belongs to the thread that
 /// made it, so this is deliberately not shared.
 struct DocumentCache {
-    entries: VecDeque<(PathBuf, Document)>,
+    entries: VecDeque<Entry>,
 }
 
 impl DocumentCache {
@@ -480,37 +648,40 @@ impl DocumentCache {
     }
 
     fn get(&mut self, path: &Path) -> AppResult<&Document> {
+        // One `stat` against a render measured in milliseconds.
+        let stamp = Stamp::of(path);
         if let Some(position) = self
             .entries
             .iter()
-            .position(|(cached, _)| cached.as_path() == path)
+            .position(|entry| entry.path.as_path() == path)
         {
+            let fresh = stamp.is_some_and(|stamp| self.entries[position].stamp == Some(stamp));
             let entry = self.entries.remove(position).expect("position is in range");
-            self.entries.push_back(entry);
-        } else {
-            let document = open(path)?;
-            self.entries.push_back((path.to_path_buf(), document));
-            while self.entries.len() > DOCUMENTS_PER_WORKER {
-                self.entries.pop_front();
+            if fresh {
+                self.entries.push_back(entry);
+                return Ok(&self.entries.back().expect("just moved").document);
             }
+            // Rewritten under the same name: what is open describes the file
+            // that used to be there. Dropped, and opened again below.
         }
-        Ok(&self.entries.back().expect("just inserted").1)
+
+        let document = open(path)?;
+        self.entries.push_back(Entry {
+            path: path.to_path_buf(),
+            stamp,
+            document,
+        });
+        while self.entries.len() > DOCUMENTS_PER_WORKER {
+            self.entries.pop_front();
+        }
+        Ok(&self.entries.back().expect("just inserted").document)
     }
 }
 
-fn worker(receiver: Arc<Mutex<mpsc::Receiver<Job>>>) {
+fn worker(queue: &Queue) {
     let mut cache = DocumentCache::new();
-    loop {
-        // The lock is held only to take a job, never across the work itself.
-        let job = {
-            let Ok(guard) = receiver.lock() else {
-                return;
-            };
-            match guard.recv() {
-                Ok(job) => job,
-                Err(_) => return,
-            }
-        };
+    // The queue's lock is held only to take a job, never across the work itself.
+    while let Some(job) = queue.take() {
         if job.abandoned() {
             continue;
         }
@@ -774,17 +945,27 @@ mod tests {
         // 1.3 zoom on a retina display.
         let rendered = render_page(&document, 0, 2.6, false).unwrap();
         assert_eq!(
-            rendered.samples.len(),
+            rendered.samples().len(),
             rendered.width as usize * rendered.height as usize * 4,
             "pages arrive as RGBA, ready for ImageData"
         );
         // Opaque: a page is a sheet of paper, not a transparency.
-        assert!(rendered.samples.chunks_exact(4).all(|pixel| pixel[3] == 255));
+        assert!(rendered.samples().chunks_exact(4).all(|pixel| pixel[3] == 255));
         assert!(rendered.width > 1000);
         // A page with text on it is not a blank sheet.
         assert!(
-            rendered.samples.iter().any(|&byte| byte < 200),
+            rendered.samples().iter().any(|&byte| byte < 200),
             "the rasterised page has ink on it"
+        );
+
+        // The header travels in front of the samples, in the same allocation.
+        let framed = render_page(&document, 0, 2.6, false)
+            .unwrap()
+            .into_framed([1, 2, 3, 4, 5, 6, 7, 8]);
+        assert_eq!(&framed[..8], &[1, 2, 3, 4, 5, 6, 7, 8]);
+        assert_eq!(
+            framed.len() - 8,
+            rendered.width as usize * rendered.height as usize * 4
         );
 
         let extracted = words(&document, 0).unwrap();
@@ -843,20 +1024,157 @@ mod tests {
         };
         let pool = RenderPool::new(1);
         let (reply, receive) = oneshot::channel();
-        // Scrolling past a page before it is drawn must not cost a render.
+        // A caller whose own future was dropped must not cost a render.
         drop(receive);
-        pool.sender
-            .send(Job::Render {
-                path: pdf.clone(),
-                page: 0,
-                scale: 4.0,
-                invert: false,
-                reply,
-            })
-            .unwrap();
+        assert!(pool.queue.push(Job::Render {
+            path: pdf.clone(),
+            page: 0,
+            scale: 4.0,
+            invert: false,
+            reply,
+        }));
 
         // The worker stays available for real work.
         assert!(pool.render(pdf, 0, 1.0, false).await.is_ok());
+    }
+
+    /// The page under the reader's eyes is the newest request, and it must not
+    /// wait behind every page they have already scrolled past.
+    #[test]
+    fn the_queue_serves_the_newest_request_first() {
+        let queue = Queue::default();
+        let mut replies = Vec::new();
+        for page in 0..3 {
+            let (reply, receive) = oneshot::channel();
+            replies.push(receive);
+            assert!(queue.push(Job::Render {
+                path: PathBuf::from("/paper.pdf"),
+                page,
+                scale: 1.0,
+                invert: false,
+                reply,
+            }));
+        }
+
+        let taken = std::iter::from_fn(|| queue.take())
+            .take(3)
+            .map(|job| match job {
+                Job::Render { page, .. } => page,
+                _ => unreachable!("only renders were queued"),
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(taken, [2, 1, 0], "newest first");
+    }
+
+    /// A scroll that never stops must not pile up work without limit. What is
+    /// given up on is the oldest page, which is the one furthest from the
+    /// window — and never a one-shot request that something is still waiting on.
+    #[test]
+    fn a_runaway_scroll_gives_up_on_the_pages_furthest_behind() {
+        let queue = Queue::default();
+        let (geometry_reply, geometry_receive) = oneshot::channel();
+        assert!(queue.push(Job::Geometry {
+            path: PathBuf::from("/paper.pdf"),
+            reply: geometry_reply,
+        }));
+
+        let mut replies = Vec::new();
+        for page in 0..(MOST_PENDING_RENDERS + 8) {
+            let (reply, receive) = oneshot::channel();
+            replies.push(receive);
+            assert!(queue.push(Job::Render {
+                path: PathBuf::from("/paper.pdf"),
+                page,
+                scale: 1.0,
+                invert: false,
+                reply,
+            }));
+        }
+
+        let waiting = queue.pending.lock().unwrap();
+        assert_eq!(
+            waiting.jobs.iter().filter(|job| job.is_render()).count(),
+            MOST_PENDING_RENDERS
+        );
+        assert!(
+            waiting.jobs.iter().any(|job| !job.is_render()),
+            "the geometry request is still there to be answered"
+        );
+        drop(waiting);
+
+        // The eight oldest pages were let go; their callers hear about it
+        // rather than waiting forever.
+        for receive in replies.iter_mut().take(8) {
+            assert!(receive.try_recv().is_err(), "the sender was dropped");
+        }
+        drop(geometry_receive);
+    }
+
+    /// A PDF Press only shows is rebuilt under its own name by whatever owns
+    /// it, and noticing that is the whole reason it is watched. A handle held
+    /// across the rewrite resolves the new bytes through the old
+    /// cross-reference table, so the pages it draws are not merely stale — they
+    /// are wrong, and nothing evicts the entry that produced them.
+    #[tokio::test]
+    async fn a_document_rewritten_under_its_own_name_is_read_again() {
+        let Some((held, first)) = fixture() else {
+            eprintln!("skipping: latexmk is not installed");
+            return;
+        };
+        let Some(second) = pages_fixture(held.path(), 5) else {
+            eprintln!("skipping: latexmk is not installed");
+            return;
+        };
+
+        // One fixed path, the way a PDF Press is only showing has one.
+        let live = held.path().join("live.pdf");
+        std::fs::copy(&first, &live).unwrap();
+
+        let pool = RenderPool::new(1);
+        assert_eq!(pool.geometry(live.clone()).await.unwrap().len(), 2);
+
+        std::fs::write(&live, std::fs::read(&second).unwrap()).unwrap();
+
+        assert_eq!(
+            pool.geometry(live.clone()).await.unwrap().len(),
+            5,
+            "the pool reads the file that is there now, not the one it opened"
+        );
+        // And the pixels are the new document's, not the old table's reading of
+        // the new bytes — which is neither edition.
+        let redrawn = pool.render(live.clone(), 0, 1.0, false).await.unwrap();
+        let truth = render_page(&open(&live).unwrap(), 0, 1.0, false).unwrap();
+        assert_eq!(redrawn.samples(), truth.samples());
+    }
+
+    /// A document of a given length, so a rewrite is visible as a page count.
+    fn pages_fixture(directory: &Path, pages: usize) -> Option<std::path::PathBuf> {
+        let latexmk = crate::toolchain::resolve_executable("latexmk")?;
+        let source = directory.join(format!("of{pages}.tex"));
+        let body = "\\newpage A page.\n".repeat(pages.saturating_sub(1));
+        std::fs::write(
+            &source,
+            format!(
+                "\\documentclass{{article}}\n\\begin{{document}}\n\
+                 \\section{{Rewritten}}\nA different document entirely.\n{body}\
+                 \\end{{document}}\n"
+            ),
+        )
+        .ok()?;
+        let status = std::process::Command::new(latexmk)
+            .args(["-pdf", "-interaction=nonstopmode"])
+            .arg(format!("-outdir={}", directory.display()))
+            .arg(&source)
+            .current_dir(directory)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .ok()?;
+        if !status.success() {
+            return None;
+        }
+        let pdf = directory.join(format!("of{pages}.pdf"));
+        pdf.is_file().then_some(pdf)
     }
 
     /// Not an assertion so much as a measurement, printed with `--nocapture`.
@@ -933,7 +1251,7 @@ mod tests {
             pdf.display(),
             rendered.width,
             rendered.height,
-            rendered.samples.len() / (1024 * 1024),
+            rendered.samples().len() / (1024 * 1024),
             extracted.len(),
         );
     }

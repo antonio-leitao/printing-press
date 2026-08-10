@@ -95,7 +95,7 @@ async fn render<R: Runtime>(
     let state = app.state::<AppState>();
     let rendered = state.renderer.render(path, page, scale, invert).await?;
 
-    ok(frame(&rendered))
+    ok(frame(rendered))
 }
 
 /// Prefixes the samples with their dimensions as two little-endian `u32`s.
@@ -105,15 +105,18 @@ async fn render<R: Runtime>(
 /// unless the server also lists them in `Access-Control-Expose-Headers`. Putting
 /// them in the body removes that dependency entirely: if the bytes arrive, the
 /// dimensions arrived with them.
-fn frame(rendered: &crate::render::RenderedPage) -> Vec<u8> {
-    let mut body = Vec::with_capacity(PAGE_HEADER_BYTES + rendered.samples.len());
-    body.extend_from_slice(&rendered.width.to_le_bytes());
-    body.extend_from_slice(&rendered.height.to_le_bytes());
-    body.extend_from_slice(&rendered.samples);
-    body
+///
+/// The rasteriser leaves exactly this much room at the front of the page it
+/// draws, so this writes the header rather than copying a page to make space
+/// for it.
+fn frame(rendered: crate::render::RenderedPage) -> Vec<u8> {
+    let mut header = [0_u8; PAGE_HEADER_BYTES];
+    header[..4].copy_from_slice(&rendered.width.to_le_bytes());
+    header[4..].copy_from_slice(&rendered.height.to_le_bytes());
+    rendered.into_framed(header)
 }
 
-pub const PAGE_HEADER_BYTES: usize = 8;
+pub const PAGE_HEADER_BYTES: usize = crate::render::RenderedPage::PREFIX;
 
 fn ok(body: Vec<u8>) -> AppResult<Response<Vec<u8>>> {
     Response::builder()

@@ -4,6 +4,7 @@
   import { api, errorMessage } from '$lib/api';
   import { MAX_ZOOM, MIN_ZOOM, normalizeZoom, wheelZoomFactor, zoomBySteps } from '$lib/pdf-controls';
   import { initialKeyState, resolveKey, type KeyState, type ViewerAction } from '$lib/pdf-keys';
+  import { indexAt } from '$lib/pdf-layout';
   import { PageVisibilityTracker } from '$lib/pdf-visibility';
   import type { ArtifactSummary, LinkBox, PageSize } from '$lib/types';
 
@@ -111,24 +112,45 @@
 
   // -- geometry ---------------------------------------------------------
 
+  /**
+   * The page elements, held rather than looked up again. The list only changes
+   * when the document does, and collecting it took an array the length of the
+   * document on every scroll frame.
+   *
+   * A count that no longer matches the layout is what makes it stale. Pages are
+   * unkeyed, so a document that replaces another of the same length is drawn
+   * into the same elements and the list stays true.
+   */
+  let pageCache: HTMLElement[] = [];
+
   function pageElements(): HTMLElement[] {
     if (!viewer) return [];
-    return Array.from(viewer.querySelectorAll<HTMLElement>('[data-page]'));
+    if (pageCache.length !== layout.length) {
+      pageCache = Array.from(viewer.querySelectorAll<HTMLElement>('[data-page]'));
+    }
+    return pageCache;
+  }
+
+  /**
+   * The page sitting at `offset` pixels down the document.
+   *
+   * `offsetTop` is measured against whatever the offset parent happens to be, so
+   * the first page's own position is subtracted to bring the column into the
+   * scroll container's coordinates. The two then agree, because the first page
+   * rests at zero: `PAGE_LEAD` is zero and the gap between pages is a bottom
+   * margin.
+   */
+  function pageAt(offset: number): HTMLElement | null {
+    const elements = pageElements();
+    if (elements.length === 0) return null;
+    const origin = elements[0].offsetTop;
+    const index = indexAt(elements.length, offset, (at) => elements[at].offsetTop - origin);
+    return index < 0 ? null : elements[index];
   }
 
   function closestPage(clientY: number): HTMLElement | null {
-    let closest: HTMLElement | null = null;
-    let closestDistance = Number.POSITIVE_INFINITY;
-    for (const element of pageElements()) {
-      const rect = element.getBoundingClientRect();
-      if (clientY >= rect.top && clientY <= rect.bottom) return element;
-      const distance = Math.min(Math.abs(clientY - rect.top), Math.abs(clientY - rect.bottom));
-      if (distance < closestDistance) {
-        closest = element;
-        closestDistance = distance;
-      }
-    }
-    return closest;
+    if (!viewer) return null;
+    return pageAt(clientY - viewer.getBoundingClientRect().top + viewer.scrollTop);
   }
 
   function captureAnchor(clientX?: number, clientY?: number): ViewAnchor | null {
@@ -560,9 +582,9 @@
   function updateCurrentPage() {
     scrollFrame = 0;
     if (!viewer) return;
-    const viewerRect = viewer.getBoundingClientRect();
-    const centre = viewerRect.top + viewer.clientHeight / 2;
-    const element = closestPage(centre);
+    // Taken from the scroll position rather than from the window, so knowing
+    // where the middle of the view is costs no measurement at all.
+    const element = pageAt(viewer.scrollTop + viewer.clientHeight / 2);
     if (element) page = Number(element.dataset.page ?? 1);
   }
 
@@ -629,8 +651,20 @@
     };
   });
 
+  /** The document whose geometry is on screen, as `id:revision`. */
+  let measured = '';
+
   $effect(() => {
     const next = artifact;
+
+    // A build says so several times over — queued, then running, then
+    // published — and every one of those carries the artifact, so that the
+    // interface always has one to show. Only a genuinely different document is
+    // worth measuring again. Without this the geometry was read three times a
+    // save, and each reading dragged the reader through `restoreAnchor`, which
+    // stops whatever glide is in flight: holding `j` during a rebuild stuttered.
+    const wanted = `${next.id}:${next.revision}`;
+    if (wanted === untrack(() => measured)) return;
     const request = ++generation;
 
     // A different document is read fresh, in the light. Switching versions
@@ -650,7 +684,10 @@
         // one, so a rebuild leaves the reader where they were.
         const anchor = untrack(captureAnchor);
         layout = sizes;
+        // The column is about to be rebuilt, so what was held of it is stale.
+        pageCache = [];
         shown = next;
+        measured = wanted;
         loadError = '';
         if (sized) {
           void restoreAnchor(anchor, ++zoomGeneration);
@@ -660,8 +697,8 @@
       })
       .catch((reason) => {
         if (request !== generation) return;
-        // The previous document stays on screen; taking it away is the worst
-        // thing the viewer can do.
+        // Left unmeasured, so the next word from this document is a fresh
+        // attempt rather than a document nobody ever tries to open again.
         loadError = errorMessage(reason);
       });
   });

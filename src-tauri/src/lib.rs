@@ -253,7 +253,16 @@ fn sweep_storage(
     let Ok(retained) = repository.managed_pdf_paths() else {
         return;
     };
-    let retained = retained.into_iter().collect::<HashSet<_>>();
+    // Kept by publication rather than by file. A build publishes a PDF and the
+    // SyncTeX data beside it under one `build-<stamp>` name, and they are only
+    // worth anything together: matching on the extension alone kept every
+    // sidecar a superseded build ever wrote, once per save, for good.
+    let retained = retained
+        .iter()
+        .filter_map(|pdf| {
+            Some(pdf.parent()?.join(runner::publication_stem(pdf)?))
+        })
+        .collect::<HashSet<_>>();
     for entry in walkdir::WalkDir::new(artifact_root)
         .min_depth(1)
         .max_depth(5)
@@ -262,13 +271,14 @@ fn sweep_storage(
         .filter(|entry| entry.file_type().is_file())
     {
         let path = entry.path();
-        let extension = path.extension().and_then(|value| value.to_str());
-        let disposable = match extension {
-            Some("next") => true,
-            Some("pdf") => !retained.contains(path),
-            _ => false,
-        };
-        if disposable {
+        // Everything under here is something Press published, so anything not
+        // belonging to a publication the database still names is rubbish —
+        // interrupted staging files among them.
+        let publication = path
+            .parent()
+            .zip(runner::publication_stem(path))
+            .map(|(directory, stem)| directory.join(stem));
+        if !publication.is_some_and(|publication| retained.contains(&publication)) {
             let _ = std::fs::remove_file(path);
         }
     }
@@ -385,11 +395,20 @@ mod tests {
         let live = artifact_root.join(project.id.to_string()).join("worktree");
         std::fs::create_dir_all(&live).unwrap();
         std::fs::create_dir_all(work_root.join(project.id.to_string())).unwrap();
-        let retained = live.join("retained.pdf");
-        let orphan = live.join("orphan.pdf");
-        let staging = live.join("interrupted.next");
+        // A publication is a PDF and the sync data published beside it, under
+        // one name. Both of these are whole publications; only one is still
+        // referenced.
+        let retained = live.join("build-2.pdf");
+        let retained_sync = live.join("build-2.synctex.gz");
+        let retained_lines = live.join("build-2.lines");
+        let orphan = live.join("build-1.pdf");
+        let orphan_sync = live.join("build-1.synctex.gz");
+        let staging = live.join("build-3.next");
         std::fs::write(&retained, b"%PDF-1.7").unwrap();
+        std::fs::write(&retained_sync, b"sync").unwrap();
+        std::fs::write(&retained_lines, b"1:1").unwrap();
         std::fs::write(&orphan, b"%PDF-1.7").unwrap();
+        std::fs::write(&orphan_sync, b"sync").unwrap();
         std::fs::write(&staging, b"partial").unwrap();
         repository
             .record_artifact(NewArtifact {
@@ -423,7 +442,15 @@ mod tests {
         sweep_storage(&artifact_root, &work_root, &objects_root, &repository);
 
         assert!(retained.is_file());
+        assert!(
+            retained_sync.is_file() && retained_lines.is_file(),
+            "a live PDF keeps the sync data that lets it be clicked through"
+        );
         assert!(!orphan.exists());
+        assert!(
+            !orphan_sync.exists(),
+            "a superseded build's sidecars go with it, or every save leaks one"
+        );
         assert!(!staging.exists());
         assert!(!ghost_artifacts.exists());
         assert!(!ghost_work.exists());

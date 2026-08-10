@@ -534,6 +534,43 @@ async fn publish(
     })
 }
 
+/// The name every file of one publication shares.
+///
+/// `publish` writes `build-<stamp>.pdf` and, beside it, `build-<stamp>.synctex.gz`
+/// and `build-<stamp>.lines`. `file_stem` would leave the `.synctex` on the
+/// first of those, so the name is taken up to its first dot instead — which is
+/// exactly the part `publish` composes.
+pub fn publication_stem(path: &Path) -> Option<&str> {
+    let name = path.file_name()?.to_str()?;
+    let stem = name.split('.').next().unwrap_or(name);
+    (!stem.is_empty()).then_some(stem)
+}
+
+/// Undoes one `publish`: the PDF, and everything published beside it.
+///
+/// The sidecars have to go with it. They are only meaningful for the PDF they
+/// describe, they are the size of one, and nothing else ever refers to them — so
+/// deleting the PDF alone leaves them behind for good, once per save.
+///
+/// Read from the directory rather than composed from a list of extensions, so
+/// this cannot fall behind whatever `publish` decides to write.
+pub async fn discard_publication(pdf: &Path) {
+    let (Some(directory), Some(stem)) = (pdf.parent(), publication_stem(pdf)) else {
+        let _ = tokio::fs::remove_file(pdf).await;
+        return;
+    };
+    let Ok(mut entries) = tokio::fs::read_dir(directory).await else {
+        let _ = tokio::fs::remove_file(pdf).await;
+        return;
+    };
+    while let Ok(Some(entry)) = entries.next_entry().await {
+        let path = entry.path();
+        if publication_stem(&path) == Some(stem) {
+            let _ = tokio::fs::remove_file(&path).await;
+        }
+    }
+}
+
 fn verify_pdf(path: &Path) -> Result<(), String> {
     let mut file =
         File::open(path).map_err(|error| format!("could not read the built PDF: {error}"))?;
@@ -700,6 +737,54 @@ mod tests {
         let bytes = pump.bytes();
         assert_eq!(bytes.len(), OUTPUT_LIMIT);
         assert!(bytes.ends_with(b"final line\n"));
+    }
+
+    /// The name `publish` composes, read back. `file_stem` is not it: it would
+    /// leave the `.synctex` on, and the sidecar would never be matched to the
+    /// PDF it belongs to.
+    #[test]
+    fn every_file_of_one_build_answers_to_the_same_name() {
+        for name in [
+            "build-17.pdf",
+            "build-17.synctex.gz",
+            "build-17.synctex",
+            "build-17.lines",
+            "build-17.next",
+        ] {
+            assert_eq!(
+                publication_stem(Path::new("/artifacts/1/worktree").join(name).as_path()),
+                Some("build-17"),
+                "{name}"
+            );
+        }
+        assert_eq!(publication_stem(Path::new("/artifacts/1")), Some("1"));
+        assert_eq!(publication_stem(Path::new("/")), None);
+    }
+
+    /// A superseded build takes its sync data with it. Leaving it behind cost a
+    /// quarter of a megabyte per save, kept for good.
+    #[tokio::test]
+    async fn discarding_a_build_takes_everything_published_with_it() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        for name in [
+            "build-1.pdf",
+            "build-1.synctex.gz",
+            "build-1.lines",
+            "build-2.pdf",
+            "build-2.synctex.gz",
+        ] {
+            std::fs::write(root.join(name), b"content").unwrap();
+        }
+
+        discard_publication(&root.join("build-1.pdf")).await;
+
+        for name in ["build-1.pdf", "build-1.synctex.gz", "build-1.lines"] {
+            assert!(!root.join(name).exists(), "{name} should be gone");
+        }
+        // The build that is still on file is untouched, name-adjacent or not.
+        assert!(root.join("build-2.pdf").is_file());
+        assert!(root.join("build-2.synctex.gz").is_file());
     }
 
     #[test]

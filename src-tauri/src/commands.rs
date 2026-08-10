@@ -238,7 +238,7 @@ pub async fn set_project_engine(
     .await?;
 
     for path in discarded {
-        let _ = tokio::fs::remove_file(path).await;
+        crate::runner::discard_publication(&path).await;
     }
     // The cache is empty now, so rebuild what the user is looking at.
     let repository = Arc::clone(&state.repository);
@@ -255,7 +255,7 @@ pub async fn delete_project(project_id: i64, state: State<'_, AppState>) -> AppR
     let repository = Arc::clone(&state.repository);
     let orphaned = blocking(move || repository.delete_project(project_id)).await?;
     for path in orphaned {
-        let _ = tokio::fs::remove_file(path).await;
+        crate::runner::discard_publication(&path).await;
     }
     state.builds.discard_project_storage(project_id).await;
     Ok(())
@@ -347,7 +347,7 @@ pub async fn delete_snapshot(snapshot_id: i64, state: State<'_, AppState>) -> Ap
         })
         .await?;
         for path in orphaned {
-            let _ = tokio::fs::remove_file(path).await;
+            crate::runner::discard_publication(&path).await;
         }
     }
     Ok(())

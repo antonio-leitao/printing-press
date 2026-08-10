@@ -238,7 +238,7 @@ trailer<</Root 1 0 R>>\n";
         let second = viewing.register(&file).unwrap();
         assert_ne!(second.id, first.id);
         assert_eq!(viewing.path(first.id), None, "the first one is let go");
-        assert_eq!(viewing.path(second.id).is_some(), true);
+        assert!(viewing.path(second.id).is_some());
 
         viewing.close(second.id).unwrap();
         assert_eq!(viewing.path(second.id), None);

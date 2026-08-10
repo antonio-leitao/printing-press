@@ -358,7 +358,7 @@ impl BuildManager {
                 match recorded {
                     Ok((artifact, superseded)) => {
                         if let Some(previous) = superseded {
-                            let _ = tokio::fs::remove_file(previous).await;
+                            runner::discard_publication(&previous).await;
                         }
                         self.record(
                             app,
@@ -380,7 +380,7 @@ impl BuildManager {
                     Err(error) => {
                         // The PDF exists but could not be recorded, so it would
                         // never be found again.
-                        let _ = tokio::fs::remove_file(&product.pdf_path).await;
+                        runner::discard_publication(&product.pdf_path).await;
                         self.finish_with_error(
                             app,
                             build_id,
