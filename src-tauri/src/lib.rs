@@ -15,11 +15,15 @@ mod runner;
 mod snapshot;
 mod sources;
 mod toolchain;
+mod viewing;
 
 use std::{
     collections::HashSet,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
+    },
 };
 
 use build::BuildManager;
@@ -42,6 +46,16 @@ pub struct AppState {
     /// and collect it. Held rather than only emitted, because a launch from the
     /// editor arrives before the webview is listening for anything.
     pending_open: Mutex<Option<model::OpenRequest>>,
+    /// PDFs Press is showing but does not own. Kept for as long as one is on
+    /// screen and no longer; nothing about them is stored.
+    viewing: Arc<viewing::Viewing>,
+    /// How many paths are on their way to becoming open requests.
+    ///
+    /// Resolving one runs `latexmk -v` and its two siblings, which takes long
+    /// enough that the interface can finish starting first, find nothing
+    /// waiting, and put the library up a moment before a document arrives.
+    /// This is how it knows to wait instead.
+    expecting_open: AtomicUsize,
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -100,6 +114,8 @@ pub fn run() {
                 objects_root,
                 pending_open: Mutex::new(None),
                 startup_notice: Mutex::new(startup_notice),
+                viewing: Arc::new(viewing::Viewing::default()),
+                expecting_open: AtomicUsize::new(0),
             });
 
             // Press may have been started by the editor rather than by hand.
@@ -115,6 +131,8 @@ pub fn run() {
             commands::resolve_path,
             commands::add_project,
             commands::open_project,
+            commands::open_pdf,
+            commands::close_pdf,
             commands::close_project,
             commands::build_project,
             commands::rename_project,
@@ -123,6 +141,8 @@ pub fn run() {
             commands::delete_project,
             commands::page_layout,
             commands::page_words,
+            commands::page_links,
+            commands::open_external,
             commands::peek_source,
             commands::search_document,
             commands::create_snapshot,
@@ -134,6 +154,7 @@ pub fn run() {
             commands::launch_neovim,
             commands::editor_status,
             commands::take_pending_open,
+            commands::expecting_open,
             commands::take_startup_notice,
         ])
         .build(tauri::generate_context!())
@@ -144,6 +165,18 @@ pub fn run() {
             app_handle.state::<AppState>().builds.shutdown_now();
         }
     });
+}
+
+/// Counts one path down again however its resolution ends, including a panic.
+struct Resolving(tauri::AppHandle);
+
+impl Drop for Resolving {
+    fn drop(&mut self) {
+        self.0
+            .state::<AppState>()
+            .expecting_open
+            .fetch_sub(1, Ordering::SeqCst);
+    }
 }
 
 /// The first argument that looks like a path rather than a flag. Relative paths
@@ -167,7 +200,14 @@ fn path_argument(arguments: &[String], working_directory: &Path) -> Option<PathB
 /// interface. Storing it is what makes this work at startup, when nothing is
 /// listening yet.
 fn accept_open_request(app: tauri::AppHandle, path: PathBuf) {
+    // Counted before the work starts, not after: the whole point is to be true
+    // during the resolving.
+    app.state::<AppState>()
+        .expecting_open
+        .fetch_add(1, Ordering::SeqCst);
     tauri::async_runtime::spawn(async move {
+        // Whatever happens below, the interface stops waiting on this one.
+        let _resolving = Resolving(app.clone());
         let handle = app.clone();
         let resolved = tauri::async_runtime::spawn_blocking(move || {
             let state = handle.state::<AppState>();
@@ -180,6 +220,7 @@ fn accept_open_request(app: tauri::AppHandle, path: PathBuf) {
             Ok(Err(error)) => model::OpenRequest {
                 path: String::new(),
                 candidates: Vec::new(),
+                pdf: None,
                 warnings: vec![error.to_string()],
                 toolchain: documents::toolchain(),
             },

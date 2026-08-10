@@ -48,6 +48,27 @@ test('half and full page movement, plain and with control', () => {
   assert.equal(type([{ key: 'b', ctrlKey: true }]).resolution.action.sign, -1);
 });
 
+test('control-o and control-i walk the jump list', () => {
+  assert.deepEqual(type([{ key: 'o', ctrlKey: true }]).resolution.action, {
+    kind: 'jump',
+    sign: -1
+  });
+  assert.deepEqual(type([{ key: 'i', ctrlKey: true }]).resolution.action, {
+    kind: 'jump',
+    sign: 1
+  });
+  // Without control they are not jumps at all: `o` is nothing here, and `i`
+  // must stay free rather than being claimed by a chord's plain twin.
+  assert.equal(type(['o']).resolution.kind, 'ignored');
+  assert.equal(type(['i']).resolution.kind, 'ignored');
+});
+
+test('control-r inverts the page', () => {
+  assert.deepEqual(type([{ key: 'r', ctrlKey: true }]).resolution.action, { kind: 'invert' });
+  // Plain `r` stays free: `R` rebuilds, and the two must not blur together.
+  assert.equal(type(['r']).resolution.kind, 'ignored');
+});
+
 test('space pages forward and shift-space back', () => {
   assert.equal(type([' ']).resolution.action.sign, 1);
   assert.equal(type([{ key: ' ', shiftKey: true }]).resolution.action.sign, -1);

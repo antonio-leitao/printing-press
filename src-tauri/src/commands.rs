@@ -124,6 +124,28 @@ pub async fn open_project(
     blocking(move || repository.project_summary(project_id)).await
 }
 
+/// Shows a PDF without keeping it.
+///
+/// Not a project: a project is a source document, and everything Press stores
+/// about one — its history, its builds, its engine — follows from the document
+/// it compiles. A PDF has none of that behind it, so it stays out of the
+/// library entirely. It is watched while it is open, because whatever is
+/// rebuilding it is not Press.
+#[tauri::command]
+pub async fn open_pdf(
+    path: String,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> AppResult<crate::model::LooseDocument> {
+    let viewing = Arc::clone(&state.viewing);
+    blocking(move || viewing.open(&app, &PathBuf::from(path))).await
+}
+
+#[tauri::command]
+pub async fn close_pdf(document_id: i64, state: State<'_, AppState>) -> AppResult<()> {
+    state.viewing.close(document_id)
+}
+
 #[tauri::command]
 pub async fn close_project(state: State<'_, AppState>) -> AppResult<()> {
     state.builds.close().await;
@@ -377,6 +399,67 @@ pub async fn page_words(
         .collect())
 }
 
+/// The links on one page: references and citations that lead inside the
+/// document, and addresses that lead out of it.
+#[tauri::command]
+pub async fn page_links(
+    artifact_id: i64,
+    page: usize,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> AppResult<Vec<crate::model::LinkBox>> {
+    let path = crate::protocol::resolve(&app, artifact_id).await?;
+    Ok(state
+        .renderer
+        .links(path, page)
+        .await?
+        .into_iter()
+        .map(|link| crate::model::LinkBox {
+            x: link.x,
+            y: link.y,
+            width: link.width,
+            height: link.height,
+            page: link.page,
+            top: link.top,
+            uri: link.uri,
+        })
+        .collect())
+}
+
+/// Opens a link that leads out of the document, in whatever the system uses for
+/// it.
+///
+/// Only the schemes a document has any business carrying. A PDF is a file from
+/// somewhere else, and `file:` — never mind anything stranger — would make one
+/// click enough to reach anything Press can read.
+#[tauri::command]
+pub async fn open_external(uri: String) -> AppResult<()> {
+    let allowed = ["http://", "https://", "mailto:"];
+    if !allowed.iter().any(|scheme| uri.starts_with(scheme)) {
+        return Err(AppError::InvalidInput(format!(
+            "Press only opens web and mail links. This one points at {}.",
+            uri.split(':').next().unwrap_or("something else")
+        )));
+    }
+    blocking(move || {
+        #[cfg(target_os = "macos")]
+        let opener = "open";
+        #[cfg(all(unix, not(target_os = "macos")))]
+        let opener = "xdg-open";
+        #[cfg(windows)]
+        let opener = "explorer";
+        std::process::Command::new(opener)
+            .arg(&uri)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .map_err(|error| AppError::Build(format!("could not open the link: {error}")))?;
+        Ok(())
+    })
+    .await
+}
+
 /// The source behind a point in a built PDF.
 ///
 /// Read-only, and for that reason it works on a stored version as well as on
@@ -396,9 +479,19 @@ pub async fn peek_source(
 ) -> AppResult<Option<crate::model::SourcePeek>> {
     let repository = Arc::clone(&state.repository);
     let objects = state.objects_root.clone();
+    // A PDF Press only shows can still be clicked through, because latexmk
+    // leaves its sync data beside whatever it built. Everything the resolver
+    // needs of a project in that case is the directory the file sits in, so it
+    // is given one that says exactly that and nothing more.
+    let loose = state.viewing.path(artifact_id);
     blocking(move || {
-        let stored = repository.artifact(artifact_id)?;
-        let project = repository.get_project(stored.summary.project_id)?;
+        let (project, stored) = match loose {
+            Some(path) => (crate::peek::beside(&path), crate::peek::loose(artifact_id, path)),
+            None => {
+                let stored = repository.artifact(artifact_id)?;
+                (repository.get_project(stored.summary.project_id)?, stored)
+            }
+        };
         crate::peek::resolve(&project, &stored, &repository, &objects, page, x, y)
     })
     .await
@@ -539,6 +632,17 @@ pub async fn launch_neovim(
 
 /// Collects anything Press wants to say about how it started. Taking it clears
 /// it, so it is said once.
+/// Whether a path is on its way to becoming an open request. Asked once at
+/// startup, so that the library is not put up in front of a document that is
+/// still being resolved.
+#[tauri::command]
+pub async fn expecting_open(state: State<'_, AppState>) -> AppResult<bool> {
+    Ok(state
+        .expecting_open
+        .load(std::sync::atomic::Ordering::SeqCst)
+        > 0)
+}
+
 #[tauri::command]
 pub async fn take_startup_notice(state: State<'_, AppState>) -> AppResult<Option<String>> {
     Ok(state

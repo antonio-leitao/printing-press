@@ -1,15 +1,19 @@
 <script lang="ts">
-  import { errorMessage } from '$lib/api';
+  import { api, errorMessage } from '$lib/api';
   import { fetchPage, pageUrl, renderScale } from '$lib/pdf';
   import type { PageVisibility, PageVisibilityTracker } from '$lib/pdf-visibility';
-  import type { ArtifactSummary, PageSize } from '$lib/types';
+  import type { ArtifactSummary, LinkBox, PageSize } from '$lib/types';
 
-  let { artifact, size, pageNumber, zoom, tracker } = $props<{
+  let { artifact, size, pageNumber, zoom, tracker, onFollow, invert = false } = $props<{
     artifact: ArtifactSummary;
     size: PageSize;
     pageNumber: number;
     zoom: number;
     tracker: PageVisibilityTracker;
+    /** Called when a link on this page is clicked. */
+    onFollow?: (link: LinkBox) => void;
+    /** Drawn for a dark room: the page is inverted as it is rasterised. */
+    invert?: boolean;
   }>();
 
   let host = $state<HTMLElement | null>(null);
@@ -39,10 +43,30 @@
     painted = null;
   });
 
+  // Fetched once per page, when it first comes near the window. Where the links
+  // are does not change with the zoom — they are in the page's own points — so
+  // the overlay is scaled rather than fetched again.
+  let links = $state<LinkBox[]>([]);
+  /// Which build's links are held. A rebuild moves things on the page, so the
+  /// old ones would point a line or two off.
+  let asked: string | null = null;
+
+  $effect(() => {
+    const build = `${artifact.id}:${artifact.revision}`;
+    if (!visibility.render || asked === build) return;
+    asked = build;
+    void api
+      .pageLinks(artifact.id, pageNumber - 1)
+      .then((found) => (links = found))
+      // A page whose links cannot be read is a page without links, not an error
+      // worth putting in front of someone reading.
+      .catch(() => (links = []));
+  });
+
   $effect(() => {
     if (!visibility.render || !canvas) return;
     const scale = renderScale(size.width, size.height, zoom, window.devicePixelRatio || 1);
-    const url = pageUrl(artifact.id, artifact.revision, pageNumber - 1, scale);
+    const url = pageUrl(artifact.id, artifact.revision, pageNumber - 1, scale, invert);
     // The previous drawing stays on screen until the new one replaces it, so a
     // rebuild or a zoom never flashes an empty page.
     if (painted === url) return;
@@ -79,6 +103,7 @@
 
 <section
   class="page"
+  class:inverted={invert}
   bind:this={host}
   style:width={`${width}px`}
   style:aspect-ratio={`${width} / ${height}`}
@@ -89,6 +114,25 @@
     <p class="render-error" role="alert">Page {pageNumber} could not render: {renderError}</p>
   {/if}
   <canvas bind:this={canvas}></canvas>
+  <!-- Over the page rather than drawn into it, so a reference stays clickable
+       at any zoom and the rasteriser stays a rasteriser. Modified clicks are
+       left alone: cmd-click is the source peek. -->
+  {#each links as link, index (index)}
+    <button
+      class="link-box"
+      style:left={`${link.x * zoom}px`}
+      style:top={`${link.y * zoom}px`}
+      style:width={`${link.width * zoom}px`}
+      style:height={`${link.height * zoom}px`}
+      title={link.uri ?? (link.page ? `Page ${link.page}` : undefined)}
+      aria-label={link.uri ?? `Go to page ${link.page}`}
+      onclick={(event) => {
+        if (event.metaKey || event.ctrlKey || event.altKey) return;
+        event.preventDefault();
+        onFollow?.(link);
+      }}
+    ></button>
+  {/each}
 </section>
 
 <style>
@@ -96,9 +140,32 @@
      window and the gap exists only *between* pages. PAGE_GUTTER in
      PdfViewer.svelte is this number. */
   .page {
+    position: relative;
     margin: 0 auto 16px;
     background: var(--card);
     box-shadow: var(--shadow-md);
+  }
+
+  /* The paper under the drawing. It shows before a page has been drawn, and a
+     white flash there is the one thing an inverted page must not do. */
+  .page.inverted {
+    background: #101010;
+  }
+
+  /* Invisible until the pointer is on it, and then only a wash: the document
+     already shows its links however the author coloured them, and a second set
+     of marks over the top would be someone else's typography. */
+  .link-box {
+    position: absolute;
+    padding: 0;
+    border: 0;
+    border-radius: 2px;
+    background: none;
+    cursor: pointer;
+  }
+
+  .link-box:hover {
+    background: var(--accent-fill);
   }
 
   canvas {

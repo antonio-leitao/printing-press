@@ -76,6 +76,19 @@ pub fn resolve(path: &Path, repository: &Repository) -> AppResult<OpenRequest> {
     let display = canonical.to_string_lossy().into_owned();
     let known = repository.project_documents()?;
 
+    // A PDF is not a document Press compiles, but it is one it can show. It
+    // stops here rather than becoming a project: there is no source behind it,
+    // so there would be nothing to build, snapshot or watch for edits.
+    if has_extension(&canonical, &["pdf"]) {
+        return Ok(OpenRequest {
+            path: display.clone(),
+            candidates: Vec::new(),
+            pdf: Some(display),
+            warnings: Vec::new(),
+            toolchain: detect_toolchain(),
+        });
+    }
+
     let (documents, mut warnings) = if canonical.is_dir() {
         in_directory(&canonical, &known)
     } else {
@@ -107,6 +120,7 @@ pub fn resolve(path: &Path, repository: &Repository) -> AppResult<OpenRequest> {
     Ok(OpenRequest {
         path: display,
         candidates,
+        pdf: None,
         warnings,
         toolchain: detect_toolchain(),
     })

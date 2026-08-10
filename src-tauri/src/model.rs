@@ -442,8 +442,26 @@ pub struct OpenCandidate {
 pub struct OpenRequest {
     pub path: String,
     pub candidates: Vec<OpenCandidate>,
+    /// Set when the path was a PDF. Press shows it; it never becomes a project,
+    /// because there is no source behind it to build.
+    pub pdf: Option<String>,
     pub warnings: Vec<String>,
     pub toolchain: ToolchainReport,
+}
+
+/// A PDF Press is showing without owning: opened from the command line or the
+/// editor, watched while it is on screen, and kept nowhere. Its `id` is
+/// negative so that it can stand in for an artifact's wherever a page is asked
+/// for, without ever being mistaken for one.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LooseDocument {
+    pub id: i64,
+    /// The file's own name, which is all the reader has to call it.
+    pub name: String,
+    pub path: String,
+    /// Bumped when the file changes on disk, which redraws the viewer.
+    pub revision: i64,
 }
 
 /// A stored version of a project's source.
@@ -506,6 +524,24 @@ pub struct VersionSummary {
     pub snapshot: Option<SnapshotSummary>,
     pub build: BuildState,
     pub artifact: Option<ArtifactSummary>,
+}
+
+/// A link on a page, as a rectangle in PDF points and a destination.
+///
+/// Exactly one of `page` and `uri` is set: a reference or a citation leads
+/// somewhere in this document, anything else leads out of it.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LinkBox {
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
+    /// 1-based, for a link into this document.
+    pub page: Option<usize>,
+    /// How far down that page, in PDF points from its top.
+    pub top: Option<f32>,
+    pub uri: Option<String>,
 }
 
 /// The source behind a place in a built PDF.

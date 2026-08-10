@@ -110,6 +110,22 @@ export type VersionSummary = {
 };
 
 /**
+ * A link on a page: a rectangle in PDF points and where it leads. Exactly one
+ * of `page` and `uri` is set.
+ */
+export type LinkBox = {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  /** 1-based, for a link into this document. */
+  page: number | null;
+  /** How far down that page, in PDF points from its top. */
+  top: number | null;
+  uri: string | null;
+};
+
+/**
  * The source behind a place in a built PDF. `text` is that file as the version
  * being read has it, so a snapshot answers with the source it was built from.
  */
@@ -165,12 +181,27 @@ export type OpenCandidate = {
 };
 
 /**
+ * A PDF Press is showing without owning. It never reaches the library: a
+ * project is a source document, and this has no source behind it.
+ */
+export type LooseDocument = {
+  /** Negative, so it stands in for an artifact id wherever a page is asked for. */
+  id: number;
+  name: string;
+  path: string;
+  /** Bumped when the file changes on disk. */
+  revision: number;
+};
+
+/**
  * What a path resolved to. The Add button, `:Press` and `press <path>` all ask
  * the same question and all get this back.
  */
 export type OpenRequest = {
   path: string;
   candidates: OpenCandidate[];
+  /** Set when the path was a PDF, which Press shows rather than compiles. */
+  pdf: string | null;
   warnings: string[];
   toolchain: {
     latexmk: ToolInfo;

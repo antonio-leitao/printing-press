@@ -61,7 +61,7 @@ async fn serve<R: Runtime>(
         .collect::<Vec<_>>();
 
     match segments.as_slice() {
-        // /page/{artifact}/{revision}/{index}?scale=2.6
+        // /page/{artifact}/{revision}/{index}?scale=2.6&invert=1
         // The revision is in the path so a rebuilt document cannot be served
         // from a stale cache anywhere along the way.
         ["page", artifact, _revision, index] => {
@@ -75,7 +75,10 @@ async fn serve<R: Runtime>(
                 .and_then(|value| value.parse::<f32>().ok())
                 .filter(|scale| scale.is_finite() && *scale > 0.0 && *scale <= 12.0)
                 .ok_or_else(|| AppError::InvalidInput("missing or unusable scale".into()))?;
-            render(app, artifact_id, page, scale).await
+            // Part of the request rather than a setting, so a page drawn one
+            // way is never mistaken for one drawn the other.
+            let invert = query_value(uri.query(), "invert").is_some_and(|value| value == "1");
+            render(app, artifact_id, page, scale, invert).await
         }
         _ => Err(AppError::NotFound(format!("no route for {}", uri.path()))),
     }
@@ -86,10 +89,11 @@ async fn render<R: Runtime>(
     artifact_id: i64,
     page: usize,
     scale: f32,
+    invert: bool,
 ) -> AppResult<Response<Vec<u8>>> {
     let path = resolve(app, artifact_id).await?;
     let state = app.state::<AppState>();
-    let rendered = state.renderer.render(path, page, scale).await?;
+    let rendered = state.renderer.render(path, page, scale, invert).await?;
 
     ok(frame(&rendered))
 }
@@ -129,8 +133,16 @@ fn ok(body: Vec<u8>) -> AppResult<Response<Vec<u8>>> {
 
 /// Looks up an artifact's file and refuses anything outside Press-managed
 /// storage, the same check the command path makes.
+///
+/// A negative id is a PDF the user opened for viewing rather than one Press
+/// built. Those live wherever the user keeps them, so the storage check cannot
+/// apply — what stands in for it is the registry itself, which only ever holds
+/// a file the user named.
 pub async fn resolve<R: Runtime>(app: &tauri::AppHandle<R>, artifact_id: i64) -> AppResult<PathBuf> {
     let state = app.state::<AppState>();
+    if let Some(path) = state.viewing.path(artifact_id) {
+        return Ok(path);
+    }
     let repository = std::sync::Arc::clone(&state.repository);
     let stored = tauri::async_runtime::spawn_blocking(move || repository.artifact(artifact_id))
         .await

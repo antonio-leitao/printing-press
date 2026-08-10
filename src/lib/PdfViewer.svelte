@@ -5,7 +5,7 @@
   import { MAX_ZOOM, MIN_ZOOM, normalizeZoom, wheelZoomFactor, zoomBySteps } from '$lib/pdf-controls';
   import { initialKeyState, resolveKey, type KeyState, type ViewerAction } from '$lib/pdf-keys';
   import { PageVisibilityTracker } from '$lib/pdf-visibility';
-  import type { ArtifactSummary, PageSize } from '$lib/types';
+  import type { ArtifactSummary, LinkBox, PageSize } from '$lib/types';
 
   let {
     artifact,
@@ -34,6 +34,8 @@
     /** Where on screen it was asked for, so the answer can be shown there. */
     clientX: number;
     clientY: number;
+    /** The walls the answer has to stay inside. */
+    bounds: DOMRect;
   };
 
   type ViewAnchor = {
@@ -87,6 +89,13 @@
 
   /** Whether this viewer has already chosen a zoom for the document it opened. */
   let sized = false;
+
+  /**
+   * Whether the page is drawn for a dark room. Belongs to the viewer and to the
+   * document it is showing: opening another one starts light again, the way
+   * zoom does.
+   */
+  let inverted = $state(false);
 
   let glideX: number | null = null;
   let glideY: number | null = null;
@@ -248,6 +257,66 @@
       return;
     }
     glideToY(top);
+  }
+
+  /**
+   * Where a jump was made from, so it can be gone back to. vim's jumplist,
+   * with the same two keys: a place is recorded when something moves the
+   * reader somewhere they did not scroll to — following a link, or naming a
+   * page — and never when they scroll there themselves.
+   */
+  let jumpedFrom: ViewAnchor[] = [];
+  let jumpedTo: ViewAnchor[] = [];
+  /** Deep enough to retrace a reading, short enough to stay a list. */
+  const JUMPS_KEPT = 50;
+
+  function recordJump() {
+    const here = captureAnchor();
+    if (!here) return;
+    jumpedFrom.push(here);
+    if (jumpedFrom.length > JUMPS_KEPT) jumpedFrom.shift();
+    // A new jump ends whatever was ahead, as it does in a browser.
+    jumpedTo = [];
+  }
+
+  /// Steps back through the list, or forward again. The place being left is
+  /// pushed onto the other end, so the two keys walk one history rather than
+  /// two.
+  function jump(sign: 1 | -1) {
+    const from = sign === -1 ? jumpedFrom : jumpedTo;
+    const to = sign === -1 ? jumpedTo : jumpedFrom;
+    const anchor = from.pop();
+    if (!anchor) return;
+    const here = captureAnchor();
+    if (here) to.push(here);
+    stopGlide();
+    // Through the anchor machinery, so a jump taken at one zoom still lands in
+    // the right place at another.
+    void restoreAnchor(anchor, ++zoomGeneration);
+  }
+
+  /**
+   * Follows a link off a page. A reference or a citation lands on its page at
+   * the point the destination named, so a citation arrives at its entry rather
+   * than at the top of the bibliography; a destination that names no point
+   * lands at the top of its page, which is what those mean.
+   *
+   * Anything leading out of the document is handed to the system, which is the
+   * only thing that should decide what opens a web address.
+   */
+  function followLink(link: LinkBox) {
+    if (link.page) {
+      recordJump();
+      const clamped = Math.max(1, Math.min(link.page, layout.length));
+      const top = pageTop(clamped);
+      if (top === null) {
+        goToPage(clamped);
+        return;
+      }
+      glideToY(top + (link.top ?? 0) * zoom);
+      return;
+    }
+    if (link.uri) void api.openExternal(link.uri).catch((reason) => (loadError = errorMessage(reason)));
   }
 
   // -- zoom -------------------------------------------------------------
@@ -437,6 +506,7 @@
         return;
       }
       case 'goto':
+        recordJump();
         if (action.target === 'first') glideToY(0);
         else if (action.target === 'last') glideToY(Number.MAX_SAFE_INTEGER);
         else if (action.page !== undefined) goToPage(action.page);
@@ -449,6 +519,12 @@
         return;
       case 'fit':
         void fitTo(action.mode);
+        return;
+      case 'jump':
+        jump(action.sign);
+        return;
+      case 'invert':
+        inverted = !inverted;
     }
   }
 
@@ -512,14 +588,15 @@
     if (!size) return;
 
     const rect = element.getBoundingClientRect();
-    if (rect.width <= 0 || rect.height <= 0) return;
+    if (rect.width <= 0 || rect.height <= 0 || !viewer) return;
     event.preventDefault();
     onPeek({
       page: pageNumber,
       x: ((event.clientX - rect.left) / rect.width) * size.width,
       y: ((event.clientY - rect.top) / rect.height) * size.height,
       clientX: event.clientX,
-      clientY: event.clientY
+      clientY: event.clientY,
+      bounds: viewer.getBoundingClientRect()
     });
   }
 
@@ -555,6 +632,13 @@
   $effect(() => {
     const next = artifact;
     const request = ++generation;
+
+    // A different document is read fresh, in the light. Switching versions
+    // inside one project is not that — it is the same document, and comparing
+    // two of its versions should not turn the lights back on halfway.
+    if (next.projectId !== untrack(() => shown?.projectId)) {
+      untrack(() => (inverted = false));
+    }
 
     // Geometry for a whole document costs a few milliseconds, so the layout is
     // known before any page is drawn and the page counter is right immediately.
@@ -599,6 +683,8 @@
           pageNumber={index + 1}
           zoom={zoom}
           tracker={tracker}
+          invert={inverted}
+          onFollow={followLink}
         />
       {/each}
     </div>

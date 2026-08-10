@@ -50,9 +50,13 @@ export function pageUrl(
   artifactId: number,
   revision: number,
   page: number,
-  scale: number
+  scale: number,
+  invert = false
 ): string {
-  return `${ORIGIN}/page/${artifactId}/${revision}/${page}?scale=${scale.toFixed(4)}`;
+  // Part of the address, so a page drawn one way is never mistaken for the
+  // same page drawn the other: the viewer keeps what it has painted by URL.
+  const ink = invert ? '&invert=1' : '';
+  return `${ORIGIN}/page/${artifactId}/${revision}/${page}?scale=${scale.toFixed(4)}${ink}`;
 }
 
 /**

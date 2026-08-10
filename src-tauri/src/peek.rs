@@ -95,6 +95,42 @@ pub fn resolve(
     }))
 }
 
+/// Stands in for the project behind a PDF Press only shows.
+///
+/// The resolver asks a project for two things when the source is LaTeX and the
+/// version is the working tree: what kind of document it is, and which
+/// directory to resolve a hit against. Both are answered by the PDF's own
+/// neighbours, so this names a `.tex` beside it — a file that need not exist,
+/// and is never read.
+pub fn beside(pdf: &Path) -> Project {
+    Project {
+        id: -1,
+        name: String::new(),
+        document_path: pdf.with_extension("tex").to_string_lossy().into_owned(),
+        engine: crate::model::Engine::PdfLatex,
+        pinned: false,
+        created_at: 0,
+        last_opened_at: 0,
+    }
+}
+
+/// The same for the artifact: a PDF at a path, belonging to no build.
+pub fn loose(id: i64, pdf: PathBuf) -> StoredArtifact {
+    StoredArtifact {
+        summary: crate::model::ArtifactSummary {
+            id,
+            project_id: -1,
+            source_ref: SourceRef::Worktree,
+            engine: crate::model::Engine::PdfLatex,
+            page_count: None,
+            byte_size: 0,
+            built_at: 0,
+            revision: 1,
+        },
+        pdf_path: pdf,
+    }
+}
+
 struct Hit {
     file: PathBuf,
     line: u32,

@@ -16,6 +16,8 @@
     type Engine,
     type OpenCandidate,
     type OpenRequest,
+    type ArtifactSummary,
+    type LooseDocument,
     type ProjectSummary,
     type SourcePeek,
     type VersionSummary,
@@ -35,9 +37,12 @@
     ['J / K', 'next / previous page'],
     ['gg / G', 'first / last page'],
     ['12G', 'go to page 12'],
+    ['⌃o / ⌃i', 'back / forward after a jump'],
     ['+ / -', 'zoom in / out'],
     ['0', 'actual size'],
     ['a / s', 'fit page / fit width'],
+    ['⌃r', 'invert the page, for reading in the dark'],
+    ['click', 'follow a reference, a citation or a link'],
     ['⌘click', 'the source behind a place in the PDF'],
     ['R', 'rebuild this version'],
     ['⌘K', 'snapshot the working tree'],
@@ -46,11 +51,26 @@
 
   let projects = $state<ProjectSummary[]>([]);
   let activeProject = $state<ProjectSummary | null>(null);
+  /**
+   * A PDF Press is showing but does not own. Never both this and a project: the
+   * reader shows one document, and this one has no history, no builds and no
+   * source to snapshot.
+   */
+  let viewing = $state<LooseDocument | null>(null);
   /** Documents a path resolved to, shown when there is a choice to make. */
   let choosing = $state<OpenRequest | null>(null);
   let chosen = $state('');
   let chosenEngine = $state<Engine>('pdflatex');
   let busy = $state(false);
+  /**
+   * Whether Press still has to find out what it was started for. Nothing is
+   * shown until it knows: a path from the command line or the editor goes
+   * straight to the reader, and putting the library up in the meantime shows
+   * the wrong screen for as long as the asking takes.
+   */
+  let opening = $state(true);
+  /** How long Press will wait on a document before showing the library anyway. */
+  const OPEN_GRACE = 4000;
   let buildLog = $state('');
   let editorState = $state('closed');
   let progress = $state<BuildProgress | null>(null);
@@ -86,7 +106,26 @@
   /** What the viewer builds and shows — shared by versions that hold the same source. */
   const selectedRef = $derived(selected?.sourceRef ?? WORKTREE);
   /** The working tree's artifact is the fallback while a version is still building. */
-  const shownArtifact = $derived(selected?.artifact ?? null);
+  const shownArtifact = $derived<ArtifactSummary | null>(
+    viewing
+      ? {
+          // A loose PDF has no build behind it, but the viewer asks a document
+          // for only two things: which id to fetch pages from, and which
+          // revision, so that a file rewritten on disk is drawn again.
+          id: viewing.id,
+          projectId: -1,
+          sourceRef: WORKTREE,
+          engine: 'pdflatex',
+          pageCount: null,
+          byteSize: 0,
+          builtAt: 0,
+          revision: viewing.revision
+        }
+      : (selected?.artifact ?? null)
+  );
+
+  /** Whether the reader is on screen at all, whoever owns what it is showing. */
+  const reading = $derived(activeProject !== null || viewing !== null);
 
   // Viewer state, surfaced in the footer.
   let viewerPage = $state(1);
@@ -241,6 +280,14 @@
         })
       );
       unlisteners.push(
+        // The file Press is showing was rewritten by whatever builds it. A new
+        // revision is all the viewer needs to draw it again.
+        await listen<{ id: number; revision: number }>('viewing-changed', (event) => {
+          if (viewing?.id !== event.payload.id) return;
+          viewing = { ...viewing, revision: event.payload.revision };
+        })
+      );
+      unlisteners.push(
         await listen<WatcherError>('watcher-error', (event) => {
           // Not a build failure: the document is fine, Press just cannot see
           // saves. A warning, because nothing is broken but something is lost.
@@ -250,7 +297,9 @@
       unlisteners.push(
         // Only a nudge: the request itself is collected, so a missed event or a
         // webview that was not listening yet costs nothing.
-        await listen('open-requested', () => void collectPendingOpen())
+        await listen('open-requested', () => {
+          void collectPendingOpen().finally(() => (opening = false));
+        })
       );
       if (!disposed) {
         // Before the project list, so a database that was set aside explains
@@ -261,8 +310,24 @@
         } catch {
           // A missing notice is not worth reporting.
         }
-        await refreshProjects();
-        await collectPendingOpen();
+        try {
+          // Ahead of the library, because this is the question that decides
+          // which screen there is going to be. The listeners are registered
+          // first and only first: a build started here would otherwise finish
+          // before anything was listening for it.
+          await collectPendingOpen();
+          // Nothing was waiting, but something may still be coming: a path
+          // from the command line is resolved in the background, and that
+          // takes long enough to finish after the interface has started.
+          const coming = !reading && (await api.expectingOpen().catch(() => false));
+          await refreshProjects();
+          // The request will arrive on its own channel and drop the gate.
+          // Until then, and for no longer than this, nothing is shown.
+          if (coming) window.setTimeout(() => (opening = false), OPEN_GRACE);
+          else opening = false;
+        } catch {
+          opening = false;
+        }
       }
     })();
 
@@ -347,7 +412,11 @@
         multiple: false,
         title: 'Open a document',
         filters: [
-          { name: 'Documents', extensions: ['tex', 'ltx', 'Rnw', 'md', 'markdown', 'qmd', 'mkd'] }
+          {
+            name: 'Documents',
+            // PDFs among them: Press shows one without taking it in.
+            extensions: ['tex', 'ltx', 'Rnw', 'md', 'markdown', 'qmd', 'mkd', 'pdf']
+          }
         ]
       });
       if (!selected || Array.isArray(selected)) return;
@@ -363,6 +432,12 @@
   /// Acts on what a path resolved to. One candidate and nothing to warn about
   /// opens it; anything else asks. Shared by every way into Press.
   async function present(request: OpenRequest) {
+    // Before the toolchain check: showing a PDF needs no TeX installed, and a
+    // machine without latexmk can still be a machine that reads papers.
+    if (request.pdf) {
+      await viewPdf(request.pdf);
+      return;
+    }
     if (!request.toolchain.latexmk.available) {
       notify('latexmk was not found. Install a TeX distribution or add latexmk to PATH.', 'error');
       return;
@@ -435,10 +510,34 @@
     await openProject(project);
   }
 
+  /// Opens a PDF for reading only. It stays out of the library, and Press
+  /// watches it so that whatever is rebuilding it — a Makefile, `latexmk -pvc`
+  /// — puts a fresh page on screen without being asked.
+  async function viewPdf(path: string) {
+    busy = true;
+    try {
+      // Opened before anything is let go of, so the reader never blinks back
+      // to the library in between two documents.
+      const document = await api.openPdf(path);
+      if (activeProject) await api.closeProject();
+      activeProject = null;
+      viewing = document;
+      panel = 'none';
+      showHistory = false;
+      versions = [];
+    } catch (reason) {
+      fail(reason);
+    } finally {
+      busy = false;
+    }
+  }
+
   async function openProject(project: ProjectSummary) {
     busy = true;
     try {
-      activeProject = await api.openProject(project.id);
+      const opened = await api.openProject(project.id);
+      await closeViewing();
+      activeProject = opened;
       editorState = await api.editorStatus(project.id);
       panel = 'none';
       selectedKey = WORKTREE;
@@ -451,9 +550,17 @@
     }
   }
 
+  /// Lets go of a PDF Press was only showing, which also stops watching it.
+  async function closeViewing() {
+    const open = viewing;
+    viewing = null;
+    if (open) await api.closePdf(open.id);
+  }
+
   async function returnToLibrary() {
     busy = true;
     try {
+      await closeViewing();
       await api.closeProject();
       activeProject = null;
       editorState = 'closed';
@@ -702,15 +809,62 @@
   type Peek = {
     x: number;
     y: number;
-    /** Anchored by its foot when the click was in the lower half of the window. */
-    above: boolean;
+    /** The viewer's own rectangle: the walls this has to stay inside. */
+    bounds: DOMRect;
     version: string;
     source: SourcePeek | null;
     /** Set once the answer is in and there is nothing to show. */
     empty: boolean;
   };
   let peek = $state<Peek | null>(null);
+  let peekElement = $state<HTMLElement | null>(null);
   let peekRequest = 0;
+
+  /** Clear of the pointer, and clear of the wall. */
+  const PEEK_GAP = 12;
+  const PEEK_EDGE = 10;
+
+  /// Puts the popover beside the click without letting it out of the viewer.
+  ///
+  /// Measured rather than guessed: how tall it is depends on how much source
+  /// came back, which is not known until it is on screen. It opens downwards
+  /// when there is room, flips up when there is not, and when neither side can
+  /// hold it whole it takes the roomier one and scrolls inside itself.
+  function placePeek(element: HTMLElement, at: Peek) {
+    const walls = at.bounds;
+    const below = walls.bottom - PEEK_EDGE - (at.y + PEEK_GAP);
+    const above = at.y - PEEK_GAP - (walls.top + PEEK_EDGE);
+
+    // Capped before measuring, so what is measured is what will be shown.
+    element.style.maxHeight = `${Math.max(Math.max(below, above), 80)}px`;
+    element.style.maxWidth = `${Math.min(512, walls.width - PEEK_EDGE * 2)}px`;
+    const box = element.getBoundingClientRect();
+
+    const room = (space: number) => box.height <= space;
+    const top = room(below) || below >= above ? at.y + PEEK_GAP : at.y - PEEK_GAP - box.height;
+    const left = at.x + PEEK_GAP;
+
+    element.style.left = `${clamp(left, walls.left + PEEK_EDGE, walls.right - PEEK_EDGE - box.width)}px`;
+    element.style.top = `${clamp(top, walls.top + PEEK_EDGE, walls.bottom - PEEK_EDGE - box.height)}px`;
+    element.style.visibility = 'visible';
+  }
+
+  /// Low wins when the two cross, which is what happens when the popover is
+  /// wider or taller than the space it has to sit in.
+  function clamp(value: number, low: number, high: number) {
+    return Math.max(low, Math.min(value, Math.max(low, high)));
+  }
+
+  // Placed after every change of content: the answer arrives after the popover
+  // is already on screen, and it is a different size when it does.
+  $effect(() => {
+    const element = peekElement;
+    const at = peek;
+    if (!element || !at) return;
+    void at.source;
+    void at.empty;
+    placePeek(element, at);
+  });
 
   async function peekSource(at: PeekRequest) {
     const artifact = shownArtifact;
@@ -719,8 +873,8 @@
     peek = {
       x: at.clientX,
       y: at.clientY,
-      above: at.clientY > window.innerHeight / 2,
-      version: selected?.title ?? 'Working tree',
+      bounds: at.bounds,
+      version: viewing ? viewing.name : (selected?.title ?? 'Working tree'),
       source: null,
       empty: false
     };
@@ -828,6 +982,9 @@
 
   /// What the footer says: which version, and whether it is current.
   function versionLabel() {
+    // A PDF Press only shows has no version and no build to report. Its name
+    // and the fact that Press is watching it is the whole story.
+    if (viewing) return `${viewing.name} · watching for changes`;
     const version = selected;
     const name = version && version.sourceRef !== WORKTREE ? version.title : 'Working tree';
     const build = version?.build ?? activeProject?.build;
@@ -881,14 +1038,14 @@
   >
 {/snippet}
 
-{#if activeProject}
+{#if reading}
   <main class="reader">
     <!-- Not a bar: this takes no space in the layout. It sits over the grey
          gutter beside the traffic lights purely so the window can be dragged. -->
     <div class="drag-zone" data-tauri-drag-region></div>
 
     <section class="document">
-      {#if showHistory}
+      {#if showHistory && activeProject}
         <nav class="history" aria-label="Version history">
           <!-- Clears the traffic lights, which sit over this panel's top left
                whenever it is open. -->
@@ -983,9 +1140,14 @@
           out:fade={{ duration: 200 }}
         ></span>
       {/if}
-      <button class="link" onclick={() => (showHistory = !showHistory)} title="Version history">
-        {showHistory ? '◀' : '☰'}
-      </button>
+      <!-- Everything a project has and a PDF Press only shows does not:
+           a history to open, builds to fail, a source to snapshot, an editor to
+           open it in. What is left is what reading needs. -->
+      {#if activeProject}
+        <button class="link" onclick={() => (showHistory = !showHistory)} title="Version history">
+          {showHistory ? '◀' : '☰'}
+        </button>
+      {/if}
       <span class="build">{versionLabel()}</span>
       {#if errors.length > 0}
         <button class="link bad" onclick={() => togglePanel('diagnostics')}>
@@ -997,16 +1159,22 @@
         <span class="quiet">{viewerPage}/{viewerPageCount}</span>
       {/if}
       {#if viewerZoom !== 100}<span class="quiet">{viewerZoom}%</span>{/if}
-      <!-- ⌘K as well, but a keystroke nobody can see is not a way to reach a
-           feature, and it depends on the webview getting the key at all. -->
-      <button class="link" onclick={openSnapshotDialog} disabled={busy} title="Snapshot (⌘K)">
-        Snapshot
-      </button>
-      <button class="link" onclick={launchEditor} disabled={busy}>Editor</button>
+      {#if activeProject}
+        <!-- ⌘K as well, but a keystroke nobody can see is not a way to reach a
+             feature, and it depends on the webview getting the key at all. -->
+        <button class="link" onclick={openSnapshotDialog} disabled={busy} title="Snapshot (⌘K)">
+          Snapshot
+        </button>
+        <button class="link" onclick={launchEditor} disabled={busy}>Editor</button>
+      {/if}
       <button class="link" onclick={returnToLibrary} disabled={busy}>Projects</button>
       <button class="link" onclick={() => togglePanel('keys')} title="Keys (?)">?</button>
     </footer>
   </main>
+{:else if opening}
+  <!-- Press is still finding out what it was started for. Bare on purpose: a
+       spinner for something this short is more noticeable than the wait. -->
+  <main class="starting" data-tauri-drag-region></main>
 {:else}
   <main class="library">
     <div class="titlebar" data-tauri-drag-region></div>
@@ -1105,12 +1273,7 @@
        lands on the backdrop and reaches the page underneath it. -->
   <button class="menu-backdrop" aria-label="Close the source" onclick={() => (peek = null)}
   ></button>
-  <aside
-    class="peek"
-    class:above={peek.above}
-    style="left: {peek.x}px; top: {peek.y}px"
-    transition:fade={{ duration: 100 }}
-  >
+  <aside class="peek" bind:this={peekElement} transition:fade={{ duration: 100 }}>
     {#if peek.source}
       <header>
         <span class="peek-where">{peek.source.file}:{peek.source.startLine}{peek.source.endLine >
@@ -1359,6 +1522,13 @@
   .reader {
     display: grid;
     grid-template-rows: minmax(0, 1fr) auto auto auto;
+    /* The one column is pinned to the window. A grid's default `auto` track is
+       sized to its widest item, and a page zoomed past the width of the window
+       is exactly that: the track grew to the document, the footer stretched
+       with it, and the viewer's own right edge — scrollbar included — ended up
+       off screen. Worse, the viewer then had no width to scroll within, so
+       there was nothing left to pan sideways. */
+    grid-template-columns: minmax(0, 1fr);
     height: 100vh;
     position: relative;
     /* A fixed app shell: the PDF scrolls inside its own pane and the rows above
@@ -1446,6 +1616,9 @@
     display: flex;
     position: relative;
     min-height: 0;
+    /* With the track pinned above, this is what lets the row sit inside it
+       rather than being pushed wide by the document it holds. */
+    min-width: 0;
   }
 
   .stage {
@@ -1599,6 +1772,11 @@
 
   kbd {
     font-family: ui-monospace, monospace;
+  }
+
+  .starting {
+    height: 100vh;
+    background: var(--paper);
   }
 
   /* -- library --------------------------------------------------------- */
@@ -1888,15 +2066,19 @@
 
   /* -- peek --------------------------------------------------------------- */
 
-  /* Sits where it was asked for, and turns to open upwards once the click was
-     in the lower half of the window so it never runs off the bottom. The
-     translate keeps it clear of the pointer either way. */
+  /* Sits where it was asked for. Where exactly is measured against the viewer's
+     own edges once the source is in — see `placePeek` — which is also what sets
+     the size limits and reveals it. Hidden until then, because a popover that
+     is placed twice reads as a flinch. */
   .peek {
     position: fixed;
+    top: 0;
+    left: 0;
     z-index: 32;
+    display: flex;
+    flex-direction: column;
     width: max-content;
-    max-width: min(32rem, calc(100vw - 2rem));
-    transform: translate(-0.5rem, 0.75rem);
+    visibility: hidden;
     background: var(--card);
     border: var(--bw) solid var(--line-2);
     border-radius: var(--radius);
@@ -1904,12 +2086,9 @@
     overflow: hidden;
   }
 
-  .peek.above {
-    transform: translate(-0.5rem, calc(-100% - 0.75rem));
-  }
-
   .peek header {
     display: flex;
+    flex: none;
     align-items: baseline;
     gap: 0.5rem;
     padding: 0.35rem 0.5rem 0.35rem 0.65rem;
@@ -1935,8 +2114,10 @@
     text-align: right;
   }
 
+  /* The source scrolls inside whatever height the placement allowed, rather
+     than pushing the popover past the edge it was fitted to. */
   .peek pre {
-    max-height: 22rem;
+    min-height: 0;
     margin: 0;
     padding: 0.6rem 0.65rem;
     overflow: auto;

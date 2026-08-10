@@ -2,6 +2,8 @@ import { invoke } from '@tauri-apps/api/core';
 import type {
   EditorLaunchResult,
   Engine,
+  LooseDocument,
+  LinkBox,
   OpenRequest,
   PageSize,
   ProjectSummary,
@@ -21,6 +23,14 @@ export const api = {
 
   addProject: (documentPath: string, name?: string, engineOverride?: Engine) =>
     invoke<ProjectSummary>('add_project', { documentPath, name, engineOverride }),
+
+  /**
+   * Shows a PDF Press did not build, and watches it for changes. Nothing is
+   * stored: it never becomes a project.
+   */
+  openPdf: (path: string) => invoke<LooseDocument>('open_pdf', { path }),
+
+  closePdf: (documentId: number) => invoke<void>('close_pdf', { documentId }),
 
   openProject: (projectId: number) =>
     invoke<ProjectSummary>('open_project', { projectId }),
@@ -67,6 +77,13 @@ export const api = {
   pageWords: (artifactId: number, page: number) =>
     invoke<TextBox[]>('page_words', { artifactId, page }),
 
+  /** Where the links on a page are, and where they lead. */
+  pageLinks: (artifactId: number, page: number) =>
+    invoke<LinkBox[]>('page_links', { artifactId, page }),
+
+  /** Hands a link that leads out of the document to the system. */
+  openExternal: (uri: string) => invoke<void>('open_external', { uri }),
+
   /**
    * The source behind a point on a page, in PDF points from its top left.
    * Null when the point resolves to something outside the document — a class
@@ -93,6 +110,13 @@ export const api = {
 
   /** Collects a path Press was launched with. Taking it clears it. */
   takePendingOpen: () => invoke<OpenRequest | null>('take_pending_open'),
+
+  /**
+   * Whether a path is still being resolved into something to open. Asked once,
+   * at startup, so the library is not shown in front of a document that is on
+   * its way.
+   */
+  expectingOpen: () => invoke<boolean>('expecting_open'),
 
   /** Anything Press wants to say about how it started. Said once. */
   takeStartupNotice: () => invoke<string | null>('take_startup_notice')

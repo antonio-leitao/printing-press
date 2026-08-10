@@ -11,7 +11,11 @@ export type ViewerAction =
   | { kind: 'goto'; target: 'first' | 'last' | 'page'; page?: number }
   | { kind: 'page'; sign: 1 | -1; count: number }
   | { kind: 'zoom'; step: number }
-  | { kind: 'fit'; mode: 'actual' | 'page' | 'width' };
+  | { kind: 'fit'; mode: 'actual' | 'page' | 'width' }
+  /** Back or forward through the places a jump was made from. */
+  | { kind: 'jump'; sign: 1 | -1 }
+  /** Draw the page for a dark room, or stop. */
+  | { kind: 'invert' };
 
 export type KeyResolution =
   | { kind: 'action'; action: ViewerAction }
@@ -67,6 +71,15 @@ export function resolveKey(
         return done({ kind: 'scroll', axis: 'y', amount: 'page', sign: 1, count });
       case 'b':
         return done({ kind: 'scroll', axis: 'y', amount: 'page', sign: -1, count });
+      // vim's jumplist, which is also zathura's: back to where the jump was
+      // made from, and forward again.
+      case 'o':
+        return done({ kind: 'jump', sign: -1 });
+      case 'i':
+        return done({ kind: 'jump', sign: 1 });
+      // zathura's `recolor`, on the key it uses for it.
+      case 'r':
+        return done({ kind: 'invert' });
       default:
         return { resolution: { kind: 'ignored' }, state };
     }
