@@ -51,7 +51,8 @@ pub struct AppState {
     viewing: Arc<viewing::Viewing>,
     /// How many paths are on their way to becoming open requests.
     ///
-    /// Resolving one runs `latexmk -v` and its two siblings, which takes long
+    /// Resolving one reads the folder it names — every LaTeX file in it, to tell
+    /// the documents from the chapters — which for a large tree takes long
     /// enough that the interface can finish starting first, find nothing
     /// waiting, and put the library up a moment before a document arrives.
     /// This is how it knows to wait instead.
@@ -71,9 +72,7 @@ pub fn run() {
                     let _ = window.show();
                     let _ = window.set_focus();
                 }
-                if let Some(path) =
-                    path_argument(&arguments, Path::new(&working_directory))
-                {
+                if let Some(path) = path_argument(&arguments, Path::new(&working_directory)) {
                     accept_open_request(app.clone(), path);
                 }
             },
@@ -259,9 +258,7 @@ fn sweep_storage(
     // sidecar a superseded build ever wrote, once per save, for good.
     let retained = retained
         .iter()
-        .filter_map(|pdf| {
-            Some(pdf.parent()?.join(runner::publication_stem(pdf)?))
-        })
+        .filter_map(|pdf| Some(pdf.parent()?.join(runner::publication_stem(pdf)?)))
         .collect::<HashSet<_>>();
     for entry in walkdir::WalkDir::new(artifact_root)
         .min_depth(1)
@@ -350,10 +347,7 @@ mod tests {
         let cwd = Path::new("/home/antonio/papers");
         // The editor passes an absolute path.
         assert_eq!(
-            path_argument(
-                &["press".into(), "/tmp/thesis/main.tex".into()],
-                cwd
-            ),
+            path_argument(&["press".into(), "/tmp/thesis/main.tex".into()], cwd),
             Some(PathBuf::from("/tmp/thesis/main.tex"))
         );
         // A relative one belongs to the caller's directory, not to Press's.
@@ -363,10 +357,7 @@ mod tests {
         );
         // Flags the platform adds are not paths.
         assert_eq!(
-            path_argument(
-                &["press".into(), "--flag".into(), "main.tex".into()],
-                cwd
-            ),
+            path_argument(&["press".into(), "--flag".into(), "main.tex".into()], cwd),
             Some(PathBuf::from("/home/antonio/papers/main.tex"))
         );
         assert_eq!(path_argument(&["press".into()], cwd), None);
@@ -428,8 +419,7 @@ mod tests {
         std::fs::create_dir_all(&ghost_work).unwrap();
 
         // One object is still referenced by a snapshot; the other is not.
-        let capture =
-            crate::snapshot::capture(&source, &objects_root, &HashSet::new()).unwrap();
+        let capture = crate::snapshot::capture(&source, &objects_root, &HashSet::new()).unwrap();
         repository
             .create_snapshot(project.id, &capture, "First", None)
             .unwrap()
@@ -455,7 +445,10 @@ mod tests {
         assert!(!ghost_artifacts.exists());
         assert!(!ghost_work.exists());
         assert!(work_root.join(project.id.to_string()).is_dir());
-        assert!(!orphan_object.exists(), "unreferenced file contents are swept");
+        assert!(
+            !orphan_object.exists(),
+            "unreferenced file contents are swept"
+        );
         for file in &capture.files {
             assert!(
                 crate::snapshot::object_path(&objects_root, &file.object).is_file(),

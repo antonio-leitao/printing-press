@@ -7,3 +7,7 @@ src-tauri/target/
 *.log
 .idea/
 .vscode/
+
+# Editor and tool leavings that are not the project's.
+.nvimlog
+tmp/

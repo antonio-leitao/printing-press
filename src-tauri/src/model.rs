@@ -110,7 +110,11 @@ impl DocumentKind {
                     "md" | "markdown" | "mdown" | "mkd" | "qmd"
                 )
             });
-        if markdown { Self::Markdown } else { Self::Latex }
+        if markdown {
+            Self::Markdown
+        } else {
+            Self::Latex
+        }
     }
 }
 
@@ -394,7 +398,6 @@ pub struct ProjectSummary {
 pub struct ToolInfo {
     pub available: bool,
     pub path: Option<String>,
-    pub version: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -643,12 +646,23 @@ mod tests {
     #[test]
     fn document_kinds_follow_the_file_extension() {
         for name in ["notes.md", "paper.markdown", "report.QMD"] {
-            assert_eq!(DocumentKind::of(Path::new(name)), DocumentKind::Markdown, "{name}");
+            assert_eq!(
+                DocumentKind::of(Path::new(name)),
+                DocumentKind::Markdown,
+                "{name}"
+            );
         }
         for name in ["main.tex", "thesis.ltx", "analysis.Rnw"] {
-            assert_eq!(DocumentKind::of(Path::new(name)), DocumentKind::Latex, "{name}");
+            assert_eq!(
+                DocumentKind::of(Path::new(name)),
+                DocumentKind::Latex,
+                "{name}"
+            );
         }
-        assert_eq!("md".parse::<DocumentKind>().unwrap(), DocumentKind::Markdown);
+        assert_eq!(
+            "md".parse::<DocumentKind>().unwrap(),
+            DocumentKind::Markdown
+        );
         assert!("docx".parse::<DocumentKind>().is_err());
     }
 
@@ -731,7 +745,10 @@ mod tests {
         assert_eq!(json["build"]["status"], "error");
         assert_eq!(json["build"]["sourceRef"], "worktree");
         assert_eq!(json["build"]["durationMs"], 1000);
-        assert_eq!(json["build"]["errorSummary"], "main.tex:4: Missing $ inserted.");
+        assert_eq!(
+            json["build"]["errorSummary"],
+            "main.tex:4: Missing $ inserted."
+        );
         assert_eq!(json["build"]["diagnostics"][0]["severity"], "error");
         assert_eq!(json["build"]["diagnostics"][0]["line"], 4);
 

@@ -299,11 +299,7 @@ pub async fn create_snapshot(
     let repository = Arc::clone(&state.repository);
     let project = blocking(move || repository.get_project(project_id)).await?;
     let _ = Arc::clone(&state.builds)
-        .request(
-            app,
-            project,
-            SourceRef::Snapshot(snapshot.revision.clone()),
-        )
+        .request(app, project, SourceRef::Snapshot(snapshot.revision.clone()))
         .await;
     Ok(outcome)
 }
@@ -342,10 +338,9 @@ pub async fn delete_snapshot(snapshot_id: i64, state: State<'_, AppState>) -> Ap
             .cancel_version(project_id, &SourceRef::Snapshot(revision.clone()))
             .await;
         let repository = Arc::clone(&state.repository);
-        let orphaned = blocking(move || {
-            repository.forget_version(project_id, &SourceRef::Snapshot(revision))
-        })
-        .await?;
+        let orphaned =
+            blocking(move || repository.forget_version(project_id, &SourceRef::Snapshot(revision)))
+                .await?;
         for path in orphaned {
             crate::runner::discard_publication(&path).await;
         }
@@ -486,7 +481,10 @@ pub async fn peek_source(
     let loose = state.viewing.path(artifact_id);
     blocking(move || {
         let (project, stored) = match loose {
-            Some(path) => (crate::peek::beside(&path), crate::peek::loose(artifact_id, path)),
+            Some(path) => (
+                crate::peek::beside(&path),
+                crate::peek::loose(artifact_id, path),
+            ),
             None => {
                 let stored = repository.artifact(artifact_id)?;
                 (repository.get_project(stored.summary.project_id)?, stored)
@@ -559,15 +557,19 @@ pub async fn export_artifact(
     .await?;
 
     let downloads = app.path().download_dir().map_err(|error| {
-        AppError::NotFound(format!("Press could not find your Downloads folder: {error}"))
-    })?;
-    let destination = unused_path(&downloads, &stem);
-    tokio::fs::copy(&source, &destination).await.map_err(|error| {
-        AppError::Io(std::io::Error::new(
-            error.kind(),
-            format!("could not write to Downloads: {error}"),
+        AppError::NotFound(format!(
+            "Press could not find your Downloads folder: {error}"
         ))
     })?;
+    let destination = unused_path(&downloads, &stem);
+    tokio::fs::copy(&source, &destination)
+        .await
+        .map_err(|error| {
+            AppError::Io(std::io::Error::new(
+                error.kind(),
+                format!("could not write to Downloads: {error}"),
+            ))
+        })?;
     Ok(destination.to_string_lossy().into_owned())
 }
 

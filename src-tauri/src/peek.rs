@@ -71,7 +71,13 @@ pub fn resolve(
         (relative, hit.line)
     };
 
-    let Some(text) = read_source(project, repository, objects, &stored.summary.source_ref, &relative)?
+    let Some(text) = read_source(
+        project,
+        repository,
+        objects,
+        &stored.summary.source_ref,
+        &relative,
+    )?
     else {
         return Ok(None);
     };
@@ -370,17 +376,17 @@ mod tests {
     use super::*;
 
     const DOCUMENT: &[&str] = &[
-        "\\documentclass{article}",       // 0
-        "\\begin{document}",              // 1
-        "Some prose that runs",           // 2
-        "over two lines.",                // 3
-        "",                               // 4
-        "\\begin{equation}",              // 5
-        "  E = mc^2",                     // 6
-        "\\end{equation}",                // 7
-        "",                               // 8
-        "More prose.",                    // 9
-        "\\end{document}",                // 10
+        "\\documentclass{article}", // 0
+        "\\begin{document}",        // 1
+        "Some prose that runs",     // 2
+        "over two lines.",          // 3
+        "",                         // 4
+        "\\begin{equation}",        // 5
+        "  E = mc^2",               // 6
+        "\\end{equation}",          // 7
+        "",                         // 8
+        "More prose.",              // 9
+        "\\end{document}",          // 10
     ];
 
     /// SyncTeX answers a click on a display with the line its box closed on,
@@ -404,7 +410,14 @@ mod tests {
     /// lines around it.
     #[test]
     fn a_markdown_block_runs_to_the_blank_lines_around_it() {
-        let lines = ["# Heading", "", "A paragraph", "over two lines.", "", "After."];
+        let lines = [
+            "# Heading",
+            "",
+            "A paragraph",
+            "over two lines.",
+            "",
+            "After.",
+        ];
         assert_eq!(block_around(&lines, 2), (2, 3));
         assert_eq!(block_around(&lines, 0), (0, 0));
         assert_eq!(block_around(&lines, 5), (5, 5));
@@ -428,7 +441,10 @@ mod tests {
     /// is gone. What is left is a path ending in one the manifest knows.
     #[test]
     fn a_manifest_path_is_matched_at_a_separator() {
-        assert!(ends_at_boundary("/tmp/press-1/chapters/two.tex", "chapters/two.tex"));
+        assert!(ends_at_boundary(
+            "/tmp/press-1/chapters/two.tex",
+            "chapters/two.tex"
+        ));
         assert!(ends_at_boundary("main.tex", "main.tex"));
         assert!(
             !ends_at_boundary("/tmp/press-1/notes/two.tex", "s/two.tex"),
@@ -466,10 +482,15 @@ mod tests {
     }
 
     /// Builds a document for real and hands back what a click would be given.
-    async fn built(root: &Path, work: &Path, artifacts: &Path, project: &Project) -> StoredArtifact {
+    async fn built(
+        root: &Path,
+        work: &Path,
+        artifacts: &Path,
+        project: &Project,
+    ) -> StoredArtifact {
         let repository = Repository::open(&root.join("../press.db")).unwrap();
-        let source = crate::sources::prepare(project, &SourceRef::Worktree, &repository, root)
-            .unwrap();
+        let source =
+            crate::sources::prepare(project, &SourceRef::Worktree, &repository, root).unwrap();
         let (_handle, cancel) = CancelHandle::new();
         let sink: ProgressSink = Arc::new(|_| {});
         let outcome = runner::run(
@@ -517,9 +538,16 @@ mod tests {
         let mut found = Vec::new();
         for x in [150.0, 306.0] {
             for step in 8..60 {
-                if let Some(peek) =
-                    resolve(project, stored, repository, objects, 1, x, f64::from(step) * 10.0)
-                        .unwrap()
+                if let Some(peek) = resolve(
+                    project,
+                    stored,
+                    repository,
+                    objects,
+                    1,
+                    x,
+                    f64::from(step) * 10.0,
+                )
+                .unwrap()
                 {
                     found.push(peek);
                 }
@@ -578,7 +606,9 @@ mod tests {
             equation.text
         );
         assert!(
-            found.iter().any(|peek| peek.text == "Prose above the equation."),
+            found
+                .iter()
+                .any(|peek| peek.text == "Prose above the equation."),
             "prose comes back as its paragraph: {found:?}"
         );
     }

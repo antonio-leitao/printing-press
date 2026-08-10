@@ -704,15 +704,11 @@ fn worker(queue: &Queue) {
                 let _ = reply.send(result);
             }
             Job::Words { path, page, reply } => {
-                let result = cache
-                    .get(&path)
-                    .and_then(|document| words(document, page));
+                let result = cache.get(&path).and_then(|document| words(document, page));
                 let _ = reply.send(result);
             }
             Job::Links { path, page, reply } => {
-                let result = cache
-                    .get(&path)
-                    .and_then(|document| links(document, page));
+                let result = cache.get(&path).and_then(|document| links(document, page));
                 let _ = reply.send(result);
             }
             Job::Search {
@@ -899,7 +895,10 @@ mod tests {
             .find(|link| link.page.is_some())
             .expect("the cross-reference is a link within the document");
         assert_eq!(inward.page, Some(2), "\\autoref points at the second page");
-        assert!(inward.uri.is_none(), "a destination inside is not an address");
+        assert!(
+            inward.uri.is_none(),
+            "a destination inside is not an address"
+        );
         // The section it points at is near the top of its page. Measured from
         // the top this is a small number; measured the way PDF itself does it,
         // from the bottom, it would be most of a page height — and every jump
@@ -950,7 +949,12 @@ mod tests {
             "pages arrive as RGBA, ready for ImageData"
         );
         // Opaque: a page is a sheet of paper, not a transparency.
-        assert!(rendered.samples().chunks_exact(4).all(|pixel| pixel[3] == 255));
+        assert!(
+            rendered
+                .samples()
+                .chunks_exact(4)
+                .all(|pixel| pixel[3] == 255)
+        );
         assert!(rendered.width > 1000);
         // A page with text on it is not a blank sheet.
         assert!(
@@ -1256,4 +1260,3 @@ mod tests {
         );
     }
 }
-

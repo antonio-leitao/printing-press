@@ -64,7 +64,9 @@ pub fn prepare(
         }
         SourceRef::Snapshot(revision) => {
             let manifest = repository.snapshot_manifest(project.id, revision)?;
-            let checkout = tempfile::Builder::new().prefix("press-version-").tempdir()?;
+            let checkout = tempfile::Builder::new()
+                .prefix("press-version-")
+                .tempdir()?;
             snapshot::materialize(&manifest, objects, checkout.path())?;
 
             if !checkout.path().join(&file_name).is_file() {
@@ -116,8 +118,13 @@ mod tests {
 
         let project = project(&papers.join("main.tex"));
         let (repository, _store) = empty_store();
-        let prepared =
-            prepare(&project, &SourceRef::Worktree, &repository, Path::new("/objects")).unwrap();
+        let prepared = prepare(
+            &project,
+            &SourceRef::Worktree,
+            &repository,
+            Path::new("/objects"),
+        )
+        .unwrap();
         // The document's own folder, whatever sits above it.
         assert_eq!(prepared.directory, papers);
         assert_eq!(prepared.file_name, "main.tex");
@@ -128,8 +135,13 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let project = project(&directory.path().join("main.tex"));
         let (repository, _store) = empty_store();
-        let error =
-            prepare(&project, &SourceRef::Worktree, &repository, Path::new("/objects")).unwrap_err();
+        let error = prepare(
+            &project,
+            &SourceRef::Worktree,
+            &repository,
+            Path::new("/objects"),
+        )
+        .unwrap_err();
         assert!(error.to_string().contains("main.tex"));
     }
 
@@ -141,7 +153,11 @@ mod tests {
         let root = directory.path().join("paper");
         let objects = directory.path().join("objects");
         std::fs::create_dir_all(root.join("chapters")).unwrap();
-        std::fs::write(root.join("main.tex"), "\\documentclass{article}\noriginal\n").unwrap();
+        std::fs::write(
+            root.join("main.tex"),
+            "\\documentclass{article}\noriginal\n",
+        )
+        .unwrap();
         std::fs::write(root.join("chapters/one.tex"), "first draft\n").unwrap();
 
         let repository = Repository::open(&directory.path().join("press.db")).unwrap();
@@ -164,7 +180,11 @@ mod tests {
         assert_eq!(snapshot.file_count, 2);
 
         // The working tree moves on.
-        std::fs::write(root.join("main.tex"), "\\documentclass{article}\nrewritten\n").unwrap();
+        std::fs::write(
+            root.join("main.tex"),
+            "\\documentclass{article}\nrewritten\n",
+        )
+        .unwrap();
         std::fs::remove_file(root.join("chapters/one.tex")).unwrap();
 
         let prepared = prepare(

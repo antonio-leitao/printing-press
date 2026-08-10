@@ -8,6 +8,7 @@
   import PdfViewer, { type PeekRequest } from '$lib/PdfViewer.svelte';
   import { api, errorMessage } from '$lib/api';
   import { fail, notify } from '$lib/messages.svelte';
+  import { modal } from '$lib/modal';
   import {
     ENGINES,
     WORKTREE,
@@ -252,55 +253,63 @@
     let disposed = false;
 
     void (async () => {
-      unlisteners.push(
-        await listen<ProjectSummary>('project-updated', (event) => mergeProject(event.payload))
-      );
-      unlisteners.push(
-        await listen<BuildUpdate>('build-updated', (event) => {
-          const update = event.payload;
-          if (activeProject?.id !== update.projectId) return;
-          // Every version's row carries its own build state.
-          versions = versions.map((version) =>
-            version.sourceRef === update.sourceRef
-              ? { ...version, build: update.build, artifact: update.artifact ?? version.artifact }
-              : version
-          );
-          if (update.sourceRef !== selectedRef) return;
-          if (update.build.status !== 'running' && update.build.status !== 'queued') {
-            progress = null;
-          }
-          if (update.build.status !== 'running') buildLog = '';
-        })
-      );
-      unlisteners.push(
-        await listen<BuildProgress>('build-progress', (event) => {
-          if (event.payload.projectId !== activeProject?.id) return;
-          if (event.payload.sourceRef !== selectedRef) return;
-          progress = event.payload;
-        })
-      );
-      unlisteners.push(
-        // The file Press is showing was rewritten by whatever builds it. A new
-        // revision is all the viewer needs to draw it again.
-        await listen<{ id: number; revision: number }>('viewing-changed', (event) => {
-          if (viewing?.id !== event.payload.id) return;
-          viewing = { ...viewing, revision: event.payload.revision };
-        })
-      );
-      unlisteners.push(
-        await listen<WatcherError>('watcher-error', (event) => {
-          // Not a build failure: the document is fine, Press just cannot see
-          // saves. A warning, because nothing is broken but something is lost.
-          notify(event.payload.message, 'warning');
-        })
-      );
-      unlisteners.push(
-        // Only a nudge: the request itself is collected, so a missed event or a
-        // webview that was not listening yet costs nothing.
-        await listen('open-requested', () => {
-          void collectPendingOpen().finally(() => (opening = false));
-        })
-      );
+      try {
+        unlisteners.push(
+          await listen<ProjectSummary>('project-updated', (event) => mergeProject(event.payload))
+        );
+        unlisteners.push(
+          await listen<BuildUpdate>('build-updated', (event) => {
+            const update = event.payload;
+            if (activeProject?.id !== update.projectId) return;
+            // Every version's row carries its own build state.
+            versions = versions.map((version) =>
+              version.sourceRef === update.sourceRef
+                ? { ...version, build: update.build, artifact: update.artifact ?? version.artifact }
+                : version
+            );
+            if (update.sourceRef !== selectedRef) return;
+            if (update.build.status !== 'running' && update.build.status !== 'queued') {
+              progress = null;
+            }
+            if (update.build.status !== 'running') buildLog = '';
+          })
+        );
+        unlisteners.push(
+          await listen<BuildProgress>('build-progress', (event) => {
+            if (event.payload.projectId !== activeProject?.id) return;
+            if (event.payload.sourceRef !== selectedRef) return;
+            progress = event.payload;
+          })
+        );
+        unlisteners.push(
+          // The file Press is showing was rewritten by whatever builds it. A new
+          // revision is all the viewer needs to draw it again.
+          await listen<{ id: number; revision: number }>('viewing-changed', (event) => {
+            if (viewing?.id !== event.payload.id) return;
+            viewing = { ...viewing, revision: event.payload.revision };
+          })
+        );
+        unlisteners.push(
+          await listen<WatcherError>('watcher-error', (event) => {
+            // Not a build failure: the document is fine, Press just cannot see
+            // saves. A warning, because nothing is broken but something is lost.
+            notify(event.payload.message, 'warning');
+          })
+        );
+        unlisteners.push(
+          // Only a nudge: the request itself is collected, so a missed event or a
+          // webview that was not listening yet costs nothing.
+          await listen('open-requested', () => {
+            void collectPendingOpen().finally(() => (opening = false));
+          })
+        );
+      } catch (reason) {
+        // Press without live updates is a Press that still opens documents and
+        // still builds them, only without saying so as it goes. Press stuck
+        // behind the gate below is a blank window with nothing to click, so a
+        // channel that will not open must not take the interface with it.
+        fail(reason);
+      }
       if (!disposed) {
         // Before the project list, so a database that was set aside explains
         // why the list is empty.
@@ -1323,7 +1332,7 @@
 {/if}
 
 {#if choosing}
-  <dialog open aria-labelledby="choose-title">
+  <dialog use:modal={() => (choosing = null)} aria-labelledby="choose-title">
     <h2 id="choose-title">
       {choosing.candidates.length > 1 ? 'Which document?' : 'Open this document'}
     </h2>
@@ -1375,7 +1384,7 @@
 {/if}
 
 {#if snapshotOpen}
-  <dialog open aria-labelledby="snapshot-title">
+  <dialog use:modal={() => (snapshotOpen = false)} aria-labelledby="snapshot-title">
     <h2 id="snapshot-title">Snapshot this version</h2>
     <p class="quiet">
       Press stores the project's source as it is now, in its own history. Your project folder is
@@ -1391,7 +1400,6 @@
         placeholder="What changed?"
         onkeydown={(event) => {
           if (event.key === 'Enter') takeSnapshot();
-          if (event.key === 'Escape') snapshotOpen = false;
         }}
       />
     </label>
@@ -1407,7 +1415,7 @@
 {/if}
 
 {#if renaming}
-  <dialog open aria-labelledby="rename-title">
+  <dialog use:modal={() => (renaming = null)} aria-labelledby="rename-title">
     <h2 id="rename-title">Rename this version</h2>
     <label>
       Title
@@ -1418,7 +1426,6 @@
         autofocus
         onkeydown={(event) => {
           if (event.key === 'Enter') saveRename();
-          if (event.key === 'Escape') renaming = null;
         }}
       />
     </label>
@@ -1430,7 +1437,7 @@
 {/if}
 
 {#if settingsFor}
-  <dialog open aria-labelledby="settings-title">
+  <dialog use:modal={() => (settingsFor = null)} aria-labelledby="settings-title">
     <h2 id="settings-title">{settingsFor.name}</h2>
     <label>
       Name
@@ -1456,7 +1463,7 @@
 {/if}
 
 {#if confirmDelete}
-  <dialog open aria-labelledby="delete-title">
+  <dialog use:modal={() => (confirmDelete = null)} aria-labelledby="delete-title">
     <h2 id="delete-title">Remove {confirmDelete.name}?</h2>
     <p>
       Press forgets this document and deletes the PDFs it built.
@@ -1470,7 +1477,7 @@
 {/if}
 
 {#if confirmDiscard}
-  <dialog open aria-labelledby="discard-title">
+  <dialog use:modal={() => (confirmDiscard = null)} aria-labelledby="discard-title">
     <h2 id="discard-title">Discard “{confirmDiscard.title}”?</h2>
     <p>
       This version and the PDF built from it are deleted. Your project folder is not touched, and
@@ -1508,7 +1515,7 @@
   .link {
     padding: 0.15rem 0.35rem;
     border: 0;
-    border-radius: var(--radius-chip);
+    border-radius: var(--radius-xs);
     background: none;
     color: var(--ink-2);
     cursor: pointer;
@@ -1560,11 +1567,6 @@
     height: 2.25rem;
   }
 
-  /* Only used by the library, where the heading needs to clear the lights. */
-  .titlebar {
-    height: 2.5rem;
-  }
-
   .bar {
     display: flex;
     align-items: center;
@@ -1597,14 +1599,6 @@
     pointer-events: none;
   }
 
-  .title {
-    overflow: hidden;
-    color: var(--ink);
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  .meta,
   /* The one part of the footer that gives way. Everything else is a control
      whose label stops meaning anything once it is clipped, so the version line
      absorbs the whole squeeze and ellipsises. */
@@ -1659,7 +1653,7 @@
     border-right: var(--bw) solid var(--line);
     /* Opaque, because there is now a page underneath it. */
     background: var(--card-2);
-    box-shadow: var(--shadow-menu);
+    box-shadow: var(--shadow-lg);
     font-size: var(--fs-card);
   }
 
@@ -1762,7 +1756,7 @@
   }
 
   .diagnostics li.warning {
-    color: var(--amber);
+    color: var(--warning);
   }
 
   .diagnostics code {
@@ -1782,7 +1776,7 @@
   }
 
   kbd {
-    font-family: ui-monospace, monospace;
+    font-family: var(--font-mono);
   }
 
   .starting {
@@ -1792,99 +1786,86 @@
 
   /* -- library --------------------------------------------------------- */
 
-    .library {
-      /* was: padding: 0 1.5rem 1.5rem; */
-      padding: 0 0 var(--gutter);
-      background: var(--paper);
-    }
+  .library {
+    /* The gutter is on the sections, not here: the pinned shelf runs its rules
+       the full width of the window. */
+    padding: 0 0 var(--gutter);
+    background: var(--paper);
+  }
 
-    .titlebar {
-      height: 2.375rem;   /* was 2.5rem — 1c opens on 38px */
-    }
+  /* Only used by the library, where the heading needs to clear the lights. */
+  .titlebar {
+    height: 2.375rem;
+  }
 
-  .library-header,
   .library-actions,
-  .dialog-actions,
-  .project-actions {
+  .dialog-actions {
     display: flex;
     align-items: center;
     gap: 0.75rem;
   }
 
+  /* The title and the button hang off the same baseline rather than being
+   centred against each other. At a narrow window the button drops below the
+   title instead of squeezing it off the screen. */
   .library-header {
-    justify-content: space-between;
-    /* At a narrow window the Add button drops below the title rather than
-       squeezing it off the screen. */
-    flex-wrap: wrap;
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 1.5rem;
+  flex-wrap: wrap;
+  padding: 0 var(--gutter) 1.625rem;
   }
-/* ── 2. Header ───────────────────────────────────────────────────────
-   1c's title is Spectral 34px over a mono uppercase eyebrow, and the
-   header baseline sits on the shelf rather than floating. */
 
-.library-header h1 {
+  .library-header > div {
+  display: flex;
+  flex-direction: column;
+  /* The title sets line-height 1, so most of the space between the two lines
+     is this gap; the sentence below brings a little of its own. */
+  gap: 0.375rem;
+  }
+
+  .library-header h1 {
   margin: 0;
-  font-family: var(--font-display);
   font-size: var(--fs-title);
   font-weight: var(--fw-title);
   line-height: 1;
   letter-spacing: var(--tracking-title);
   color: var(--ink);
-}
+  }
 
-/* A sentence about what Press is, not a label: read once and then ignored, so
+  /* A sentence about what Press is, not a label: read once and then ignored, so
    it sits at body size in the quietest ink and takes no tracking of its own. */
-.library-header p {
+  .library-header p {
   margin: 0;
   font-size: var(--fs-card);
   font-weight: 400;
   line-height: 1.35;
   letter-spacing: normal;
   color: var(--ink-3);
-}
+  }
 
-.library-header {
-  /* was: align-items: center — 1c hangs both off the same baseline */
-  display: flex;
-  align-items: flex-end;
-  justify-content: space-between;
-  gap: 1.5rem;
-  flex-wrap: wrap;
-  padding: 0 var(--gutter) 1.625rem;  /* was: no padding of its own */
-}
-
-.library-header > div {
-  display: flex;
-  flex-direction: column;
-  /* The title sets line-height 1, so most of the space between the two lines
-     is this gap; the sentence below brings a little of its own. */
-  gap: 0.375rem;
-}
-
-/* The one solid control on the page: ink fill, paper text, no shadow.
-   NEW rule — today it is a bare <button> on UA styling. */
-.library-actions button {
+  /* The one solid control on the page: accent fill, white text, and flat — the
+   only thing here that is coloured rather than shadowed. */
+  .library-actions button {
   padding: 0.5625rem 0.9375rem;
   border: 0;
   border-radius: var(--radius);
   background: var(--accent);
-  color: var(--on-brand);
+  color: var(--on-accent);
   font-family: var(--font-sans);
   font-size: var(--fs-body);
   font-weight: 500;
   line-height: 1;
-  box-shadow: var(--shadow-btn);
   cursor: pointer;
-  transition: background var(--ease);
-}
+  transition: background var(--duration);
+  }
 
-.library-actions button:hover:not(:disabled) {
+  .library-actions button:hover:not(:disabled) {
   background: var(--accent-strong);
-}
+  }
 
-
-
-.pinned-row {
-  /* was: grid, auto-fill 190px tracks, gap .75rem, margin-bottom 1.25rem */
+  .pinned-row {
   display: flex;
   gap: var(--shelf-gap);
   margin: 0;
@@ -1894,19 +1875,19 @@
   border-top: var(--bw) solid var(--line);
   border-bottom: var(--bw) solid var(--line);
   background: var(--paper-2);
-}
+  }
 
-.pinned-card {
-  /* was: border + --radius + overflow hidden — 1c has no card chrome */
+  /* No card chrome: the page image is the card. */
+  .pinned-card {
   border: 0;
   border-radius: 0;
   overflow: visible;
   width: var(--shelf-thumb-w);
   flex: none;
-}
+  }
 
-.pinned-open {
-  display: flex;               /* was: grid, gap .4rem, padding 0 0 .5rem */
+  .pinned-open {
+  display: flex;
   flex-direction: column;
   gap: 0.75rem;
   width: 100%;
@@ -1915,19 +1896,19 @@
   background: none;
   text-align: left;
   cursor: pointer;
-}
+  }
 
-/* A card is a button, and dragging across one should not leave a smear of
+  /* A card is a button, and dragging across one should not leave a smear of
    selected filename behind. */
-.pinned-open,
-.project-open {
+  .pinned-open,
+  .project-open {
   user-select: none;
   -webkit-user-select: none;
-}
+  }
 
-/* NEW — the border, radius and shadow that used to be on the card now
-   live on the page image, which is what actually looks like paper. */
-.pinned-thumb {
+  /* The radius and the shadow live on the page image rather than on the card
+   around it, because the page image is what actually looks like paper. */
+  .pinned-thumb {
   display: block;
   width: var(--shelf-thumb-w);
   height: var(--shelf-thumb-h);
@@ -1935,31 +1916,30 @@
   border-radius: var(--radius);
   background: var(--card);
   box-shadow: var(--shadow-md);
-  transition: box-shadow var(--ease);
-}
+  transition: box-shadow var(--duration);
+  }
 
-.pinned-open:hover:not(:disabled) .pinned-thumb {
+  /* Settling rather than lifting: under the pointer the page presses down onto
+   the shelf and its shadow tightens. */
+  .pinned-open:hover:not(:disabled) .pinned-thumb {
   box-shadow: var(--shadow-sm);
-}
+  }
 
-/* Centred under the page image, and the only line on the card. */
-.pinned-name {
+  /* Centred under the page image, and the only line on the card. */
+  .pinned-name {
   width: 100%;
   min-width: 0;
   text-align: center;
-}
+  }
 
-
-
-.project-grid {
-  /* was: auto-fill minmax(240px, 1fr), gap .5rem */
+  .project-grid {
   display: grid;
   grid-template-columns: repeat(var(--grid-cols), minmax(0, 1fr));
   gap: var(--grid-gap-y) var(--grid-gap-x);
   padding: 1.875rem var(--gutter) 0;
-}
+  }
 
-.project-card {
+  .project-card {
   display: flex;
   align-items: center;
   gap: 0.8125rem;
@@ -1968,19 +1948,20 @@
   border: 0;
   border-radius: var(--radius-sm);
   overflow: visible;
-  transition: background var(--ease), box-shadow var(--ease);
-}
+  transition: background var(--duration);
+  }
 
-.project-card:hover {
-  background: var(--card);          /* NEW */
-  /* box-shadow: var(--shadow-plate); */
-}
+  /* The row lifts to card white under the pointer. Nothing else marks it: the
+   thumbnail keeps its own shadow either way. */
+  .project-card:hover {
+  background: var(--card);
+  }
 
-.project-open {
+  .project-open {
   /* The text block is shorter than the page image, so it is centred against
      it rather than hung from the top edge. */
   align-items: center;
-  gap: 0.8125rem;            /* was: .5rem */
+  gap: 0.8125rem;
   display: flex;
   flex: 1;
   min-width: 0;
@@ -1989,43 +1970,40 @@
   background: none;
   text-align: left;
   cursor: pointer;
-}
+  }
 
-.project-thumb {
-  /* was: width 3.5rem, no chrome of its own */
+  .project-thumb {
   display: block;
   flex: none;
   width: var(--grid-thumb-w);
   height: var(--grid-thumb-h);
   overflow: hidden;
-  /* border: var(--bw) solid var(--line-2); */
   border-radius: var(--radius-sm);
   background: var(--card);
   box-shadow: var(--shadow-sm);
-  /* box-shadow: 0 1px 2px rgba(0, 0, 0, 0.25); */
-}
+  }
 
-.project-lines {
-  gap: 0.375rem;             /* was: .1rem */
+  .project-lines {
+  gap: 0.375rem;
   display: grid;
   flex: 1;
   min-width: 0;
-}
+  }
 
-/* When the PDF under the thumbnail was made, and how many versions are kept —
+  /* When the PDF under the thumbnail was made, and how many versions are kept —
    the faintest tier, and the only line that changes on its own. */
-.project-lines .when {
+  .project-lines .when {
   overflow: hidden;
   font-size: var(--fs-meta);
   line-height: 1;
   color: var(--ink-3);
   text-overflow: ellipsis;
   white-space: nowrap;
-}
+  }
 
-/* One recipe for both shelf and grid: a document's name and its kind read the
+  /* One recipe for both shelf and grid: a document's name and its kind read the
    same wherever it is shown. */
-.kind {
+  .kind {
   overflow: hidden;
   color: var(--ink-3);
   font: 600 var(--fs-label) var(--font-sans);
@@ -2035,45 +2013,43 @@
      the name above it is the part that has to survive. */
   text-overflow: ellipsis;
   white-space: nowrap;
-}
+  }
 
-.name {
-    display: -webkit-box;
-    overflow: hidden;
-    font-size: var(--fs-card);
-    font-weight: 600;
-    line-height: 1.25;
-    -webkit-box-orient: vertical;
-    -webkit-line-clamp: 2;
-    line-clamp: 2;
+  .name {
+  display: -webkit-box;
+  overflow: hidden;
+  font-size: var(--fs-card);
+  font-weight: 600;
+  line-height: 1.25;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
   color: var(--ink);
   overflow-wrap: anywhere;
-}
+  }
 
-.missing-thumbnail {
-  /* was: aspect-ratio 1/1.414 — the parent sets the box now */
+  /* The parent sets the box, so this only has to fill it. */
+  .missing-thumbnail {
   display: grid;
   width: 100%;
   height: 100%;
   place-items: center;
   background: var(--paper-3);
-  color: var(--ink-4);
+  color: var(--ink);
   font-size: var(--fs-label);
   text-align: center;
-}
+  }
 
-
-/* ── 7. Empty state ──────────────────────────────────────────────────
-   Only needs the gutter it no longer inherits from .library. */
-
-.empty-library {
+  /* The gutter is on each section rather than on .library, so this brings its
+   own. */
+  .empty-library {
   padding-inline: var(--gutter);
   display: grid;
   place-items: center;
   align-content: center;
   min-height: 55vh;
   text-align: center;
-}
+  }
 
   /* -- peek --------------------------------------------------------------- */
 
@@ -2093,7 +2069,7 @@
     background: var(--card);
     border: var(--bw) solid var(--line-2);
     border-radius: var(--radius);
-    box-shadow: var(--shadow-popover);
+    box-shadow: var(--shadow-xl);
     overflow: hidden;
   }
 
@@ -2110,7 +2086,7 @@
 
   .peek-where {
     color: var(--ink-2);
-    font-family: ui-monospace, monospace;
+    font-family: var(--font-mono);
     overflow-wrap: anywhere;
   }
 
@@ -2132,7 +2108,7 @@
     margin: 0;
     padding: 0.6rem 0.65rem;
     overflow: auto;
-    font-family: ui-monospace, monospace;
+    font-family: var(--font-mono);
     font-size: var(--fs-card);
     line-height: 1.45;
     tab-size: 2;
@@ -2168,7 +2144,7 @@
     background: var(--card);
     border: var(--bw) solid var(--line-2);
     border-radius: var(--radius);
-    box-shadow: var(--shadow-menu);
+    box-shadow: var(--shadow-lg);
     font-size: var(--fs-menu);
     user-select: none;
   }
@@ -2213,7 +2189,7 @@
   }
 
   .context-menu li.danger button:hover:not(:disabled) {
-    background: var(--danger-bg);
+    background: var(--danger-tint);
     color: var(--danger);
   }
 
@@ -2227,13 +2203,14 @@
     cursor: default;
   }
 
-  /* A non-modal <dialog open> defaults to its static position, which in the
-     reader lands a full viewport below a 100vh grid — open and unreachable.
-     Fixed and centred is what makes it visible at all.
-     `right` and `margin` are reset with it: the user agent sets
-     `inset-inline-end: 0` and `margin: auto` on every dialog, and left:50%
-     against right:0 leaves the box centred in the right half of the window
-     rather than in the window. */
+  /* Positioned rather than left to the user agent's centring, which the reader's
+     100vh grid does not agree with. `right` and `margin` are reset with it: the
+     user agent sets `inset-inline-end: 0` and `margin: auto` on every dialog,
+     and left:50% against right:0 leaves the box centred in the right half of the
+     window rather than in the window.
+
+     Opened with `showModal` — see `$lib/modal` — so this is in the top layer and
+     the z-index only settles it against the menus. */
   dialog {
     position: fixed;
     top: 50%;
@@ -2250,9 +2227,15 @@
     background: var(--card);
     border: var(--bw) solid var(--line-2);
     border-radius: var(--radius);
-    box-shadow: var(--shadow-popover);
+    box-shadow: var(--shadow-xl);
     color: var(--ink);
     font-size: var(--fs-menu);
+  }
+
+  /* Enough to say that what is behind is not the thing to click, and no more:
+     a cutout resting on the desk, not a spotlight on a stage. */
+  dialog::backdrop {
+    background: rgb(32 32 30 / 22%);
   }
 
   /* One step above the dialog's own text, and well below the library's
@@ -2311,9 +2294,9 @@
     text-transform: none;
   }
 
-  /* The app's own focus, not the browser's: the field lifts to paper white,
-     its edge takes the accent, and a soft ring of the same colour sits under
-     it. The global blue outline is suppressed here — inside a dialog it is the
+  /* The app's own focus, not the browser's: the field lifts to card white, its
+     edge takes the accent, and a soft ring of the same colour sits under it.
+     The global blue outline is suppressed here — inside a dialog it is the
      only blue on screen, and it reads as a browser artefact. */
   dialog input:focus,
   dialog select:focus,
@@ -2321,7 +2304,7 @@
     outline: none;
     border-color: var(--accent);
     background: var(--card);
-    box-shadow: 0 0 0 3px var(--accent-fill);
+    box-shadow: 0 0 0 3px var(--accent-wash);
   }
 
   dialog summary {
@@ -2350,7 +2333,7 @@
     font-size: var(--fs-menu);
     line-height: 1.2;
     cursor: pointer;
-    transition: background var(--ease);
+    transition: background var(--duration);
   }
 
   .dialog-actions button:hover:not(:disabled) {
@@ -2361,12 +2344,12 @@
   .dialog-actions button:last-child {
     border-color: transparent;
     background: var(--accent);
-    color: var(--on-brand);
+    color: var(--on-accent);
   }
 
   .dialog-actions button:last-child:hover:not(:disabled) {
     background: var(--accent-strong);
-    color: var(--on-brand);
+    color: var(--on-accent);
   }
 
   /* Removing a document is the one confirm that undoes something. */

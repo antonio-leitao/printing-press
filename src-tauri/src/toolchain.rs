@@ -2,16 +2,15 @@ use std::{
     env,
     ffi::OsString,
     path::{Path, PathBuf},
-    process::Command,
 };
 
 use crate::model::{ToolInfo, ToolchainReport};
 
 pub fn detect_toolchain() -> ToolchainReport {
     ToolchainReport {
-        latexmk: inspect_tool("latexmk", &["-v"]),
-        pandoc: inspect_tool("pandoc", &["--version"]),
-        neovim: inspect_tool("nvim", &["--version"]),
+        latexmk: inspect_tool("latexmk"),
+        pandoc: inspect_tool("pandoc"),
+        neovim: inspect_tool("nvim"),
     }
 }
 
@@ -41,43 +40,23 @@ pub fn augmented_path(executable: &Path) -> OsString {
     env::join_paths(directories).unwrap_or_else(|_| env::var_os("PATH").unwrap_or_default())
 }
 
-fn inspect_tool(name: &str, version_args: &[&str]) -> ToolInfo {
-    let Some(path) = resolve_executable(name) else {
-        return ToolInfo {
-            available: false,
-            path: None,
-            version: None,
-        };
-    };
-    let output = Command::new(&path).args(version_args).output();
-    let Ok(output) = output else {
-        return ToolInfo {
-            available: false,
-            path: path.to_str().map(ToOwned::to_owned),
-            version: None,
-        };
-    };
-    if !output.status.success() {
-        return ToolInfo {
-            available: false,
-            path: path.to_str().map(ToOwned::to_owned),
-            version: None,
-        };
-    }
-    let version = {
-        let text = if output.stdout.is_empty() {
-            String::from_utf8_lossy(&output.stderr)
-        } else {
-            String::from_utf8_lossy(&output.stdout)
-        };
-        text.lines()
-            .find(|line| !line.trim().is_empty())
-            .map(|line| line.trim().to_owned())
-    };
+/// Whether a tool is installed, and where.
+///
+/// Whether, and no more than that. Each of these used to be asked for its
+/// version, which is three process launches — about 280ms, most of it Perl
+/// starting up under `latexmk -v` — on every path Press is asked to resolve.
+/// That is the slowest thing between `:Press` in the editor and a document on
+/// screen, and nothing has ever read a version: the interface asks only whether
+/// the tool is there.
+///
+/// A binary that is present but broken now reports itself present and fails when
+/// it is run, which is the better error of the two — latexmk's own complaint
+/// says what is wrong with the installation, and "latexmk was not found" does not.
+fn inspect_tool(name: &str) -> ToolInfo {
+    let path = resolve_executable(name);
     ToolInfo {
-        available: true,
-        path: path.to_str().map(ToOwned::to_owned),
-        version,
+        available: path.is_some(),
+        path: path.and_then(|path| path.to_str().map(ToOwned::to_owned)),
     }
 }
 

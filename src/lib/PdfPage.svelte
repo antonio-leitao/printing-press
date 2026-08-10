@@ -165,7 +165,7 @@
   }
 
   .link-box:hover {
-    background: var(--accent-fill);
+    background: var(--accent-wash);
   }
 
   canvas {

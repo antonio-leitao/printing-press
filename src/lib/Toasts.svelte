@@ -43,11 +43,11 @@
      for what Press could not do, brick for what failed. */
   .toast {
     padding: 0.45rem 0.75rem;
-    border: var(--bw) solid var(--accent-outline);
+    border: var(--bw) solid var(--accent-line);
     border-radius: var(--radius);
-    background: var(--accent-soft-bg);
+    background: var(--accent-tint);
     color: var(--accent-strong);
-    box-shadow: var(--shadow-menu);
+    box-shadow: var(--shadow-lg);
     font-size: var(--fs-menu);
     line-height: 1.35;
     text-align: center;
@@ -59,14 +59,14 @@
   }
 
   .toast.warning {
-    border-color: var(--warning-border);
-    background: var(--warning-bg);
+    border-color: var(--warning-line);
+    background: var(--warning-tint);
     color: var(--warning-strong);
   }
 
   .toast.error {
-    border-color: var(--danger-border);
-    background: var(--danger-bg);
+    border-color: var(--danger-line);
+    background: var(--danger-tint);
     color: var(--danger-strong);
   }
 </style>

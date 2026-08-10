@@ -162,7 +162,9 @@ impl Viewing {
             }
         })
         .ok()?;
-        watcher.watch(&directory, RecursiveMode::NonRecursive).ok()?;
+        watcher
+            .watch(&directory, RecursiveMode::NonRecursive)
+            .ok()?;
         tauri::async_runtime::spawn(reload_loop(self, app, id, receiver));
         Some(watcher)
     }
@@ -231,7 +233,10 @@ trailer<</Root 1 0 R>>\n";
         assert!(first.id < 0, "ids count down from -1");
         assert_eq!(first.name, "paper.pdf");
         assert_eq!(first.revision, 1);
-        assert_eq!(viewing.path(first.id).as_deref(), Some(file.canonicalize().unwrap().as_path()));
+        assert_eq!(
+            viewing.path(first.id).as_deref(),
+            Some(file.canonicalize().unwrap().as_path())
+        );
 
         // Opening another replaces it: Press shows one document at a time, and
         // a registry that grew would keep watching files nobody is reading.

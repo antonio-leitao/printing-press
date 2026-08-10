@@ -292,10 +292,7 @@ pub async fn run(
     for reader in readers {
         let _ = reader.await;
     }
-    let output = pump
-        .lock()
-        .map(|pump| pump.bytes())
-        .unwrap_or_default();
+    let output = pump.lock().map(|pump| pump.bytes()).unwrap_or_default();
     let _ = tokio::fs::write(&inputs.log_path, &output).await;
     let terminal_output = String::from_utf8_lossy(&output).into_owned();
 
@@ -312,13 +309,11 @@ pub async fn run(
         attribute_to_source(&mut all, &latex_input, &inputs.source.file_name);
     }
 
-    let status = status.map_err(|error| AppError::Build(format!("latexmk did not finish: {error}")))?;
+    let status =
+        status.map_err(|error| AppError::Build(format!("latexmk did not finish: {error}")))?;
     if !status.success() {
         let summary = diagnostics::summarize(&all).unwrap_or_else(|| {
-            format!(
-                "latexmk exited with status {}",
-                status.code().unwrap_or(-1)
-            )
+            format!("latexmk exited with status {}", status.code().unwrap_or(-1))
         });
         return Ok(BuildOutcome::Failed {
             diagnostics: all,
@@ -328,9 +323,8 @@ pub async fn run(
 
     let generated = inputs.work_directory.join(format!("{job_name}.pdf"));
     if !generated.is_file() {
-        let summary = diagnostics::summarize(&all).unwrap_or_else(|| {
-            "latexmk reported success but produced no PDF".to_owned()
-        });
+        let summary = diagnostics::summarize(&all)
+            .unwrap_or_else(|| "latexmk reported success but produced no PDF".to_owned());
         return Ok(BuildOutcome::Failed {
             diagnostics: all,
             summary,
@@ -491,12 +485,12 @@ async fn publish(
         .as_nanos();
     let destination = artifact_directory.join(format!("build-{stamp}.pdf"));
     let staging = artifact_directory.join(format!("build-{stamp}.next"));
-    let byte_size = tokio::fs::copy(generated, &staging).await.map_err(|error| {
-        AppError::Build(format!("could not stage the built PDF: {error}"))
-    })?;
-    tokio::fs::rename(&staging, &destination).await.map_err(|error| {
-        AppError::Build(format!("could not publish the built PDF: {error}"))
-    })?;
+    let byte_size = tokio::fs::copy(generated, &staging)
+        .await
+        .map_err(|error| AppError::Build(format!("could not stage the built PDF: {error}")))?;
+    tokio::fs::rename(&staging, &destination)
+        .await
+        .map_err(|error| AppError::Build(format!("could not publish the built PDF: {error}")))?;
 
     // Best effort throughout: a build with no sync data is a build whose PDF
     // cannot be clicked through to its source, which is worth nothing beside
@@ -515,7 +509,8 @@ async fn publish(
     }
     // For markdown, SyncTeX can only name pandoc's output. The anchors in it
     // are what carry an answer back to the markdown the author wrote.
-    if let Ok(latex) = tokio::fs::read_to_string(work_directory.join(format!("{job_name}.tex"))).await
+    if let Ok(latex) =
+        tokio::fs::read_to_string(work_directory.join(format!("{job_name}.tex"))).await
     {
         let anchors = crate::anchors::collect(&latex);
         if !anchors.is_empty() {
@@ -652,7 +647,10 @@ impl Pump {
     }
 
     fn push(&mut self, data: &[u8]) -> Vec<ProgressSnapshot> {
-        self.bytes.extend(data.iter().copied());
+        // The slice, not an iterator of bytes: `Extend` copies a slice in one
+        // go and takes a byte at a time otherwise, and a long build pushes
+        // megabytes through here.
+        self.bytes.extend(data);
         if self.bytes.len() > OUTPUT_LIMIT {
             let excess = self.bytes.len() - OUTPUT_LIMIT;
             self.bytes.drain(..excess);
@@ -672,7 +670,7 @@ impl Pump {
         // tail is inspected too. The parser only reports changes, so re-reading
         // the same tail costs nothing.
         if !self.pending.is_empty()
-            && let Some(snapshot) = self.parser.observe_partial(&self.pending.clone())
+            && let Some(snapshot) = self.parser.observe_partial(&self.pending)
         {
             snapshots.push(snapshot);
         }
@@ -840,13 +838,9 @@ mod tests {
         let project = fixture_project(&root.join("main.tex"));
         let store = tempfile::tempdir().unwrap();
         let repository = crate::database::Repository::open(&store.path().join("press.db")).unwrap();
-        let source = crate::sources::prepare(
-            &project,
-            &SourceRef::Worktree,
-            &repository,
-            store.path(),
-        )
-        .unwrap();
+        let source =
+            crate::sources::prepare(&project, &SourceRef::Worktree, &repository, store.path())
+                .unwrap();
         let (_handle, cancel) = CancelHandle::new();
         let seen = Arc::new(Mutex::new(Vec::new()));
         let recorder = Arc::clone(&seen);
@@ -941,7 +935,9 @@ mod tests {
         assert!(generated.is_file());
         assert!(!root.join("essay.tex").exists());
         assert!(
-            std::fs::read_to_string(&generated).unwrap().contains("An Essay"),
+            std::fs::read_to_string(&generated)
+                .unwrap()
+                .contains("An Essay"),
             "the frontmatter reached the LaTeX"
         );
 
@@ -1028,13 +1024,9 @@ mod tests {
         let project = fixture_project(&root.join("main.tex"));
         let store = tempfile::tempdir().unwrap();
         let repository = crate::database::Repository::open(&store.path().join("press.db")).unwrap();
-        let source = crate::sources::prepare(
-            &project,
-            &SourceRef::Worktree,
-            &repository,
-            store.path(),
-        )
-        .unwrap();
+        let source =
+            crate::sources::prepare(&project, &SourceRef::Worktree, &repository, store.path())
+                .unwrap();
         let (_handle, cancel) = CancelHandle::new();
         let outcome = run(
             BuildInputs {

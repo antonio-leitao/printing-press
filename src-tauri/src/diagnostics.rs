@@ -20,15 +20,13 @@ const MAX_DIAGNOSTICS: usize = 200;
 /// How far past a `!` line to look for the `l.<n>` echo that carries its line number.
 const LINE_LOOKAHEAD: usize = 24;
 
-static FILE_LINE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"^(.+?):(\d+):\s*(.*)$").unwrap());
+static FILE_LINE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^(.+?):(\d+):\s*(.*)$").unwrap());
 static TEX_ERROR: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^!\s*(.*)$").unwrap());
 static LINE_ECHO: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^l\.(\d+)").unwrap());
 static WARNING: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"^(?:(LaTeX|Package|Class)\s+)?(?:(\S+)\s+)?(?:LaTeX\s+)?Warning:\s*(.*)$").unwrap()
 });
-static INPUT_LINE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"on input line (\d+)").unwrap());
+static INPUT_LINE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"on input line (\d+)").unwrap());
 static OUTPUT_WRITTEN: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"Output written on .*?\((\d+) pages?").unwrap());
 static LATEXMK_FAILURE: LazyLock<Regex> =
@@ -88,10 +86,12 @@ pub fn analyze_log(text: &str, directory: &Path) -> LogAnalysis {
         stack.observe(line);
     }
 
-    analysis.diagnostics.sort_by_key(|diagnostic| match diagnostic.severity {
-        Severity::Error => 0,
-        Severity::Warning => 1,
-    });
+    analysis
+        .diagnostics
+        .sort_by_key(|diagnostic| match diagnostic.severity {
+            Severity::Error => 0,
+            Severity::Warning => 1,
+        });
     analysis
 }
 
@@ -150,7 +150,11 @@ fn parse_warning_line(
     // A warning's line number is often on the following continuation line.
     let line_number = INPUT_LINE
         .captures(line)
-        .or_else(|| lines.get(index + 1).and_then(|next| INPUT_LINE.captures(next)))
+        .or_else(|| {
+            lines
+                .get(index + 1)
+                .and_then(|next| INPUT_LINE.captures(next))
+        })
         .and_then(|capture| capture.get(1)?.as_str().parse().ok());
     let prefix = capture
         .get(2)
@@ -333,10 +337,7 @@ impl FileStack {
     }
 
     fn current(&self) -> Option<&str> {
-        self.entries
-            .iter()
-            .rev()
-            .find_map(|entry| entry.as_deref())
+        self.entries.iter().rev().find_map(|entry| entry.as_deref())
     }
 }
 
@@ -431,7 +432,8 @@ mod tests {
     #[test]
     fn reads_file_and_line_from_file_line_error_output() {
         let (_guard, root) = roots();
-        let log = "This is pdfTeX\n./chapters/one.tex:42: Undefined control sequence.\nl.42 \\foo\n";
+        let log =
+            "This is pdfTeX\n./chapters/one.tex:42: Undefined control sequence.\nl.42 \\foo\n";
         let analysis = analyze_log(log, &root);
         assert_eq!(analysis.diagnostics.len(), 1);
         let diagnostic = &analysis.diagnostics[0];
@@ -576,14 +578,22 @@ mod tests {
         );
         let diagnostics = latexmk_failures(output);
         assert_eq!(diagnostics.len(), 2);
-        assert!(diagnostics.iter().all(|item| item.severity == Severity::Error));
+        assert!(
+            diagnostics
+                .iter()
+                .all(|item| item.severity == Severity::Error)
+        );
         assert!(diagnostics[1].message.contains("Failed to make"));
     }
 
     #[test]
     fn tracks_passes_pages_and_rules() {
         let mut parser = ProgressParser::default();
-        assert!(parser.observe("Latexmk: applying rule 'pdflatex'...").is_some());
+        assert!(
+            parser
+                .observe("Latexmk: applying rule 'pdflatex'...")
+                .is_some()
+        );
         assert_eq!(parser.snapshot().stage, "pdflatex");
 
         let snapshot = parser.observe("Run number 1 of rule 'pdflatex'").unwrap();
@@ -600,7 +610,9 @@ mod tests {
         assert_eq!(snapshot.pass, Some(2));
         assert_eq!(snapshot.page, None);
 
-        let snapshot = parser.observe("Latexmk: applying rule 'biber main'...").unwrap();
+        let snapshot = parser
+            .observe("Latexmk: applying rule 'biber main'...")
+            .unwrap();
         assert_eq!(snapshot.stage, "biber main");
     }
 

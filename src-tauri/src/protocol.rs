@@ -141,7 +141,10 @@ fn ok(body: Vec<u8>) -> AppResult<Response<Vec<u8>>> {
 /// built. Those live wherever the user keeps them, so the storage check cannot
 /// apply — what stands in for it is the registry itself, which only ever holds
 /// a file the user named.
-pub async fn resolve<R: Runtime>(app: &tauri::AppHandle<R>, artifact_id: i64) -> AppResult<PathBuf> {
+pub async fn resolve<R: Runtime>(
+    app: &tauri::AppHandle<R>,
+    artifact_id: i64,
+) -> AppResult<PathBuf> {
     let state = app.state::<AppState>();
     if let Some(path) = state.viewing.path(artifact_id) {
         return Ok(path);

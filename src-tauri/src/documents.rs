@@ -245,10 +245,7 @@ fn includer_of(file: &Path, directory: &Path) -> Option<PathBuf> {
 /// LaTeX roots are the files carrying a `\documentclass` that nothing else in
 /// the tree includes. Markdown has no such evidence, so every markdown file is
 /// listed — listing is not guessing, and the user still chooses.
-fn in_directory(
-    directory: &Path,
-    known: &HashMap<PathBuf, i64>,
-) -> (Vec<PathBuf>, Vec<String>) {
+fn in_directory(directory: &Path, known: &HashMap<PathBuf, i64>) -> (Vec<PathBuf>, Vec<String>) {
     let mut latex = Vec::new();
     let mut markdown = Vec::new();
     let mut truncated = false;
@@ -332,19 +329,16 @@ fn latexmkrc_beside(document: &Path) -> Vec<String> {
 }
 
 pub fn detect_engine(document: &Path) -> Option<Engine> {
-    read_latex(document)
-        .ok()?
-        .program?
-        .parse()
-        .ok()
+    read_latex(document).ok()?.program?.parse().ok()
 }
 
 /// Checks that a path is still a document Press can compile, which is all
 /// `add_project` and `open_project` need to know.
 pub fn validate(document: &Path) -> AppResult<PathBuf> {
-    if document.components().any(|component| {
-        matches!(component, Component::ParentDir | Component::CurDir)
-    }) {
+    if document
+        .components()
+        .any(|component| matches!(component, Component::ParentDir | Component::CurDir))
+    {
         return Err(AppError::InvalidInput(
             "a document is named by its full path".into(),
         ));
@@ -626,7 +620,11 @@ mod tests {
     fn a_chapter_resolves_to_the_document_that_includes_it() {
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path().join("paper");
-        write(&root, "main.tex", "\\documentclass{book}\n\\include{chapters/three}\n");
+        write(
+            &root,
+            "main.tex",
+            "\\documentclass{book}\n\\include{chapters/three}\n",
+        );
         write(&root, "chapters/three.tex", "the third chapter\n");
         let repository = repository(directory.path());
 
@@ -661,7 +659,11 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path().join("paper");
         write(&root, "thesis.tex", "\\documentclass{book}\n");
-        write(&root, "parts/one.tex", "% !TEX root = ../thesis.tex\ntext\n");
+        write(
+            &root,
+            "parts/one.tex",
+            "% !TEX root = ../thesis.tex\ntext\n",
+        );
         let repository = repository(directory.path());
 
         let request = resolve(&root.join("parts/one.tex"), &repository).unwrap();
@@ -689,7 +691,11 @@ mod tests {
 
         let request = resolve(&root.join("results.csv"), &repository).unwrap();
         assert!(request.candidates.is_empty());
-        assert!(request.warnings[0].contains("LaTeX"), "{:?}", request.warnings);
+        assert!(
+            request.warnings[0].contains("LaTeX"),
+            "{:?}",
+            request.warnings
+        );
     }
 
     // -- a directory -----------------------------------------------------

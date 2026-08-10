@@ -5,13 +5,13 @@
    piece of card casts on a desk, not the drop shadow of a floating panel.
    Three rules follow from that and explain most of the values below:
 
-     1. The ground is neutral, not warm. The old palette was tinted yellow
-        (#17150f ink, #efece5 bands); everything here sits at hue ~60 with
-        almost no chroma, so it reads as paper without reading as parchment.
-     2. Shadows are small. Offsets stay at 1-2px and blurs under ~12px. A
-        cutout that casts a long shadow stops looking like it is lying down.
-     3. One saturated colour, and it belongs to the primary action. Every
-        other accent is a status signal and stays muted.
+     1. The ground is neutral, not warm. Everything sits at hue ~60 with almost
+        no chroma, so it reads as paper without reading as parchment.
+     2. What lies on the ground casts a contact shadow, 1-2px and no more: a
+        cutout with a long shadow stops looking like it is lying down. Only
+        what is genuinely above the page — a menu, a popover — casts further.
+     3. One saturated colour, and it is the primary action. Every other hue is
+        a status signal and stays muted.
 
    Type is Public Sans throughout — one family, separated by weight and size
    rather than by mixing families. */
@@ -50,13 +50,12 @@
 }
 
 :root {
-  /* Paper */
+  /* Surfaces, from the ground up. --desk is the one below everything, and the
+     only place it shows is where the window overscrolls past the page. */
+  --desk: #efeee9;
   --paper: #f8f8f6;
   --paper-2: #f1f1ee;
   --paper-3: #e8e8e4;
-  --desk: #efeee9;
-
-  /* Cards */
   --card: #ffffff;
   --card-2: #f7f7f5;
 
@@ -70,28 +69,48 @@
   --line-2: #d5d3cd;
   --line-3: #b3b1a9;
 
-  /* Brand — the single saturated colour, reserved for the primary action and
-     for focus. Nothing else on the page may use it. */
-  --brand: #3b6fd4;
-  --brand-hover: #2f5cb5;
-  --on-brand: #ffffff;
+  /* Hues. Three, and no more. The green is the primary action and also the
+     colour of a document that built; the other two are status signals,
+     desaturated on purpose so that at the size they are used — a line of
+     diagnostics, a toast — neither becomes the loudest thing on a page of
+     near-whites. */
+  --accent: #4e8265;
+  --amber: #b08a45;
+  --brick: #a04a42;
+  /* What is legible on a filled --accent. */
+  --on-accent: #ffffff;
 
-  /* Status — muted on purpose. These are 7px dots; at that size a saturated
-     hue is a distraction, and the amber in particular was the loudest thing
-     on screen. Each is desaturated to sit inside the paper palette. */
-  --accent: #4e8265; /* built */
-  --accent-strong: #0d4f3c;
-  --accent-link: #0f5f47;
-  --amber: #b08a45; /* building */
-  --brick: #a04a42; /* fails to compile */
-  --never: #d5d5d0; /* never built */
+  /* Blue is not one of the three: it never fills anything and it carries no
+     meaning about the document. It appears where the system says where you
+     are — the focus ring, and the selection. */
+  --blue: #3b6fd4;
 
-  /* Typography — one family. The old --font-serif / --font-mono tokens are
-     kept as aliases so existing rules keep resolving, but they now point at
-     Public Sans: the hierarchy comes from weight, size and colour instead. */
-  /* Typography. Public Sans ships weights 400, 500, 600 and 700, so the medium
-     (500) and semibold (600) recipe tiers render at their intended weight. */
+  /* Each hue, mixed down into the surfaces it has to sit on. -strong is dark
+     enough to be read as text on its own tint; -tint is an opaque background;
+     -line is a border; -wash is a translucent fill for a hover. Only the
+     accent needs all four. */
+  --accent-strong: color-mix(in oklab, var(--accent) 84%, var(--ink));
+  --accent-tint: color-mix(in oklab, var(--accent) 8%, var(--paper));
+  --accent-line: color-mix(in oklab, var(--accent) 45%, transparent);
+  --accent-wash: color-mix(in oklab, var(--accent) 12%, transparent);
+
+  --warning: var(--amber);
+  --warning-strong: color-mix(in oklab, var(--amber) 82%, var(--ink));
+  --warning-tint: color-mix(in oklab, var(--amber) 10%, var(--paper));
+  --warning-line: color-mix(in oklab, var(--amber) 34%, var(--paper));
+
+  --danger: var(--brick);
+  --danger-strong: color-mix(in oklab, var(--brick) 82%, var(--ink));
+  --danger-tint: color-mix(in oklab, var(--brick) 8%, var(--paper));
+  --danger-line: color-mix(in oklab, var(--brick) 34%, var(--paper));
+
+  /* Typography — one family. Public Sans ships weights 400, 500, 600 and 700,
+     so the medium and semibold tiers render at their intended weight rather
+     than being synthesised. Monospace is for source: the peek popover, the
+     key list, and a path inside a sentence. */
   --font-sans: "Public Sans", system-ui, sans-serif;
+  --font-mono: ui-monospace, monospace;
+
   --fs-title: 20px;
   /* Menus and dialogs are read at a glance and clicked, not scanned like the
      library, so they sit a step above the page's body text. */
@@ -100,14 +119,11 @@
   --fs-body: 12.5px;
   --fs-meta: 11px;
   --fs-label: 10.5px;
-  --tracking-label: 0.14em;
-  /* Weights carry the hierarchy now that families do not. Names need 500:
-     Public Sans at 400 reads lighter than the serif it replaces. */
+
+  /* Weights carry the hierarchy now that families do not. */
   --fw-title: 700;
-  --fw-name: 500;
   --fw-label: 500;
 
-  --lh-name: 1.3;
   --tracking-title: -0.02em; /* large sans needs pulling in */
   --tracking-label: 0.08em; /* uppercase eyebrow only */
 
@@ -115,27 +131,25 @@
      stops being a hairline. */
   --bw: 1px;
   --bw-2: 1.5px;
-  --bw-accent: 0.25rem;
 
   --radius: 0.31rem;
-  --radius-chip: 2px;
   --radius-sm: 0.2rem;
-  --radius-pill: 50%;
+  --radius-xs: 2px;
 
-  /* Shadows — the core of the cutout look. Geometry stays in px because these
-     are optical: scaling a 1px contact shadow with text size smears it.
-     Every shadow is a tight contact term plus, at most, one short ambient
-     term with a negative spread so it stays under the shape. */
-  --shadow-sm: 0 0.4px 2px rgba(0, 0, 0, 0.25); /* 55x72 grid thumbnail — stays tiny */
-  --shadow-md: 0 1px 2px rgba(0, 0, 0, 0.25); /* 55x72 grid thumbnail — stays tiny */
-  --shadow-plate: 0 1px 2px #1c1c1a14, 0 3px 8px -3px #1c1c1a1a;
-  --shadow-btn: none;
-  --shadow-menu: 0 1px 2px #1c1c1a1a, 0 8px 20px -6px #1c1c1a2b;
-  --shadow-popover: 0 2px 8px -2px #1c1c1a24, 0 16px 32px -12px #1c1c1a33;
+  /* Shadows, smallest first. Geometry stays in px because these are optical:
+     scaling a 1px contact shadow with text size smears it. The first two are
+     contact shadows for something lying on the ground — a page, a thumbnail.
+     The last two lift a menu or a popover clear of it, and are the only
+     shadows here allowed to be tall; each is a tight contact term plus one
+     ambient term with a negative spread, so it stays under the shape. */
+  --shadow-sm: 0 0.4px 2px rgba(0, 0, 0, 0.25);
+  --shadow-md: 0 1px 2px rgba(0, 0, 0, 0.25);
+  --shadow-lg: 0 1px 2px #1c1c1a1a, 0 8px 20px -6px #1c1c1a2b;
+  --shadow-xl: 0 2px 8px -2px #1c1c1a24, 0 16px 32px -12px #1c1c1a33;
 
-  /* Motion — hover deepens the shadow instead of nudging the element. */
-  --lift: none;
-  --ease: 0.14s;
+  /* Motion. One duration: nothing here moves, so this only ever carries a
+     change of colour or of shadow. */
+  --duration: 0.14s;
 
   /* Layout */
   --gutter: 2.5rem; /* 40px — page gutter */
@@ -149,35 +163,6 @@
   --grid-gap-y: 1.75rem; /* 28px */
   --grid-gap-x: 1.5rem; /* 24px */
   --row-pad: 0.5rem; /* 8px — padding + equal negative margin */
-  --card-h: 5rem;
-  --card-pad: 0.5rem;
-  --col-w: 16.875rem;
-  --sidebar-w: 18.875rem;
-  --window-titlebar-height: 0rem;
-  --grain-op: 0.18;
-
-  /* Derived — same formulas, following the new bases. */
-  --card-content-h: calc(
-    var(--card-h) - var(--card-pad) - var(--card-pad) - var(--bw) - var(--bw)
-  );
-  --accent-strong: color-mix(in oklab, var(--accent) 84%, var(--ink));
-  --accent-link: var(--brand);
-  --accent-soft-bg: color-mix(in oklab, var(--accent) 8%, var(--paper));
-  --accent-outline: color-mix(in oklab, var(--accent) 45%, transparent);
-  --accent-fill: color-mix(in oklab, var(--accent) 12%, transparent);
-  --accent-fill-strong: color-mix(in oklab, var(--accent) 25%, transparent);
-  --focus-ring: color-mix(in oklab, var(--brand) 40%, transparent);
-  --progress-track: var(--paper-3);
-  --danger: var(--brick);
-  --danger-strong: color-mix(in oklab, var(--brick) 82%, var(--ink));
-  --danger-bg: color-mix(in oklab, var(--brick) 8%, var(--paper));
-  --danger-border: color-mix(in oklab, var(--brick) 34%, var(--paper));
-  --danger-menu-border: color-mix(in oklab, var(--brick) 70%, var(--ink));
-  --danger-menu-text: color-mix(in oklab, var(--brick) 78%, var(--ink));
-  --danger-menu-hover-bg: color-mix(in oklab, var(--brick) 9%, var(--paper));
-  --warning-bg: color-mix(in oklab, var(--amber) 10%, var(--paper));
-  --warning-border: color-mix(in oklab, var(--amber) 34%, var(--paper));
-  --warning-strong: color-mix(in oklab, var(--amber) 82%, var(--ink));
 
   --scrollbar-size: 0.75rem;
   --scrollbar-inset: 0.1875rem;
@@ -255,14 +240,13 @@ textarea {
   color: inherit;
 }
 
-/* Focus is the one other place the brand colour appears. :focus-visible only,
-   so a mouse click on a card never draws a ring. */
+/* :focus-visible only, so a mouse click on a card never draws a ring. */
 :focus-visible {
-  outline: var(--bw-2) solid var(--brand);
+  outline: var(--bw-2) solid var(--blue);
   outline-offset: 2px;
-  border-radius: var(--radius-chip);
+  border-radius: var(--radius-xs);
 }
 
 ::selection {
-  background: color-mix(in oklab, var(--brand) 22%, transparent);
+  background: color-mix(in oklab, var(--blue) 22%, transparent);
 }

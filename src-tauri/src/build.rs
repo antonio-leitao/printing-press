@@ -9,6 +9,13 @@
 //! that build dirty; the build still finishes and still publishes, and only then
 //! runs again. Discarding a finished PDF because a keystroke landed means a
 //! document that saves faster than it compiles never updates at all.
+//!
+//! Every write to the database, and every restore of a version, goes through
+//! `spawn_blocking`: a write commits to the disk and a restore copies a whole
+//! source tree, and neither belongs on a thread that is meant to be driving
+//! builds and serving pages. The handful of single-row *reads* left inline are
+//! deliberate — one indexed lookup against a warm SQLite page cache, where the
+//! hop off the runtime would cost about what the query does.
 
 use std::{
     collections::{HashMap, HashSet},
@@ -23,9 +30,9 @@ use tokio::sync::{Mutex, Semaphore, mpsc};
 
 use crate::{
     database::{NewArtifact, Repository},
-    files,
     diagnostics::ProgressSnapshot,
-    error::AppResult,
+    error::{AppError, AppResult},
+    files,
     model::{
         ArtifactSummary, BuildProgress, BuildState, BuildStatus, BuildUpdate, Diagnostic, Project,
         SourceRef,
@@ -99,7 +106,12 @@ impl BuildManager {
     /// one, and starts a build of its working tree.
     pub async fn open(self: Arc<Self>, app: AppHandle, project: Project) -> AppResult<()> {
         self.close_others(project.id).await;
-        self.repository.touch_project(project.id)?;
+        // A write, so off the runtime like the others.
+        let repository = Arc::clone(&self.repository);
+        let project_id = project.id;
+        tauri::async_runtime::spawn_blocking(move || repository.touch_project(project_id))
+            .await
+            .map_err(|error| AppError::Task(error.to_string()))??;
         Arc::clone(&self).start_watching(&app, &project).await;
         self.request(app, project, SourceRef::Worktree).await?;
         Ok(())
@@ -111,7 +123,11 @@ impl BuildManager {
             let mut state = self.state.lock().await;
             (
                 state.watch.take(),
-                state.active.drain().map(|(_, build)| build).collect::<Vec<_>>(),
+                state
+                    .active
+                    .drain()
+                    .map(|(_, build)| build)
+                    .collect::<Vec<_>>(),
             )
         };
         if let Some(watch) = watch {
@@ -293,14 +309,23 @@ impl BuildManager {
         )
         .await;
 
-        let source = match sources::prepare(
-            project,
-            source_ref,
-            &self.repository,
-            &self.objects_root,
-        ) {
-            Ok(source) => source,
-            Err(error) => {
+        // Off the runtime. Restoring a version copies every file it holds out of
+        // the object store — up to the store's own half-gigabyte limit — and
+        // doing that on a runtime thread stalls every other build, every command
+        // the interface has asked for, and the page currently being fetched.
+        let prepared = {
+            let project = project.clone();
+            let source_ref = source_ref.clone();
+            let repository = Arc::clone(&self.repository);
+            let objects = self.objects_root.clone();
+            tauri::async_runtime::spawn_blocking(move || {
+                sources::prepare(&project, &source_ref, &repository, &objects)
+            })
+            .await
+        };
+        let source = match prepared.map_err(|error| AppError::Task(error.to_string())) {
+            Ok(Ok(source)) => source,
+            Ok(Err(error)) | Err(error) => {
                 self.finish_with_error(
                     app,
                     build_id,
@@ -325,7 +350,13 @@ impl BuildManager {
             .flatten()
             .and_then(|stored| stored.summary.page_count);
 
-        let sink = progress_sink(app.clone(), build_id, project.id, source_ref.clone(), expected_pages);
+        let sink = progress_sink(
+            app.clone(),
+            build_id,
+            project.id,
+            source_ref.clone(),
+            expected_pages,
+        );
         let inputs = BuildInputs {
             build_id,
             project,
@@ -347,14 +378,31 @@ impl BuildManager {
                 product,
                 diagnostics,
             }) => {
-                let recorded = self.repository.record_artifact(NewArtifact {
-                    project_id: project.id,
-                    source_ref,
-                    engine: project.engine,
-                    pdf_path: &product.pdf_path,
-                    page_count: product.page_count,
-                    byte_size: product.byte_size,
-                });
+                // Publishing is a transaction, and a transaction commits to the
+                // disk. Off the runtime for the same reason every other write
+                // is: how long a sync takes is the filesystem's business, not
+                // something a thread meant to be driving builds should wait on.
+                let recorded = {
+                    let repository = Arc::clone(&self.repository);
+                    let project_id = project.id;
+                    let source_ref = source_ref.clone();
+                    let engine = project.engine;
+                    let pdf_path = product.pdf_path.clone();
+                    let page_count = product.page_count;
+                    let byte_size = product.byte_size;
+                    tauri::async_runtime::spawn_blocking(move || {
+                        repository.record_artifact(NewArtifact {
+                            project_id,
+                            source_ref: &source_ref,
+                            engine,
+                            pdf_path: &pdf_path,
+                            page_count,
+                            byte_size,
+                        })
+                    })
+                    .await
+                    .unwrap_or_else(|error| Err(AppError::Task(error.to_string())))
+                };
                 match recorded {
                     Ok((artifact, superseded)) => {
                         if let Some(previous) = superseded {
@@ -468,17 +516,30 @@ impl BuildManager {
         state: BuildState,
         artifact: Option<ArtifactSummary>,
     ) {
-        if let Err(error) = self.repository.set_build_state(project_id, &state) {
-            eprintln!("Press could not record build state: {error}");
-        }
-        let artifact = artifact.or_else(|| {
-            let engine = self.repository.get_project(project_id).ok()?.engine;
-            self.repository
-                .artifact_for(project_id, &state.source_ref, engine)
-                .ok()
-                .flatten()
-                .map(|stored| stored.summary)
-        });
+        // The four queries below go together and go off the runtime together —
+        // one hop rather than four, and none of them on a thread that is meant
+        // to be driving builds and serving pages. This runs on every state a
+        // build passes through.
+        let repository = Arc::clone(&self.repository);
+        let stored = state.clone();
+        let written = tauri::async_runtime::spawn_blocking(move || {
+            if let Err(error) = repository.set_build_state(project_id, &stored) {
+                eprintln!("Press could not record build state: {error}");
+            }
+            let artifact = artifact.or_else(|| {
+                let engine = repository.get_project(project_id).ok()?.engine;
+                repository
+                    .artifact_for(project_id, &stored.source_ref, engine)
+                    .ok()
+                    .flatten()
+                    .map(|stored| stored.summary)
+            });
+            // The library grid shows per-project state, so keep it in step.
+            (artifact, repository.project_summary(project_id).ok())
+        })
+        .await;
+        let (artifact, summary) = written.unwrap_or_default();
+
         let _ = app.emit(
             "build-updated",
             BuildUpdate {
@@ -489,8 +550,7 @@ impl BuildManager {
                 artifact,
             },
         );
-        // The library grid shows per-project state, so keep it in step.
-        if let Ok(summary) = self.repository.project_summary(project_id) {
+        if let Some(summary) = summary {
             let _ = app.emit("project-updated", summary);
         }
     }
@@ -511,15 +571,16 @@ impl BuildManager {
             directory: directory.clone(),
             foreign: foreign.into_iter().collect(),
         };
-        let watcher = notify::recommended_watcher(move |result: notify::Result<Event>| match result {
-            Ok(event) if scope.relevant(&event) => {
-                let _ = watcher_sender.send(WatchMessage::Changed);
-            }
-            Ok(_) => {}
-            Err(error) => {
-                let _ = watcher_sender.send(WatchMessage::Failed(error.to_string()));
-            }
-        });
+        let watcher =
+            notify::recommended_watcher(move |result: notify::Result<Event>| match result {
+                Ok(event) if scope.relevant(&event) => {
+                    let _ = watcher_sender.send(WatchMessage::Changed);
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    let _ = watcher_sender.send(WatchMessage::Failed(error.to_string()));
+                }
+            });
         let mut watcher = match watcher {
             Ok(watcher) => watcher,
             Err(error) => {
@@ -790,7 +851,10 @@ mod tests {
     fn a_neighbouring_project_does_not_rebuild_this_one() {
         let scope = scope(&["talk.md", "supplementary.tex"]);
 
-        assert!(scope.relevant(&event("/paper/essay.md")), "its own document");
+        assert!(
+            scope.relevant(&event("/paper/essay.md")),
+            "its own document"
+        );
         // Other documents in the same folder, which are other projects.
         assert!(!scope.relevant(&event("/paper/talk.md")));
         assert!(!scope.relevant(&event("/paper/supplementary.tex")));
@@ -804,11 +868,12 @@ mod tests {
     #[test]
     fn versions_get_separate_scratch_space() {
         let manager = BuildManager::new(
-            Arc::new(Repository::open(&std::env::temp_dir().join(format!(
-                "press-test-{}.db",
-                std::process::id()
-            )))
-            .unwrap()),
+            Arc::new(
+                Repository::open(
+                    &std::env::temp_dir().join(format!("press-test-{}.db", std::process::id())),
+                )
+                .unwrap(),
+            ),
             PathBuf::from("/artifacts"),
             PathBuf::from("/work"),
             PathBuf::from("/objects"),

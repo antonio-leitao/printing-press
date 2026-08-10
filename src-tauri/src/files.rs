@@ -179,7 +179,9 @@ mod tests {
     fn never_descends_into_someone_elses_history() {
         assert!(!is_project_source(&PathBuf::from(".git/index")));
         assert!(!is_project_source(&PathBuf::from("node_modules/pkg/a.tex")));
-        assert!(!is_project_source(&PathBuf::from("deep/target/debug/x.tex")));
+        assert!(!is_project_source(&PathBuf::from(
+            "deep/target/debug/x.tex"
+        )));
         assert!(is_ignored_directory(".GIT"));
     }
 
@@ -191,11 +193,22 @@ mod tests {
             .collect::<HashSet<_>>();
 
         // Another project's document, wherever it sits.
-        assert!(!belongs_to_project(&PathBuf::from("supplementary.tex"), &foreign));
-        assert!(!belongs_to_project(&PathBuf::from("talks/talk.md"), &foreign));
+        assert!(!belongs_to_project(
+            &PathBuf::from("supplementary.tex"),
+            &foreign
+        ));
+        assert!(!belongs_to_project(
+            &PathBuf::from("talks/talk.md"),
+            &foreign
+        ));
 
         // This project's own source, and everything shared beside it.
-        for path in ["main.tex", "chapters/one.tex", "figures/plot.png", "refs.bib"] {
+        for path in [
+            "main.tex",
+            "chapters/one.tex",
+            "figures/plot.png",
+            "refs.bib",
+        ] {
             assert!(
                 belongs_to_project(&PathBuf::from(path), &foreign),
                 "{path} belongs to the project"

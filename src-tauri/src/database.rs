@@ -570,7 +570,10 @@ impl Repository {
             )
             .optional()?
             .ok_or_else(|| AppError::NotFound(format!("version {snapshot_id} does not exist")))?;
-        transaction.execute("DELETE FROM snapshot_files WHERE snapshot_id = ?1", [snapshot_id])?;
+        transaction.execute(
+            "DELETE FROM snapshot_files WHERE snapshot_id = ?1",
+            [snapshot_id],
+        )?;
         transaction.execute("DELETE FROM snapshots WHERE id = ?1", [snapshot_id])?;
         let remaining: i64 = transaction.query_row(
             "SELECT COUNT(*) FROM snapshots WHERE project_id = ?1 AND revision = ?2",
@@ -583,31 +586,78 @@ impl Repository {
 
     /// The history, newest first, with the working tree pinned at the top.
     /// Each row carries what Press knows about building that version.
+    ///
+    /// Three queries whatever the length of the history. Asking per row instead
+    /// meant two queries and two turns of the connection lock for every version
+    /// a document had, on every snapshot taken, renamed or discarded.
     pub fn list_versions(&self, project_id: i64) -> AppResult<Vec<VersionSummary>> {
         let project = self.get_project(project_id)?;
-        let mut versions = vec![VersionSummary {
-            source_ref: SourceRef::Worktree,
-            title: "Working tree".into(),
-            snapshot: None,
-            build: self.build_state(project_id, &SourceRef::Worktree)?,
-            artifact: self
-                .artifact_for(project_id, &SourceRef::Worktree, project.engine)?
-                .map(|stored| stored.summary),
-        }];
+        let snapshots = self.list_snapshots(project_id)?;
+        let builds = self.build_states(project_id)?;
+        let artifacts = self.artifacts_for_project(project_id, project.engine)?;
 
-        for snapshot in self.list_snapshots(project_id)? {
-            let source_ref = SourceRef::Snapshot(snapshot.revision.clone());
-            versions.push(VersionSummary {
-                title: snapshot.title.clone(),
-                build: self.build_state(project_id, &source_ref)?,
-                artifact: self
-                    .artifact_for(project_id, &source_ref, project.engine)?
-                    .map(|stored| stored.summary),
-                snapshot: Some(snapshot),
+        let mut versions = Vec::with_capacity(snapshots.len() + 1);
+        // Read rather than taken. Two snapshots of identical content share a
+        // revision, and therefore share one build and one cached PDF — Press no
+        // longer stores the second, but databases written before that rule have
+        // pairs in them, and both rows have to report the state they both have.
+        let row = |source_ref: SourceRef, title: String, snapshot: Option<SnapshotSummary>| {
+            VersionSummary {
+                build: builds
+                    .get(&source_ref)
+                    .cloned()
+                    .unwrap_or_else(|| BuildState::never(source_ref.clone())),
+                artifact: artifacts.get(&source_ref).cloned(),
+                title,
+                snapshot,
                 source_ref,
-            });
+            }
+        };
+
+        versions.push(row(SourceRef::Worktree, "Working tree".into(), None));
+        for snapshot in snapshots {
+            let source_ref = SourceRef::Snapshot(snapshot.revision.clone());
+            versions.push(row(source_ref, snapshot.title.clone(), Some(snapshot)));
         }
         Ok(versions)
+    }
+
+    /// Every build state a project has, by the version it belongs to.
+    fn build_states(&self, project_id: i64) -> AppResult<HashMap<SourceRef, BuildState>> {
+        let connection = self.lock()?;
+        let mut statement = connection.prepare(
+            "SELECT source_ref, status, started_at, finished_at, duration_ms,
+                    error_summary, diagnostics
+             FROM build_states WHERE project_id = ?1",
+        )?;
+        let rows = statement.query_map([project_id], map_build_state)?;
+        let mut states = HashMap::new();
+        for row in rows {
+            let state = row.map_err(AppError::from)??;
+            states.insert(state.source_ref.clone(), state);
+        }
+        Ok(states)
+    }
+
+    /// Every artifact a project has for one engine, by the version it belongs to.
+    fn artifacts_for_project(
+        &self,
+        project_id: i64,
+        engine: Engine,
+    ) -> AppResult<HashMap<SourceRef, ArtifactSummary>> {
+        let connection = self.lock()?;
+        let mut statement = connection.prepare(
+            "SELECT id, project_id, source_ref, engine, pdf_path, page_count,
+                    byte_size, built_at, revision
+             FROM artifacts WHERE project_id = ?1 AND engine = ?2",
+        )?;
+        let rows = statement.query_map(params![project_id, engine.as_token()], map_artifact)?;
+        let mut artifacts = HashMap::new();
+        for row in rows {
+            let stored = row.map_err(AppError::from)??;
+            artifacts.insert(stored.summary.source_ref.clone(), stored.summary);
+        }
+        Ok(artifacts)
     }
 
     /// Drops one version's cached build. Returns the PDFs to delete.
@@ -623,9 +673,8 @@ impl Repository {
             let mut statement = transaction.prepare(
                 "SELECT pdf_path FROM artifacts WHERE project_id = ?1 AND source_ref = ?2",
             )?;
-            let rows = statement.query_map(params![project_id, &token], |row| {
-                row.get::<_, String>(0)
-            })?;
+            let rows =
+                statement.query_map(params![project_id, &token], |row| row.get::<_, String>(0))?;
             rows.filter_map(Result::ok)
                 .map(PathBuf::from)
                 .collect::<Vec<_>>()
@@ -667,7 +716,10 @@ impl Repository {
         let connection = self.lock()?;
         let mut statement = connection.prepare("SELECT id, document_path FROM projects")?;
         let rows = statement.query_map([], |row| {
-            Ok((PathBuf::from(row.get::<_, String>(1)?), row.get::<_, i64>(0)?))
+            Ok((
+                PathBuf::from(row.get::<_, String>(1)?),
+                row.get::<_, i64>(0)?,
+            ))
         })?;
         rows.collect::<Result<HashMap<_, _>, rusqlite::Error>>()
             .map_err(AppError::from)
@@ -725,8 +777,7 @@ const SUMMARY_QUERY_BASE: &str = "
 ";
 
 /// Pinned first, then whatever was opened most recently.
-const SUMMARY_ORDER: &str =
-    " ORDER BY p.pinned DESC, p.last_opened_at DESC, p.name COLLATE NOCASE";
+const SUMMARY_ORDER: &str = " ORDER BY p.pinned DESC, p.last_opened_at DESC, p.name COLLATE NOCASE";
 
 fn summary_query(filter: &str) -> String {
     format!("{SUMMARY_QUERY_BASE}{filter}{SUMMARY_ORDER}")
@@ -793,8 +844,7 @@ fn map_build_state(row: &Row<'_>) -> rusqlite::Result<AppResult<BuildState>> {
             finished_at,
             duration_ms,
             error_summary,
-            diagnostics: serde_json::from_str::<Vec<Diagnostic>>(&diagnostics)
-                .unwrap_or_default(),
+            diagnostics: serde_json::from_str::<Vec<Diagnostic>>(&diagnostics).unwrap_or_default(),
         })
     })())
 }
@@ -1085,7 +1135,10 @@ mod tests {
                 .unwrap();
         }
         let reopened = Repository::open(&database_path).unwrap();
-        assert!(reopened.list_projects().unwrap().is_empty(), "started fresh");
+        assert!(
+            reopened.list_projects().unwrap().is_empty(),
+            "started fresh"
+        );
 
         let notice = reopened.notice().expect("the user is told what happened");
         assert!(notice.contains("set aside"), "{notice}");
@@ -1215,7 +1268,10 @@ mod tests {
         let stored = database.get_project(essay.id).unwrap();
         assert_eq!(stored.file_name(), "essay.md");
         assert_eq!(stored.directory(), root);
-        assert_eq!(database.get_project(talk.id).unwrap().name, "writing/talk.md");
+        assert_eq!(
+            database.get_project(talk.id).unwrap().name,
+            "writing/talk.md"
+        );
 
         // Deleting one leaves the other alone.
         database.delete_project(essay.id).unwrap();
@@ -1402,6 +1458,95 @@ mod tests {
             SnapshotOutcome::Unchanged {
                 title: "Before the meeting".into()
             }
+        );
+    }
+
+    /// The history is assembled from three queries rather than two per row, so
+    /// what each row carries has to be checked: its own build, its own PDF, and
+    /// — for the pairs older databases hold — the one both of them share.
+    #[test]
+    fn the_history_gives_every_row_its_own_build_and_pdf() {
+        let directory = tempfile::tempdir().unwrap();
+        let objects = directory.path().join("objects");
+        let database = Repository::open(&directory.path().join("press.db")).unwrap();
+        let root = project_fixture(directory.path(), "thesis");
+        let project = add(&database, &root.join("main.tex"));
+
+        let first = crate::snapshot::capture(&root, &objects, &HashSet::new()).unwrap();
+        database
+            .create_snapshot(project.id, &first, "First", None)
+            .unwrap();
+        std::fs::write(root.join("main.tex"), "\\documentclass{book}").unwrap();
+        let second = crate::snapshot::capture(&root, &objects, &HashSet::new()).unwrap();
+        database
+            .create_snapshot(project.id, &second, "Second", None)
+            .unwrap();
+
+        // A built snapshot, a failed one, and a working tree with neither.
+        let pdf = directory.path().join("second.pdf");
+        std::fs::write(&pdf, b"%PDF-1.7").unwrap();
+        let built = SourceRef::Snapshot(second.revision.clone());
+        database
+            .record_artifact(NewArtifact {
+                project_id: project.id,
+                source_ref: &built,
+                engine: Engine::PdfLatex,
+                pdf_path: &pdf,
+                page_count: Some(7),
+                byte_size: 8,
+            })
+            .unwrap();
+        database
+            .set_build_state(
+                project.id,
+                &BuildState {
+                    source_ref: SourceRef::Snapshot(first.revision.clone()),
+                    status: BuildStatus::Error,
+                    started_at: Some(1),
+                    finished_at: Some(2),
+                    duration_ms: Some(5),
+                    error_summary: Some("main.tex:1: Missing $ inserted.".into()),
+                    diagnostics: Vec::new(),
+                },
+            )
+            .unwrap();
+
+        let versions = database.list_versions(project.id).unwrap();
+        assert_eq!(versions.len(), 3);
+        // The working tree is pinned at the top and has neither.
+        assert_eq!(versions[0].source_ref, SourceRef::Worktree);
+        assert_eq!(versions[0].build.status, BuildStatus::Never);
+        assert!(versions[0].artifact.is_none());
+        // Newest snapshot first: the one that built.
+        assert_eq!(versions[1].title, "Second");
+        assert_eq!(versions[1].artifact.as_ref().unwrap().page_count, Some(7));
+        assert_eq!(
+            versions[1].build.status,
+            BuildStatus::Never,
+            "recorded no state"
+        );
+        // And the one that did not, carrying its own failure and no PDF.
+        assert_eq!(versions[2].title, "First");
+        assert_eq!(versions[2].build.status, BuildStatus::Error);
+        assert!(versions[2].artifact.is_none());
+
+        // An artifact belonging to another engine is not this project's.
+        database
+            .update_project(
+                project.id,
+                ProjectEdit {
+                    engine: Some(Engine::XeLatex),
+                    ..ProjectEdit::default()
+                },
+            )
+            .unwrap();
+        assert!(
+            database
+                .list_versions(project.id)
+                .unwrap()
+                .iter()
+                .all(|version| version.artifact.is_none()),
+            "versions built by another engine are not comparable"
         );
     }
 
@@ -1664,11 +1809,10 @@ mod tests {
         };
 
         let reopened = Repository::open(&database_path).unwrap();
-        let state = reopened.build_state(project_id, &SourceRef::Worktree).unwrap();
+        let state = reopened
+            .build_state(project_id, &SourceRef::Worktree)
+            .unwrap();
         assert_eq!(state.status, BuildStatus::Interrupted);
         assert!(state.error_summary.unwrap().contains("Press closed"));
     }
-
-
-
 }

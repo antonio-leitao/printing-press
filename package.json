@@ -10,6 +10,9 @@
     "install:app": "sh scripts/install-app.sh",
     "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
     "test:frontend": "node --test tests/*.test.mjs",
+    "test:backend": "cargo test --manifest-path src-tauri/Cargo.toml",
+    "lint:backend": "cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings",
+    "test": "npm run check && npm run test:frontend && npm run lint:backend && npm run test:backend",
     "tauri": "tauri"
   },
   "devDependencies": {

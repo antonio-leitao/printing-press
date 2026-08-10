@@ -162,10 +162,10 @@ export type SearchHit = {
   height: number;
 };
 
+/** Whether a tool is installed, and where. Nothing asks it for its version. */
 export type ToolInfo = {
   available: boolean;
   path: string | null;
-  version: string | null;
 };
 
 /** One document a path resolved to. `projectId` is set when Press has it already. */
