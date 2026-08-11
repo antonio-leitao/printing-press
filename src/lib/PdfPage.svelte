@@ -142,14 +142,19 @@
   .page {
     position: relative;
     margin: 0 auto 16px;
-    background: var(--card);
+    background: var(--sheet);
     box-shadow: var(--shadow-md);
   }
 
   /* The paper under the drawing. It shows before a page has been drawn, and a
-     white flash there is the one thing an inverted page must not do. */
+     white flash there is the one thing an inverted page must not do.
+
+     Nothing else changes: the page is lighter than the ground it rests on here
+     exactly as it is in the light, so it says where it ends by itself. The
+     shadow stays for the same reason it is there in the light, and does much
+     less — a contact shadow on a ground this dark has little to fall on. */
   .page.inverted {
-    background: #101010;
+    background: var(--sheet-inverted);
   }
 
   /* Invisible until the pointer is on it, and then only a wash: the document

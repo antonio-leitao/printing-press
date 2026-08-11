@@ -204,20 +204,46 @@ fn to_rgba(samples: &[u8], components: u8) -> Vec<u8> {
     rgba
 }
 
-/// Turns a page inside out for reading in the dark: paper goes black, ink goes
-/// white, and everything with a colour keeps it.
+/// The two colours an inverted page is drawn between: what paper becomes, and
+/// what ink becomes. They are Fandango's `lines` and `text` — the same palette
+/// the interface is dressed in — and `--sheet-inverted` in `app.css` is the
+/// first of them, so the sheet a page rests on and the paper drawn onto it are
+/// one colour.
+///
+/// Paper is not the darkest colour in the palette, and that is the point: the
+/// ground the viewer lays a page on is, and a page has to be brighter than the
+/// ground under it to read as a page. It is the same relation the light theme
+/// has, where paper is white and the ground beside it is not quite.
+///
+/// It is a quieter relation than the light one, though — a shade narrower, and
+/// without the shadow that also picks a page out in the light, since a contact
+/// shadow on a ground this dark has almost nothing to fall on. That is the
+/// intention: a page read in the dark should sit in the room rather than
+/// announce itself.
+///
+/// Ink stops well short of white for its own reason: maximum contrast over a
+/// page's worth of text is what makes reading in the dark tiring.
+const INVERTED_PAPER: [u8; 3] = [0x0e, 0x11, 0x14];
+const INVERTED_INK: [u8; 3] = [0xbb, 0xbb, 0xbb];
+
+/// Turns a page inside out for reading in the dark: paper goes to near black,
+/// ink comes back a light grey, and everything with a colour keeps it.
 ///
 /// Only the brightness is flipped. Each pixel's luminance is inverted the way a
-/// grey would be — through sRGB's own curve, so mid grey lands back on mid grey
-/// — and the three channels are then scaled together to reach it. Scaling them
-/// together is what keeps the colour: the ratios between them are untouched, so
-/// a red curve comes back red rather than cyan, which is where a per-channel
-/// inversion sends it. MuPDF's own `invert` and `tint` are both per-channel.
+/// grey would be — through sRGB's own curve, so a midtone stays a midtone —
+/// and the result is then read off the ramp between the two ends above. A grey
+/// takes that ramp exactly, which is what puts paper and ink precisely on their
+/// colours. Anything with a hue is instead scaled to the ramp's brightness with
+/// its channel ratios untouched, so a red curve comes back red rather than
+/// cyan, which is where a per-channel inversion sends it; MuPDF's own `invert`
+/// and `tint` are both per-channel. The two are blended by how much colour the
+/// pixel actually had, so there is no seam between a grey and a near-grey.
 ///
 /// Two honest costs. A light saturated colour has to come back dark to have
-/// been inverted at all, so yellow reads as olive. And a colour whose scaled
-/// form leaves what a screen can show is clipped to the edge of it, which is
-/// why this does not perfectly undo itself for anything vivid.
+/// been inverted at all, so yellow reads as olive. And this no longer undoes
+/// itself: the ramp is narrower than the range it maps from, so a page put
+/// through it twice comes back flatter. Nothing does that — inversion is a way
+/// of drawing the original page, never of drawing an inverted one.
 fn darken(samples: &mut [u8]) {
     for pixel in samples.chunks_exact_mut(4) {
         let red = LINEAR[pixel[0] as usize];
@@ -229,21 +255,54 @@ fn darken(samples: &mut [u8]) {
         // roughly how brightness is seen, and inverting there is what makes the
         // flip symmetric instead of dragging every midtone down.
         let flipped = 255 - encoded(luminance);
-        let target = LINEAR[flipped as usize];
+        let (ground, target) = RAMP[flipped as usize];
 
-        if luminance <= f32::EPSILON {
-            // Black has no colour to keep, and nothing to scale by.
-            pixel[0] = flipped;
-            pixel[1] = flipped;
-            pixel[2] = flipped;
+        // How much colour there is to keep. Measured against the brightest
+        // channel, so it is a proportion rather than an amount: a dark red is
+        // as red as a light one.
+        let high = red.max(green).max(blue);
+        let low = red.min(green).min(blue);
+        let chroma = if high <= f32::EPSILON {
+            0.0
+        } else {
+            (high - low) / high
+        };
+        if chroma <= f32::EPSILON {
+            // A grey, which is most of a page. Straight onto the ramp.
+            pixel[..3].copy_from_slice(&ground);
             continue;
         }
+
+        // `high` is above epsilon here, so the luminance cannot be zero.
         let factor = target / luminance;
-        pixel[0] = encoded(red * factor);
-        pixel[1] = encoded(green * factor);
-        pixel[2] = encoded(blue * factor);
+        for (channel, value) in [red, green, blue].into_iter().enumerate() {
+            let scaled = encoded(value * factor);
+            pixel[channel] = mix(ground[channel], scaled, chroma);
+        }
     }
 }
+
+/// Blends `from` toward `to`, with `amount` in 0..=1.
+fn mix(from: u8, to: u8, amount: f32) -> u8 {
+    let from = f32::from(from);
+    (from + (f32::from(to) - from) * amount).round() as u8
+}
+
+/// The ramp an inverted page is drawn on, and the linear luminance of each of
+/// its steps. Both are read once per pixel, so both are counted out in advance
+/// rather than worked out a few million times.
+static RAMP: std::sync::LazyLock<[([u8; 3], f32); 256]> = std::sync::LazyLock::new(|| {
+    std::array::from_fn(|index| {
+        let amount = index as f32 / 255.0;
+        let step: [u8; 3] = std::array::from_fn(|channel| {
+            mix(INVERTED_PAPER[channel], INVERTED_INK[channel], amount)
+        });
+        let luminance = 0.2126 * LINEAR[step[0] as usize]
+            + 0.7152 * LINEAR[step[1] as usize]
+            + 0.0722 * LINEAR[step[2] as usize];
+        (step, luminance)
+    })
+});
 
 /// sRGB's transfer curve, both ways, as tables. A page is millions of pixels
 /// and this runs on every one of them, so neither direction can afford `powf`.
@@ -745,9 +804,12 @@ mod tests {
     /// being read in the dark, figures included.
     #[test]
     fn inverting_a_page_flips_lightness_and_leaves_colour_alone() {
-        // Paper and ink trade places.
-        assert_eq!(inverted(255, 255, 255), [0, 0, 0]);
-        assert_eq!(inverted(0, 0, 0), [255, 255, 255]);
+        // Paper and ink trade places, landing exactly on the two ends of the
+        // ramp — the same near black the interface uses, and a grey short of
+        // white. Exactly, because paper meets `--sheet-inverted` at the edge of
+        // the page and a near miss there would show as a seam.
+        assert_eq!(inverted(255, 255, 255), INVERTED_PAPER);
+        assert_eq!(inverted(0, 0, 0), INVERTED_INK);
 
         // A red stays red. Inverting the channels would send it to cyan, which
         // is what MuPDF's own invert and tint both do.
@@ -771,38 +833,82 @@ mod tests {
             "a dark green and a light one swap: {was_dark:?} {was_light:?}"
         );
 
-        // Mid grey is close to where it started, which is what makes the flip
-        // symmetric rather than a darkening.
+        // Mid grey lands mid ramp, which is what makes the flip symmetric
+        // rather than a darkening. Mid ramp, not mid range: the ramp no longer
+        // reaches either end of what a screen can show.
         let grey = inverted(128, 128, 128);
-        assert!(
-            grey.iter().all(|channel| (100..=160).contains(channel)),
-            "mid grey stays mid: {grey:?}"
+        let middle = RAMP[127].0;
+        for (channel, expected) in grey.iter().zip(middle.iter()) {
+            assert!(
+                channel.abs_diff(*expected) <= 2,
+                "mid grey stays mid: {grey:?} against {middle:?}"
+            );
+        }
+    }
+
+    /// The sheet a page rests on is set in CSS and the paper drawn onto it is
+    /// set here, and the two have to be one colour. The drawing covers the
+    /// sheet exactly, so a difference does not show as a wrong page — it shows
+    /// as a seam at the edge, and only for as long as it takes the bitmap to
+    /// arrive, which is the kind of thing that survives a lot of looking at.
+    #[test]
+    fn the_stylesheet_agrees_on_what_paper_becomes() {
+        let stylesheet = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../src/app.css");
+        let css = std::fs::read_to_string(&stylesheet)
+            .unwrap_or_else(|error| panic!("{}: {error}", stylesheet.display()));
+        let declared = css
+            .lines()
+            .find_map(|line| line.trim().strip_prefix("--sheet-inverted:"))
+            .map(|value| value.trim().trim_end_matches(';').to_lowercase())
+            .expect("app.css declares --sheet-inverted");
+        let [red, green, blue] = INVERTED_PAPER;
+        assert_eq!(
+            declared,
+            format!("#{red:02x}{green:02x}{blue:02x}"),
+            "--sheet-inverted and INVERTED_PAPER have to be the same colour"
         );
     }
 
-    /// Twice over is where it started, for everything a screen can hold at both
-    /// ends of the flip. A vivid colour is not one of those: inverting it takes
-    /// it past what can be shown, it is clipped there, and what was clipped
-    /// away cannot come back. Close enough to still be the same colour is all
-    /// that is promised.
+    /// Every grey on the page lands on the ramp between the two ends, in order.
+    /// Greys are almost all of a page — the text, the rules, the margins — so
+    /// this is the property that decides what reading in the dark looks like.
     #[test]
-    fn inverting_twice_returns_the_page() {
-        for grey in [0, 64, 128, 200, 255] {
-            let once = inverted(grey, grey, grey);
-            let twice = inverted(once[0], once[1], once[2]);
-            assert_eq!(twice, [grey, grey, grey], "a grey is exactly reversible");
-        }
-
-        for original in [[140, 90, 90], [90, 110, 140], [30, 30, 30]] {
-            let once = inverted(original[0], original[1], original[2]);
-            let twice = inverted(once[0], once[1], once[2]);
-            for (before, after) in original.iter().zip(twice.iter()) {
+    fn greys_land_on_the_ramp_in_order() {
+        let mut previous: Option<[u8; 3]> = None;
+        for level in (0..=255).rev() {
+            let step = inverted(level, level, level);
+            // On the ramp: a grey has no colour to keep, so it takes it exactly.
+            assert!(
+                RAMP.iter().any(|(colour, _)| *colour == step),
+                "grey {level} landed off the ramp at {step:?}"
+            );
+            // Darker source, lighter result — the flip, with no reversals.
+            if let Some(previous) = previous {
                 assert!(
-                    before.abs_diff(*after) <= 3,
-                    "{original:?} came back as {twice:?}"
+                    luma(step) >= luma(previous),
+                    "grey {level} broke the order: {step:?} after {previous:?}"
                 );
             }
+            previous = Some(step);
         }
+    }
+
+    /// Nothing inverts an already inverted page — the flag picks how the
+    /// original is drawn — but the ramp being narrower than the range it maps
+    /// from is worth pinning down, because it is the cost of not using pure
+    /// black and white and the reason the round trip is gone.
+    #[test]
+    fn the_ramp_is_narrower_than_the_page_it_maps_from() {
+        let paper = inverted(255, 255, 255);
+        let ink = inverted(0, 0, 0);
+        assert!(
+            luma(ink) - luma(paper) < 255.0 * 0.75,
+            "the ramp is deliberately short of the full range: {paper:?} to {ink:?}"
+        );
+        assert!(
+            luma(ink) - luma(paper) > 255.0 * 0.5,
+            "but still most of it, or the page would be flat: {paper:?} to {ink:?}"
+        );
     }
 
     fn luma(pixel: [u8; 3]) -> f32 {

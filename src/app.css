@@ -14,7 +14,15 @@
         a status signal and stays muted.
 
    Type is Public Sans throughout — one family, separated by weight and size
-   rather than by mixing families. */
+   rather than by mixing families.
+
+   There are two themes. `:root` is the light one and is the whole design above;
+   `[data-theme="dark"]` re-points the same tokens at Fandango. The rules
+   themselves never mention a theme — every one of them is written against a
+   token, so the dark theme is a list of values and not a second stylesheet. The
+   selector is an attribute rather than `:root[…]` on purpose: custom properties
+   inherit, so it can be set on <html> for the whole app or on one subtree while
+   the rest stays light. */
 
 /* Public Sans, served locally from /static/fonts (no network fetch at runtime). */
 @font-face {
@@ -50,6 +58,8 @@
 }
 
 :root {
+  color-scheme: light;
+
   /* Surfaces, from the ground up. --desk is the one below everything, and the
      only place it shows is where the window overscrolls past the page. */
   --desk: #efeee9;
@@ -58,6 +68,41 @@
   --paper-3: #e8e8e4;
   --card: #ffffff;
   --card-2: #f7f7f5;
+
+  /* The shelf pinned documents stand on. Its own surface rather than a band
+     like any other, because it is the one band with sheets resting on it, and
+     so the one that has to stay on the darker side of them — see --sheet. A
+     hover tint would be lighter than the pages it carries. */
+  --shelf: #f1f1ee;
+
+  /* A sheet of paper, as opposed to a surface of the interface: what a PDF page
+     and a thumbnail are drawn on.
+
+     A sheet and the ground it rests on are a pair, and one rule pairs them in
+     both themes: the sheet is the brighter of the two, and --paper is the
+     ground. Light is white on near-white; dark is a near-black page on the
+     black the interface is built from. Paper catches the light either way, and
+     everything that lays a page on a ground — the viewer, and the thumbnails in
+     the library — owes the reader that relation.
+
+     The dark pair is the quieter of the two: a shade narrower than the light
+     one, and without the second thing that picks a page out in the light,
+     because a contact shadow on a ground this dark has almost nothing to fall
+     on. That is deliberate — a page read in the dark should sit in the room
+     rather than announce itself — but it does mean the edge of a page is held
+     by this one step and nothing else, so the two values are closer coupled
+     than they look.
+
+     Neither value has a dark variant, because which of the two is in play is
+     the document's business and not the theme's — see `darken` in render.rs.
+     --sheet-inverted must equal INVERTED_PAPER there exactly, or the drawn
+     paper and the sheet under it meet in a seam; a test holds the two files
+     together. */
+  --sheet: #ffffff;
+  --sheet-inverted: #0e1114;
+
+  /* How much of what is behind a modal still shows. */
+  --backdrop: rgb(32 32 30 / 22%);
 
   /* Ink */
   --ink: #20201e;
@@ -157,9 +202,19 @@
   --shelf-thumb-h: 12.125rem; /* 194px */
   --shelf-gap: 1.75rem; /* 28px */
   --shelf-pad-y: 1.75rem; /* 28px top */
-  --grid-thumb-w: 3.4375rem; /* 55px */
-  --grid-thumb-h: 4.5rem; /* 72px */
-  --grid-cols: 5;
+  --grid-thumb-w: 4rem; /* 64px */
+  --grid-thumb-h: 5.25rem; /* 84px — the same page shape as the shelf's */
+  /* 256px — a card in the grid, and it does not move. How many fit on a row is
+     what a narrower window changes.
+
+     Sized from the words rather than from the row. The thumbnail beside them is
+     a fixed 64px, so every pixel taken off a card comes off the text and off
+     nothing else, and a line like `does not compile · 12 snapshots` still has to
+     sit on one line. This leaves 179px for it — near what it had when the grid
+     was five stretched columns on a full screen, which is the width this is
+     meant to hold on to. Four fit the window Press opens at, five a full
+     screen. */
+  --grid-card-w: 16rem;
   --grid-gap-y: 1.75rem; /* 28px */
   --grid-gap-x: 1.5rem; /* 24px */
   --row-pad: 0.5rem; /* 8px — padding + equal negative margin */
@@ -168,6 +223,75 @@
   --scrollbar-inset: 0.1875rem;
   --scrollbar-thumb: color-mix(in oklab, var(--line-3) 62%, transparent);
   --scrollbar-thumb-hover: color-mix(in oklab, var(--ink-3) 50%, transparent);
+}
+
+/* Fandango — github.com/antonio-leitao/fandango.
+
+   Only values, and only the ones that have to move. Everything derived stays
+   where it is: --accent-strong and its two counterparts are mixed with --ink,
+   and the tints and lines are mixed with --paper, so each of them turns around
+   on its own as soon as those do. In the light theme -strong darkens a hue
+   towards near-black ink; here the same formula lightens it towards --ink at
+   #d4cdc0. That is the right answer both times, and it is written once.
+
+   The surface ladder is the one thing that does not simply swap light for dark.
+   In the light theme a surface that comes forward goes *lighter* than its
+   ground, up to white; the ground is already near-white, so the recessed bands
+   go darker. Here the ground is near-black, so both directions are up: a raised
+   panel and a recessed band are both lighter than what they sit on, and how
+   much lighter is the only thing separating them. Fandango's ladder — base,
+   shade, surfaces, hover — is exactly that, in order. */
+[data-theme="dark"] {
+  color-scheme: dark;
+
+  --desk: #090a0d; /* base */
+  /* base — the ground, and the darkest thing there is. A page is laid on this
+     and is lighter than it, which is the whole of the rule above. */
+  --paper: #090a0d;
+  --card-2: #0c0e11; /* shade — chrome beside the document: footer, history */
+  /* shade — under the sheets it carries, and a step off the ground, exactly as
+     it is in the light. Only the direction of the step turns around. */
+  --shelf: #0c0e11;
+  --paper-3: #13171b; /* surfaces — an empty slot where a page would be */
+  --card: #13171b; /* surfaces — what is genuinely raised: dialog, menu, peek */
+  --paper-2: #1c2329; /* hover — one step off whatever it is drawn on */
+
+  /* Brightest to quietest, the same three tiers read the other way up. */
+  --ink: #d4cdc0; /* foreground */
+  --ink-2: #bbbbbb; /* text */
+  --ink-3: #87959b; /* subtext */
+
+  /* A hairline has to be lighter than its surface here, not darker. */
+  --line: #1c2329; /* hover */
+  --line-2: #2e3c44; /* muted */
+  --line-3: #536e7a; /* subdued — also the colour a disabled control goes */
+
+  /* The one colour that is not taken from Fandango. It is the light theme's own
+     accent carried over: same hue, same chroma — 158.5° and 0.072 in oklch —
+     lifted in lightness until dark text sits on it, and nothing else changed.
+     Fandango's pistachio was tried here and is a different colour rather than
+     the same one after dark: 35° yellower, and brighter than anything else on
+     screen. The primary action should look like Press in either theme. */
+  --accent: #8ac0a0;
+  --amber: #f2b56b; /* yellow */
+  --brick: #f2856d; /* salmon */
+  --blue: #8ca7d7; /* blue */
+  /* The accent is now a light colour, so what sits on it is the ground rather
+     than white — Fandango's own completion pair. */
+  --on-accent: #090a0d;
+
+  /* Black on near-black does almost nothing, so the contact shadows under a
+     sheet are deeper here and still do less than they do in the light: what
+     separates a white page from this ground is the page. The two tall ones
+     carry a menu over the document and are the shadows that still earn their
+     keep, so they take most of the increase. */
+  --shadow-sm: 0 0.4px 2px rgb(0 0 0 / 55%);
+  --shadow-md: 0 1px 2px rgb(0 0 0 / 55%);
+  --shadow-lg: 0 1px 2px rgb(0 0 0 / 45%), 0 8px 20px -6px rgb(0 0 0 / 65%);
+  --shadow-xl: 0 2px 8px -2px rgb(0 0 0 / 50%), 0 16px 32px -12px rgb(0 0 0 / 70%);
+
+  /* Dimming a dark room needs more than dimming a lit one. */
+  --backdrop: rgb(9 10 13 / 60%);
 }
 
 *::-webkit-scrollbar {

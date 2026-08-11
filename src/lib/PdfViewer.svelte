@@ -6,6 +6,7 @@
   import { initialKeyState, resolveKey, type KeyState, type ViewerAction } from '$lib/pdf-keys';
   import { indexAt } from '$lib/pdf-layout';
   import { PageVisibilityTracker } from '$lib/pdf-visibility';
+  import { theme } from '$lib/theme.svelte';
   import type { ArtifactSummary, LinkBox, PageSize } from '$lib/types';
 
   let {
@@ -92,11 +93,11 @@
   let sized = false;
 
   /**
-   * Whether the page is drawn for a dark room. Belongs to the viewer and to the
-   * document it is showing: opening another one starts light again, the way
-   * zoom does.
+   * Which way round the page is drawn. Not this viewer's to hold: a dark page
+   * inside a Press that stayed light is a page at odds with the room, so the
+   * theme decides, and ⌃r below throws that switch rather than a local one.
    */
-  let inverted = $state(false);
+  const inverted = $derived(theme.isDark);
 
   let glideX: number | null = null;
   let glideY: number | null = null;
@@ -546,7 +547,8 @@
         jump(action.sign);
         return;
       case 'invert':
-        inverted = !inverted;
+        // The whole of Press, not only the page under the pointer.
+        theme.toggle();
     }
   }
 
@@ -666,13 +668,6 @@
     const wanted = `${next.id}:${next.revision}`;
     if (wanted === untrack(() => measured)) return;
     const request = ++generation;
-
-    // A different document is read fresh, in the light. Switching versions
-    // inside one project is not that — it is the same document, and comparing
-    // two of its versions should not turn the lights back on halfway.
-    if (next.projectId !== untrack(() => shown?.projectId)) {
-      untrack(() => (inverted = false));
-    }
 
     // Geometry for a whole document costs a few milliseconds, so the layout is
     // known before any page is drawn and the page counter is right immediately.

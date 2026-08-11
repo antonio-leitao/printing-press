@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount, untrack, type Component } from 'svelte';
   import { fade } from 'svelte/transition';
-  import { Download, Pencil, Pin, PinOff, Trash2 } from '@lucide/svelte';
+  import { Download, Moon, Pencil, Pin, PinOff, Sun, Trash2 } from '@lucide/svelte';
   import { listen } from '@tauri-apps/api/event';
   import { open } from '@tauri-apps/plugin-dialog';
   import PdfThumbnail from '$lib/PdfThumbnail.svelte';
@@ -9,6 +9,7 @@
   import { api, errorMessage } from '$lib/api';
   import { fail, notify } from '$lib/messages.svelte';
   import { modal } from '$lib/modal';
+  import { theme } from '$lib/theme.svelte';
   import {
     ENGINES,
     WORKTREE,
@@ -28,7 +29,7 @@
   /** Matches the `.pinned-card` track width below, so nothing larger is drawn. */
   const PINNED_THUMB_WIDTH = 150
   /** Likewise for `.project-thumb`. */
-  const GRID_THUMB_WIDTH = 55
+  const GRID_THUMB_WIDTH = 64
 
   const KEY_HELP: Array<[string, string]> = [
     ['j / k', 'scroll down / up'],
@@ -42,7 +43,7 @@
     ['+ / -', 'zoom in / out'],
     ['0', 'actual size'],
     ['a / s', 'fit page / fit width'],
-    ['⌃r', 'invert the page, for reading in the dark'],
+    ['⌃r', 'the dark theme — the page, and Press around it'],
     ['click', 'follow a reference, a citation or a link'],
     ['⌘click', 'the source behind a place in the PDF'],
     ['R', 'rebuild this version'],
@@ -127,6 +128,11 @@
 
   /** Whether the reader is on screen at all, whoever owns what it is showing. */
   const reading = $derived(activeProject !== null || viewing !== null);
+
+  /// A dark library shows its documents the way a dark reader would: the page a
+  /// thumbnail is of is drawn inverted, so the shelf holds the same pages you
+  /// would be reading rather than a row of white rectangles.
+  const dark = $derived(theme.isDark);
 
   // Viewer state, surfaced in the footer.
   let viewerPage = $state(1);
@@ -1199,11 +1205,24 @@
   <main class="library">
     <div class="titlebar" data-tauri-drag-region></div>
     <header class="library-header">
-      <div>
+      <div class="library-title">
         <h1>Printing Press</h1>
         <p class="quiet">A reader and compiler for LaTeX and Markdown documents</p>
       </div>
       <div class="library-actions">
+        <!-- Shows what it will do rather than where it is: a moon to go dark. -->
+        <button
+          class="theme-toggle"
+          onclick={() => theme.toggle()}
+          title={dark ? 'Light theme' : 'Dark theme'}
+          aria-label={dark ? 'Switch to the light theme' : 'Switch to the dark theme'}
+        >
+          {#if dark}
+            <Sun size={16} strokeWidth={1.75} aria-hidden="true" />
+          {:else}
+            <Moon size={16} strokeWidth={1.75} aria-hidden="true" />
+          {/if}
+        </button>
         <button onclick={chooseDocument} disabled={busy}>
           {busy ? 'Opening…' : 'Open document'}
         </button>
@@ -1234,11 +1253,13 @@
                 oncontextmenu={(event) => openMenu(event, projectMenu(project))}
                 disabled={busy || !project.available}
               >
-                <span class="pinned-thumb">
+                <span class="pinned-thumb" class:inverted={dark}>
                   {#if project.artifact}
-                    {#key project.artifact.revision}
-                      <PdfThumbnail artifact={project.artifact} width={PINNED_THUMB_WIDTH} />
-                    {/key}
+                    <PdfThumbnail
+                      artifact={project.artifact}
+                      width={PINNED_THUMB_WIDTH}
+                      invert={dark}
+                    />
                   {:else}
                     <span class="missing-thumbnail">No PDF</span>
                   {/if}
@@ -1266,11 +1287,13 @@
               oncontextmenu={(event) => openMenu(event, projectMenu(project))}
               disabled={busy || !project.available}
             >
-              <span class="project-thumb">
+              <span class="project-thumb" class:inverted={dark}>
                 {#if project.artifact}
-                  {#key project.artifact.revision}
-                    <PdfThumbnail artifact={project.artifact} width={GRID_THUMB_WIDTH} />
-                  {/key}
+                  <PdfThumbnail
+                    artifact={project.artifact}
+                    width={GRID_THUMB_WIDTH}
+                    invert={dark}
+                  />
                 {:else}
                   <span class="missing-thumbnail">No PDF</span>
                 {/if}
@@ -1806,249 +1829,286 @@
   }
 
   /* The title and the button hang off the same baseline rather than being
-   centred against each other. At a narrow window the button drops below the
-   title instead of squeezing it off the screen. */
+     centred against each other. At a narrow window the button drops below the
+     title instead of squeezing it off the screen. */
   .library-header {
-  display: flex;
-  align-items: flex-end;
-  justify-content: space-between;
-  gap: 1.5rem;
-  flex-wrap: wrap;
-  padding: 0 var(--gutter) 1.625rem;
+    display: flex;
+    align-items: flex-end;
+    justify-content: space-between;
+    gap: 1.5rem;
+    flex-wrap: wrap;
+    padding: 0 var(--gutter) 1.625rem;
   }
 
-  .library-header > div {
-  display: flex;
-  flex-direction: column;
-  /* The title sets line-height 1, so most of the space between the two lines
-     is this gap; the sentence below brings a little of its own. */
-  gap: 0.375rem;
+  /* The title block only. Named rather than matched as `> div`, which also
+     catches the actions beside it and stood them on end. */
+  .library-title {
+    display: flex;
+    flex-direction: column;
+    /* The title sets line-height 1, so most of the space between the two lines
+       is this gap; the sentence below brings a little of its own. */
+    gap: 0.375rem;
   }
 
   .library-header h1 {
-  margin: 0;
-  font-size: var(--fs-title);
-  font-weight: var(--fw-title);
-  line-height: 1;
-  letter-spacing: var(--tracking-title);
-  color: var(--ink);
+    margin: 0;
+    font-size: var(--fs-title);
+    font-weight: var(--fw-title);
+    line-height: 1;
+    letter-spacing: var(--tracking-title);
+    color: var(--ink);
   }
 
   /* A sentence about what Press is, not a label: read once and then ignored, so
-   it sits at body size in the quietest ink and takes no tracking of its own. */
+     it sits at body size in the quietest ink and takes no tracking of its own. */
   .library-header p {
-  margin: 0;
-  font-size: var(--fs-card);
-  font-weight: 400;
-  line-height: 1.35;
-  letter-spacing: normal;
-  color: var(--ink-3);
+    margin: 0;
+    font-size: var(--fs-card);
+    font-weight: 400;
+    line-height: 1.35;
+    letter-spacing: normal;
+    color: var(--ink-3);
   }
 
   /* The one solid control on the page: accent fill, white text, and flat — the
-   only thing here that is coloured rather than shadowed. */
+     only thing here that is coloured rather than shadowed. */
   .library-actions button {
-  padding: 0.5625rem 0.9375rem;
-  border: 0;
-  border-radius: var(--radius);
-  background: var(--accent);
-  color: var(--on-accent);
-  font-family: var(--font-sans);
-  font-size: var(--fs-body);
-  font-weight: 500;
-  line-height: 1;
-  cursor: pointer;
-  transition: background var(--duration);
+    padding: 0.5625rem 0.9375rem;
+    border: 0;
+    border-radius: var(--radius);
+    background: var(--accent);
+    color: var(--on-accent);
+    font-family: var(--font-sans);
+    font-size: var(--fs-body);
+    font-weight: 500;
+    line-height: 1;
+    cursor: pointer;
+    transition: background var(--duration);
   }
 
   .library-actions button:hover:not(:disabled) {
-  background: var(--accent-strong);
+    background: var(--accent-strong);
+  }
+
+  /* The theme is a preference, not an action, so it is an icon in the quietest
+     ink beside the one filled control rather than a second thing competing with
+     it. Two classes, so it outranks the rule above without disowning it. */
+  .library-actions .theme-toggle {
+    display: grid;
+    place-items: center;
+    padding: 0.5rem;
+    border-radius: var(--radius);
+    background: none;
+    color: var(--ink-3);
+    transition: background var(--duration), color var(--duration);
+  }
+
+  .library-actions .theme-toggle:hover {
+    background: var(--paper-2);
+    color: var(--ink);
   }
 
   .pinned-row {
-  display: flex;
-  gap: var(--shelf-gap);
-  margin: 0;
-  /* Even top and bottom. The deeper foot was there to balance a two-line
-     caption; with one line the shelf can close up. */
-  padding: var(--shelf-pad-y) var(--gutter);
-  border-top: var(--bw) solid var(--line);
-  border-bottom: var(--bw) solid var(--line);
-  background: var(--paper-2);
+    display: flex;
+    /* Same bargain as the grid below: a page keeps its size, and a shelf too
+       short for all of them holds the rest on a second row. Without this the
+       shelf ran off the side and took the window's horizontal scrollbar with
+       it, which moved the whole library rather than the shelf. */
+    flex-wrap: wrap;
+    gap: var(--shelf-gap);
+    margin: 0;
+    /* Even top and bottom. The deeper foot was there to balance a two-line
+       caption; with one line the shelf can close up. */
+    padding: var(--shelf-pad-y) var(--gutter);
+    border-top: var(--bw) solid var(--line);
+    border-bottom: var(--bw) solid var(--line);
+    background: var(--shelf);
   }
 
   /* No card chrome: the page image is the card. */
   .pinned-card {
-  border: 0;
-  border-radius: 0;
-  overflow: visible;
-  width: var(--shelf-thumb-w);
-  flex: none;
+    border: 0;
+    border-radius: 0;
+    overflow: visible;
+    width: var(--shelf-thumb-w);
+    flex: none;
   }
 
   .pinned-open {
-  display: flex;
-  flex-direction: column;
-  gap: 0.75rem;
-  width: 100%;
-  padding: 0;
-  border: 0;
-  background: none;
-  text-align: left;
-  cursor: pointer;
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+    width: 100%;
+    padding: 0;
+    border: 0;
+    background: none;
+    text-align: left;
+    cursor: pointer;
   }
 
   /* A card is a button, and dragging across one should not leave a smear of
-   selected filename behind. */
+     selected filename behind. */
   .pinned-open,
   .project-open {
-  user-select: none;
-  -webkit-user-select: none;
+    user-select: none;
+    -webkit-user-select: none;
   }
 
   /* The radius and the shadow live on the page image rather than on the card
-   around it, because the page image is what actually looks like paper. */
+     around it, because the page image is what actually looks like paper. */
   .pinned-thumb {
-  display: block;
-  width: var(--shelf-thumb-w);
-  height: var(--shelf-thumb-h);
-  overflow: hidden;
-  border-radius: var(--radius);
-  background: var(--card);
-  box-shadow: var(--shadow-md);
-  transition: box-shadow var(--duration);
+    display: block;
+    width: var(--shelf-thumb-w);
+    height: var(--shelf-thumb-h);
+    overflow: hidden;
+    border-radius: var(--radius);
+    background: var(--sheet);
+    box-shadow: var(--shadow-md);
+    transition: box-shadow var(--duration);
   }
 
   /* Settling rather than lifting: under the pointer the page presses down onto
-   the shelf and its shadow tightens. */
+     the shelf and its shadow tightens. */
   .pinned-open:hover:not(:disabled) .pinned-thumb {
-  box-shadow: var(--shadow-sm);
+    box-shadow: var(--shadow-sm);
+  }
+
+  /* A thumbnail is a page, so it takes the same sheet the viewer would give it
+     — the drawn one, once the drawing is inverted. Without this the paper the
+     renderer produces would sit on a white card for as long as it took to
+     arrive, which is the flash the viewer is careful to avoid. */
+  .pinned-thumb.inverted,
+  .project-thumb.inverted {
+    background: var(--sheet-inverted);
   }
 
   /* Centred under the page image, and the only line on the card. */
   .pinned-name {
-  width: 100%;
-  min-width: 0;
-  text-align: center;
+    width: 100%;
+    min-width: 0;
+    text-align: center;
   }
 
+  /* Cards keep their size and the row keeps as many as it can hold. A shelf
+     that gets shorter holds fewer things; it does not shrink them. */
   .project-grid {
-  display: grid;
-  grid-template-columns: repeat(var(--grid-cols), minmax(0, 1fr));
-  gap: var(--grid-gap-y) var(--grid-gap-x);
-  padding: 1.875rem var(--gutter) 0;
+    display: grid;
+    grid-template-columns: repeat(auto-fill, var(--grid-card-w));
+    justify-content: start;
+    gap: var(--grid-gap-y) var(--grid-gap-x);
+    padding: 1.875rem var(--gutter) 0;
   }
 
   .project-card {
-  display: flex;
-  align-items: center;
-  gap: 0.8125rem;
-  padding: var(--row-pad);
-  margin: calc(var(--row-pad) * -1);
-  border: 0;
-  border-radius: var(--radius-sm);
-  overflow: visible;
-  transition: background var(--duration);
+    display: flex;
+    align-items: center;
+    gap: 0.8125rem;
+    padding: var(--row-pad);
+    margin: calc(var(--row-pad) * -1);
+    border: 0;
+    border-radius: var(--radius-sm);
+    overflow: visible;
+    transition: background var(--duration);
   }
 
   /* The row lifts to card white under the pointer. Nothing else marks it: the
-   thumbnail keeps its own shadow either way. */
+     thumbnail keeps its own shadow either way. */
   .project-card:hover {
-  background: var(--card);
+    background: var(--card);
   }
 
   .project-open {
-  /* The text block is shorter than the page image, so it is centred against
-     it rather than hung from the top edge. */
-  align-items: center;
-  gap: 0.8125rem;
-  display: flex;
-  flex: 1;
-  min-width: 0;
-  padding: 0;
-  border: 0;
-  background: none;
-  text-align: left;
-  cursor: pointer;
+    /* The text block is shorter than the page image, so it is centred against
+       it rather than hung from the top edge. */
+    align-items: center;
+    gap: 0.8125rem;
+    display: flex;
+    flex: 1;
+    min-width: 0;
+    padding: 0;
+    border: 0;
+    background: none;
+    text-align: left;
+    cursor: pointer;
   }
 
   .project-thumb {
-  display: block;
-  flex: none;
-  width: var(--grid-thumb-w);
-  height: var(--grid-thumb-h);
-  overflow: hidden;
-  border-radius: var(--radius-sm);
-  background: var(--card);
-  box-shadow: var(--shadow-sm);
+    display: block;
+    flex: none;
+    width: var(--grid-thumb-w);
+    height: var(--grid-thumb-h);
+    overflow: hidden;
+    border-radius: var(--radius-sm);
+    background: var(--sheet);
+    box-shadow: var(--shadow-sm);
   }
 
   .project-lines {
-  gap: 0.375rem;
-  display: grid;
-  flex: 1;
-  min-width: 0;
+    gap: 0.375rem;
+    display: grid;
+    flex: 1;
+    min-width: 0;
   }
 
   /* When the PDF under the thumbnail was made, and how many versions are kept —
-   the faintest tier, and the only line that changes on its own. */
+     the faintest tier, and the only line that changes on its own. */
   .project-lines .when {
-  overflow: hidden;
-  font-size: var(--fs-meta);
-  line-height: 1;
-  color: var(--ink-3);
-  text-overflow: ellipsis;
-  white-space: nowrap;
+    overflow: hidden;
+    font-size: var(--fs-meta);
+    line-height: 1;
+    color: var(--ink-3);
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   /* One recipe for both shelf and grid: a document's name and its kind read the
-   same wherever it is shown. */
+     same wherever it is shown. */
   .kind {
-  overflow: hidden;
-  color: var(--ink-3);
-  font: 600 var(--fs-label) var(--font-sans);
-  letter-spacing: var(--tracking-label);
-  text-transform: uppercase;
-  /* A narrow column clips this line rather than pushing into its neighbour;
-     the name above it is the part that has to survive. */
-  text-overflow: ellipsis;
-  white-space: nowrap;
+    overflow: hidden;
+    color: var(--ink-3);
+    font: 600 var(--fs-label) var(--font-sans);
+    letter-spacing: var(--tracking-label);
+    text-transform: uppercase;
+    /* A narrow column clips this line rather than pushing into its neighbour;
+       the name above it is the part that has to survive. */
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   .name {
-  display: -webkit-box;
-  overflow: hidden;
-  font-size: var(--fs-card);
-  font-weight: 600;
-  line-height: 1.25;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 2;
-  line-clamp: 2;
-  color: var(--ink);
-  overflow-wrap: anywhere;
+    display: -webkit-box;
+    overflow: hidden;
+    font-size: var(--fs-card);
+    font-weight: 600;
+    line-height: 1.25;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    line-clamp: 2;
+    color: var(--ink);
+    overflow-wrap: anywhere;
   }
 
   /* The parent sets the box, so this only has to fill it. */
   .missing-thumbnail {
-  display: grid;
-  width: 100%;
-  height: 100%;
-  place-items: center;
-  background: var(--paper-3);
-  color: var(--ink);
-  font-size: var(--fs-label);
-  text-align: center;
+    display: grid;
+    width: 100%;
+    height: 100%;
+    place-items: center;
+    background: var(--paper-3);
+    color: var(--ink);
+    font-size: var(--fs-label);
+    text-align: center;
   }
 
   /* The gutter is on each section rather than on .library, so this brings its
-   own. */
+     own. */
   .empty-library {
-  padding-inline: var(--gutter);
-  display: grid;
-  place-items: center;
-  align-content: center;
-  min-height: 55vh;
-  text-align: center;
+    padding-inline: var(--gutter);
+    display: grid;
+    place-items: center;
+    align-content: center;
+    min-height: 55vh;
+    text-align: center;
   }
 
   /* -- peek --------------------------------------------------------------- */
@@ -2235,7 +2295,7 @@
   /* Enough to say that what is behind is not the thing to click, and no more:
      a cutout resting on the desk, not a spotlight on a stage. */
   dialog::backdrop {
-    background: rgb(32 32 30 / 22%);
+    background: var(--backdrop);
   }
 
   /* One step above the dialog's own text, and well below the library's
