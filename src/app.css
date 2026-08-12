@@ -79,19 +79,14 @@
      and a thumbnail are drawn on.
 
      A sheet and the ground it rests on are a pair, and one rule pairs them in
-     both themes: the sheet is the brighter of the two, and --paper is the
-     ground. Light is white on near-white; dark is a near-black page on the
-     black the interface is built from. Paper catches the light either way, and
-     everything that lays a page on a ground — the viewer, and the thumbnails in
-     the library — owes the reader that relation.
+     both themes: paper is the far end of the range and the interface stops
+     short of it. In the light that end is white and the room is a shade below
+     it. In the dark it is black and the room is a shade above. So the two
+     themes are not the same picture at different brightnesses — the relation
+     turns over, and paper is the extreme either way.
 
-     The dark pair is the quieter of the two: a shade narrower than the light
-     one, and without the second thing that picks a page out in the light,
-     because a contact shadow on a ground this dark has almost nothing to fall
-     on. That is deliberate — a page read in the dark should sit in the room
-     rather than announce itself — but it does mean the edge of a page is held
-     by this one step and nothing else, so the two values are closer coupled
-     than they look.
+     Everything that lays a page on a ground owes the reader that relation: the
+     viewer, and the thumbnails on the shelf and in the grid.
 
      Neither value has a dark variant, because which of the two is in play is
      the document's business and not the theme's — see `darken` in render.rs.
@@ -99,7 +94,7 @@
      paper and the sheet under it meet in a seam; a test holds the two files
      together. */
   --sheet: #ffffff;
-  --sheet-inverted: #0e1114;
+  --sheet-inverted: #090a0d;
 
   /* How much of what is behind a modal still shows. */
   --backdrop: rgb(32 32 30 / 22%);
@@ -118,8 +113,12 @@
      colour of a document that built; the other two are status signals,
      desaturated on purpose so that at the size they are used — a line of
      diagnostics, a toast — neither becomes the loudest thing on a page of
-     near-whites. */
-  --accent: #4e8265;
+     near-whites.
+
+     The green is phthalo: 170° in oklch, which is where the pigment sits — a
+     green that leans blue rather than yellow. That hue is the whole character
+     of it, and it is the one thing the dark theme's accent keeps unchanged. */
+  --accent: #137e63;
   --amber: #b08a45;
   --brick: #a04a42;
   /* What is legible on a filled --accent. */
@@ -135,6 +134,15 @@
      -line is a border; -wash is a translucent fill for a hover. Only the
      accent needs all four. */
   --accent-strong: color-mix(in oklab, var(--accent) 84%, var(--ink));
+  /* What a filled accent goes to under the pointer. The same colour as -strong
+     here, and deliberately its own token: -strong is a colour to *read*, and a
+     fill to *press*, and the light theme is what lets one value be both. Mixing
+     toward --ink darkens a fill and darkens text, and in the light that suits
+     both — a darker fill still carries white, darker text still reads on a pale
+     tint. In the dark it suits neither at once, because --ink is light there:
+     what makes the text legible is what makes the fill lose its own text. So
+     the dark theme sends this one the other way. */
+  --accent-hover: var(--accent-strong);
   --accent-tint: color-mix(in oklab, var(--accent) 8%, var(--paper));
   --accent-line: color-mix(in oklab, var(--accent) 45%, transparent);
   --accent-wash: color-mix(in oklab, var(--accent) 12%, transparent);
@@ -244,15 +252,31 @@
 [data-theme="dark"] {
   color-scheme: dark;
 
-  --desk: #090a0d; /* base */
-  /* base — the ground, and the darkest thing there is. A page is laid on this
-     and is lighter than it, which is the whole of the rule above. */
-  --paper: #090a0d;
+  /* The ground is not the bottom of the range here — the page is, and the page
+     is `base`. So the room sits a step above it and the whole ladder follows.
+     It is a close step: near enough that a dark Press stays dark, far enough
+     that the largest surface on screen is not the same black as the documents
+     lying on it. */
+  --desk: #090a0d; /* base — below everything */
+  /* hover — an empty slot where a page would be, and the one surface that goes
+     the other way. In the light it is the darkest thing on screen, further from
+     paper than anything else is, because it has to read as a hole where a page
+     should be. Turned over that makes it the lightest. Anything nearer the
+     bottom of the ladder lands within a step of `base` and an empty slot stops
+     being distinguishable from a document whose first page is blank. */
+  --paper-3: #1c2329;
   --card-2: #0c0e11; /* shade — chrome beside the document: footer, history */
-  /* shade — under the sheets it carries, and a step off the ground, exactly as
-     it is in the light. Only the direction of the step turns around. */
-  --shelf: #0c0e11;
-  --paper-3: #13171b; /* surfaces — an empty slot where a page would be */
+  --paper: #0e1114; /* lines — the ground */
+  /* The shelf pinned documents stand on. It carries sheets, so it has to sit
+     clear of them on the side the interface is on: in the light it is below the
+     pages, here it is above them. Same rule, turned over.
+
+     The one value in this block that is not a step of the palette, but between
+     two of them — `lines` and `surfaces`. A full step down lands exactly on the
+     ground and there is no band left; a full step up is louder than a shelf
+     should be. It can afford to be this quiet because the band is drawn as much
+     by the rules above and below it as by its own tint. */
+  --shelf: #111519;
   --card: #13171b; /* surfaces — what is genuinely raised: dialog, menu, peek */
   --paper-2: #1c2329; /* hover — one step off whatever it is drawn on */
 
@@ -261,30 +285,48 @@
   --ink-2: #bbbbbb; /* text */
   --ink-3: #87959b; /* subtext */
 
-  /* A hairline has to be lighter than its surface here, not darker. */
-  --line: #1c2329; /* hover */
-  --line-2: #2e3c44; /* muted */
+  /* A hairline is lighter than its surface here, not darker, and it has to
+     clear --card as well as the ground — a rule drawn inside a menu in the
+     menu's own colour is not a rule. */
+  --line: #2e3c44; /* muted */
+  --line-2: #536e7a; /* subdued */
   --line-3: #536e7a; /* subdued — also the colour a disabled control goes */
 
-  /* The one colour that is not taken from Fandango. It is the light theme's own
-     accent carried over: same hue, same chroma — 158.5° and 0.072 in oklch —
-     lifted in lightness until dark text sits on it, and nothing else changed.
-     Fandango's pistachio was tried here and is a different colour rather than
-     the same one after dark: 35° yellower, and brighter than anything else on
-     screen. The primary action should look like Press in either theme. */
-  --accent: #8ac0a0;
+  /* The one colour that is not taken from Fandango, and very nearly not a
+     change at all: the light theme's phthalo green at the same hue and the same
+     chroma — 170° and 0.100 — lifted 0.02 in lightness and no more.
+
+     It stays a dark fill with white on it, as it is in the light, and that is
+     the point rather than an oversight. Everything in this design absorbs light
+     rather than gives it off; a page is a flat shape resting on a ground. An
+     accent bright enough to carry near-black text has to be lighter than every
+     surface around it, and on a ground this dark that stops being pigment and
+     becomes a lamp — the one thing on screen emitting rather than reflecting.
+     Two earlier attempts were exactly that, and no amount of hue fixed it,
+     because the hue was never what was wrong.
+
+     The 0.02 is not taste. Held at the light theme's own lightness the toast
+     built from this lands at 4.38 against its tint; this clears it. */
+  --accent: #1e8469;
   --amber: #f2b56b; /* yellow */
   --brick: #f2856d; /* salmon */
   --blue: #8ca7d7; /* blue */
-  /* The accent is now a light colour, so what sits on it is the ground rather
-     than white — Fandango's own completion pair. */
-  --on-accent: #090a0d;
+  /* --on-accent keeps the light theme's white. The accent is a dark fill in
+     both themes now, so what sits on it does not change either; Fandango's own
+     `highlight` was tried and lands at 3.80, which white clears at 4.61. */
 
-  /* Black on near-black does almost nothing, so the contact shadows under a
-     sheet are deeper here and still do less than they do in the light: what
-     separates a white page from this ground is the page. The two tall ones
-     carry a menu over the document and are the shadows that still earn their
-     keep, so they take most of the increase. */
+  /* Toward the ground rather than toward the ink, which is the whole of the
+     note on --accent-hover above: pressing a button should not be the moment
+     its label becomes hardest to read. Inherited, the hover lightened this fill
+     and took white on it down to 3.81; going the other way puts it at 5.51,
+     and 90% keeps the button itself clear of the ground at 3.44. */
+  --accent-hover: color-mix(in oklab, var(--accent) 90%, #090a0d);
+
+  /* Deeper than the light theme's, because they fall on a darker ground and a
+     shadow can only take away what is there. The ground sits one step above
+     black, so there is something for a page to cast onto, but not much: these
+     do less work here than in the light, and what actually says where a page
+     ends is the page being darker than the room. */
   --shadow-sm: 0 0.4px 2px rgb(0 0 0 / 55%);
   --shadow-md: 0 1px 2px rgb(0 0 0 / 55%);
   --shadow-lg: 0 1px 2px rgb(0 0 0 / 45%), 0 8px 20px -6px rgb(0 0 0 / 65%);

@@ -205,25 +205,21 @@ fn to_rgba(samples: &[u8], components: u8) -> Vec<u8> {
 }
 
 /// The two colours an inverted page is drawn between: what paper becomes, and
-/// what ink becomes. They are Fandango's `lines` and `text` — the same palette
+/// what ink becomes. They are Fandango's `base` and `text` — the same palette
 /// the interface is dressed in — and `--sheet-inverted` in `app.css` is the
 /// first of them, so the sheet a page rests on and the paper drawn onto it are
 /// one colour.
 ///
-/// Paper is not the darkest colour in the palette, and that is the point: the
-/// ground the viewer lays a page on is, and a page has to be brighter than the
-/// ground under it to read as a page. It is the same relation the light theme
-/// has, where paper is white and the ground beside it is not quite.
-///
-/// It is a quieter relation than the light one, though — a shade narrower, and
-/// without the shadow that also picks a page out in the light, since a contact
-/// shadow on a ground this dark has almost nothing to fall on. That is the
-/// intention: a page read in the dark should sit in the room rather than
-/// announce itself.
+/// Paper is the darkest colour in the palette, and the ground the viewer lays it
+/// on is lighter. That is the same arrangement the light theme has, read the
+/// other way up: there paper is pure white and the ground steps in from it, so
+/// paper sits at the far end of the range and the room stops short of it. Here
+/// the far end is black. A page is the extreme in both, and the interface is
+/// what gives way.
 ///
 /// Ink stops well short of white for its own reason: maximum contrast over a
 /// page's worth of text is what makes reading in the dark tiring.
-const INVERTED_PAPER: [u8; 3] = [0x0e, 0x11, 0x14];
+const INVERTED_PAPER: [u8; 3] = [0x09, 0x0a, 0x0d];
 const INVERTED_INK: [u8; 3] = [0xbb, 0xbb, 0xbb];
 
 /// Turns a page inside out for reading in the dark: paper goes to near black,

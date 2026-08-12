@@ -1887,7 +1887,7 @@
   }
 
   .library-actions button:hover:not(:disabled) {
-    background: var(--accent-strong);
+    background: var(--accent-hover);
   }
 
   /* The theme is a preference, not an action, so it is an icon in the quietest
@@ -2408,7 +2408,7 @@
   }
 
   .dialog-actions button:last-child:hover:not(:disabled) {
-    background: var(--accent-strong);
+    background: var(--accent-hover);
     color: var(--on-accent);
   }
 
