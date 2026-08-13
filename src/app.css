@@ -204,12 +204,28 @@
      change of colour or of shadow. */
   --duration: 0.14s;
 
+  /* Space. One scale, in fours, and every gap in the library comes off it.
+     There is nothing clever about the numbers — the point is that there are
+     seven of them and not thirty. What was here before ran 26, 28 and 30px in
+     three adjacent places, which is not a rhythm, it is three attempts at the
+     same one.
+
+     Layout below is named for what it spaces rather than how much, so a rule
+     still says why it is that far apart; the scale only says how far. */
+  --space-xs: 0.25rem; /* 4px */
+  --space-sm: 0.5rem; /* 8px */
+  --space-md: 0.75rem; /* 12px */
+  --space-lg: 1rem; /* 16px */
+  --space-xl: 1.5rem; /* 24px */
+  --space-2xl: 2rem; /* 32px */
+  --space-3xl: 2.5rem; /* 40px */
+
   /* Layout */
-  --gutter: 2.5rem; /* 40px — page gutter */
+  --gutter: var(--space-3xl); /* page gutter */
   --shelf-thumb-w: 9.375rem; /* 150px */
   --shelf-thumb-h: 12.125rem; /* 194px */
-  --shelf-gap: 1.75rem; /* 28px */
-  --shelf-pad-y: 1.75rem; /* 28px top */
+  --shelf-gap: var(--space-xl);
+  --shelf-pad-y: var(--space-2xl);
   --grid-thumb-w: 4rem; /* 64px */
   --grid-thumb-h: 5.25rem; /* 84px — the same page shape as the shelf's */
   /* 256px — a card in the grid, and it does not move. How many fit on a row is
@@ -223,9 +239,11 @@
      meant to hold on to. Four fit the window Press opens at, five a full
      screen. */
   --grid-card-w: 16rem;
-  --grid-gap-y: 1.75rem; /* 28px */
-  --grid-gap-x: 1.5rem; /* 24px */
-  --row-pad: 0.5rem; /* 8px — padding + equal negative margin */
+  --grid-gap-y: var(--space-2xl);
+  --grid-gap-x: var(--space-xl);
+  --row-pad: var(--space-sm); /* padding + equal negative margin */
+  /* Between a section's name and the documents under it. */
+  --section-gap: var(--space-lg);
 
   --scrollbar-size: 0.75rem;
   --scrollbar-inset: 0.1875rem;

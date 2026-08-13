@@ -3,6 +3,7 @@
   import { fade } from 'svelte/transition';
   import { Download, Moon, Pencil, Pin, PinOff, Sun, Trash2 } from '@lucide/svelte';
   import { listen } from '@tauri-apps/api/event';
+  import { getCurrentWebview } from '@tauri-apps/api/webview';
   import { open } from '@tauri-apps/plugin-dialog';
   import PdfThumbnail from '$lib/PdfThumbnail.svelte';
   import PdfViewer, { type PeekRequest } from '$lib/PdfViewer.svelte';
@@ -248,6 +249,23 @@
   const pinned = $derived(projects.filter((project) => project.pinned));
   const unpinned = $derived(projects.filter((project) => !project.pinned));
 
+  /// What the library holds, by what it is written in. This line used to be a
+  /// sentence about what Press is — read once on the first run and then read
+  /// past for good, which is a poor use of the only line under the title. The
+  /// sentence still exists, on the empty screen, where it is the answer to a
+  /// question somebody actually has.
+  ///
+  /// A kind with none of it says nothing rather than saying zero.
+  const librarySummary = $derived.by(() => {
+    const names: Record<string, string> = { latex: 'LaTeX', markdown: 'Markdown' };
+    const counts = new Map<string, number>();
+    for (const project of projects) counts.set(project.kind, (counts.get(project.kind) ?? 0) + 1);
+    return [...counts]
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([kind, count]) => `${count} ${names[kind] ?? kind}`)
+      .join(' · ');
+  });
+
   const dialogOpen = $derived(
     Boolean(
       choosing || settingsFor || confirmDelete || confirmDiscard || snapshotOpen || renaming || menu
@@ -309,6 +327,24 @@
             void collectPendingOpen().finally(() => (opening = false));
           })
         );
+        unlisteners.push(
+          // Tauri takes the drop itself rather than letting the webview see it,
+          // so this is the only way to hear about one. Only the library answers:
+          // pulling the document out from under someone mid-read because a file
+          // passed over the window is not something they asked for.
+          await getCurrentWebview().onDragDropEvent((event) => {
+            const drag = event.payload;
+            if (drag.type === 'enter' || drag.type === 'over') {
+              dropping = !reading;
+            } else if (drag.type === 'leave') {
+              dropping = false;
+            } else if (drag.type === 'drop') {
+              const wanted = dropping;
+              dropping = false;
+              if (wanted) void acceptDrop(drag.paths);
+            }
+          })
+        );
       } catch (reason) {
         // Press without live updates is a Press that still opens documents and
         // still builds them, only without saying so as it goes. Press stuck
@@ -353,13 +389,34 @@
         peek = null;
         return;
       }
-      if (!activeProject || dialogOpen) return;
+      if (dialogOpen) return;
       const target = event.target;
       const typing =
         target instanceof HTMLInputElement ||
         target instanceof HTMLTextAreaElement ||
         (target instanceof HTMLElement && target.isContentEditable);
       if (typing) return;
+
+      // The library's own keys. ⌃r is not a second theme key beside the
+      // viewer's — it is the same one, answered here because the viewer that
+      // usually answers it is only mounted while reading. Kept to the two that
+      // need no selection: what a key would act on is still being worked out.
+      if (!reading) {
+        const isR = event.code === 'KeyR' || event.key.toLowerCase() === 'r';
+        if (event.ctrlKey && !event.metaKey && !event.altKey && isR) {
+          event.preventDefault();
+          theme.toggle();
+          return;
+        }
+        const isO = event.code === 'KeyO' || event.key.toLowerCase() === 'o';
+        if ((event.metaKey || event.ctrlKey) && !event.altKey && isO) {
+          event.preventDefault();
+          void chooseDocument();
+        }
+        return;
+      }
+
+      if (!activeProject) return;
 
       // `code` as well as `key`, because a layout that does not put `k` on the
       // physical K key reports something else for `key` under a modifier.
@@ -414,6 +471,34 @@
       projects = await api.listProjects();
     } catch (reason) {
       fail(reason);
+    }
+  }
+
+  /** A document is over the window and the library will take it if let go. */
+  let dropping = $state(false);
+
+  /// A document dropped on the library. The same road in as the picker and as
+  /// `:Press`: resolve the path, then let `present` decide whether it can just
+  /// be opened or something has to be asked first. Nothing is special-cased
+  /// here, which is what keeps the `.latexmkrc` consent on the way in.
+  ///
+  /// One document. Press shows one at a time, and adding the rest quietly in
+  /// the background would be adding documents nobody watched being added.
+  async function acceptDrop(paths: string[]) {
+    const [first, ...rest] = paths;
+    if (!first) return;
+    busy = true;
+    try {
+      await present(await api.resolvePath(first));
+      if (rest.length > 0) {
+        notify(`Press opens one document at a time. ${rest.length} other ${
+          rest.length === 1 ? 'file was' : 'files were'
+        } left alone.`);
+      }
+    } catch (reason) {
+      fail(reason);
+    } finally {
+      busy = false;
     }
   }
 
@@ -688,27 +773,28 @@
     }
   }
 
-  /// A grid card's last line: when the PDF under the thumbnail was made, and
-  /// how much history there is behind it. An artifact wins over a failed build,
-  /// because that older PDF is what the thumbnail is showing.
+  /// A card's last line. Nothing is said twice: when a document is in order
+  /// this is how long ago it built and how much history is behind it, and when
+  /// it is not, that takes the line instead and takes a colour with it.
   ///
-  /// Kept to the sidebar's shorthand — `2h ago`, not `Built 2h ago` — because
-  /// the column is 137px wide at the default window and the version count has
-  /// to fit beside it.
-  function cardMeta(project: ProjectSummary) {
+  /// Quiet is the healthy state on purpose. A library where every card reports
+  /// the same thing is a library spending its reader's attention on nothing;
+  /// what earns a colour here is the handful that need doing something about.
+  function cardState(project: ProjectSummary): { text: string; tone: string } {
+    if (!project.available) return { text: 'missing', tone: 'bad' };
     const { status } = project.build;
-    const building = status === 'queued' || status === 'running';
-    const state = building
-      ? 'building…'
-      : age(project.artifact?.builtAt) ||
-        (status === 'error' ? 'does not compile' : 'never built');
-    // Snapshots, not versions: every project has a version — the working tree
-    // is one — so a count of versions would never be lower than one and would
-    // say nothing. A count of snapshots is a count of the states this document
-    // can be put back into, which is why one of them is already worth saying.
+    if (status === 'queued' || status === 'running') return { text: 'building…', tone: 'busy' };
+    // An artifact that no longer compiles is still worth flagging: the
+    // thumbnail beside this is showing a PDF that no longer matches the source.
+    if (status === 'error') return { text: 'does not compile', tone: 'bad' };
+    const built = age(project.artifact?.builtAt);
+    if (!built) return { text: 'never built', tone: '' };
+    // Snapshots, not versions: every document has a version — the working tree
+    // is one — so a count of those would never be lower than one and would say
+    // nothing. A count of snapshots is a count of the states it can be put back
+    // into, which is why one of them is already worth saying.
     const kept = project.snapshotCount;
-    if (kept === 0) return state;
-    return `${state} · ${kept} snapshot${kept === 1 ? '' : 's'}`;
+    return { text: kept === 0 ? built : `${built} · ${kept} snapshot${kept === 1 ? '' : 's'}`, tone: '' };
   }
 
   function age(seconds: number | null | undefined) {
@@ -1055,15 +1141,6 @@
   });
 </script>
 
-<!-- What a document is, shared by the shelf and the grid so it reads the same
-     wherever it is shown. One word, so it still fits a 150px shelf card once a
-     gone document has flagged itself. -->
-{#snippet kindLine(project: ProjectSummary)}
-  <span class="quiet kind"
-    >{project.kind}{#if !project.available} · <span class="bad">missing</span>{/if}</span
-  >
-{/snippet}
-
 {#if reading}
   <main class="reader">
     <!-- Not a bar: this takes no space in the layout. It sits over the grey
@@ -1207,7 +1284,11 @@
     <header class="library-header">
       <div class="library-title">
         <h1>Printing Press</h1>
-        <p class="quiet">A reader and compiler for LaTeX and Markdown documents</p>
+        <p class="quiet">
+          {projects.length === 0
+            ? 'A reader and compiler for LaTeX and Markdown documents'
+            : librarySummary}
+        </p>
       </div>
       <div class="library-actions">
         <!-- Shows what it will do rather than where it is: a moon to go dark. -->
@@ -1244,7 +1325,9 @@
       </section>
     {:else}
       {#if pinned.length > 0}
-        <section class="pinned-row" aria-label="Pinned documents">
+        <section class="shelf" aria-labelledby="pinned-heading">
+          <h2 class="section-title" id="pinned-heading">Pinned</h2>
+          <div class="pinned-row">
           {#each pinned as project (project.id)}
             <article class="pinned-card">
               <button
@@ -1272,11 +1355,15 @@
               </button>
             </article>
           {/each}
+          </div>
         </section>
       {/if}
 
-      <section class="project-grid" aria-label="Saved documents">
+      <section class="grid-section" aria-labelledby="all-heading">
+        <h2 class="section-title" id="all-heading">All documents</h2>
+        <div class="project-grid">
         {#each unpinned as project (project.id)}
+          {@const state = cardState(project)}
           <article class="project-card">
             <!-- Right-click anywhere on the row for pin, rename, download and
                  remove. There is no ⋯ button: the menu is the only place those
@@ -1300,15 +1387,30 @@
               </span>
               <span class="project-lines">
                 <strong class="name" title={project.documentPath}>{project.name}</strong>
-                {@render kindLine(project)}
-                <span class="quiet when">{cardMeta(project)}</span>
+                <!-- Which document this is, when the name alone does not say.
+                     `main.tex` and `paper.tex` are what half the world calls
+                     its source, so the folder is what tells two of them apart
+                     — and the extension carries what the old `LATEX` line used
+                     to, for nothing, on a line that was needed anyway. -->
+                <span class="where" title={project.documentPath}
+                  >{#if project.location}<span class="where-folder">{project.location}/</span
+                    >{/if}<span class="where-file">{project.fileName}</span></span
+                >
+                <span class="state {state.tone}">{state.text}</span>
               </span>
             </button>
           </article>
         {/each}
+        </div>
       </section>
     {/if}
   </main>
+{/if}
+
+{#if dropping}
+  <!-- Over the window rather than around the library, which is only as tall as
+       the documents in it. Says what will happen and takes no part in it. -->
+  <div class="drop-veil" aria-hidden="true"></div>
 {/if}
 
 {#if peek}
@@ -1835,9 +1937,9 @@
     display: flex;
     align-items: flex-end;
     justify-content: space-between;
-    gap: 1.5rem;
+    gap: var(--space-xl);
     flex-wrap: wrap;
-    padding: 0 var(--gutter) 1.625rem;
+    padding: 0 var(--gutter) var(--space-xl);
   }
 
   /* The title block only. Named rather than matched as `> div`, which also
@@ -1847,7 +1949,7 @@
     flex-direction: column;
     /* The title sets line-height 1, so most of the space between the two lines
        is this gap; the sentence below brings a little of its own. */
-    gap: 0.375rem;
+    gap: var(--space-xs);
   }
 
   .library-header h1 {
@@ -1908,21 +2010,85 @@
     color: var(--ink);
   }
 
-  .pinned-row {
-    display: flex;
-    /* Same bargain as the grid below: a page keeps its size, and a shelf too
-       short for all of them holds the rest on a second row. Without this the
-       shelf ran off the side and took the window's horizontal scrollbar with
-       it, which moved the whole library rather than the shelf. */
-    flex-wrap: wrap;
-    gap: var(--shelf-gap);
-    margin: 0;
+  /* The band, which holds its own name as well as the documents on it.
+     No side padding: the row inside it scrolls, and a scroller has to reach
+     the window's edges or documents disappear under a margin instead of
+     running off the end. The gutter moves onto the things inside. */
+  .shelf {
     /* Even top and bottom. The deeper foot was there to balance a two-line
        caption; with one line the shelf can close up. */
-    padding: var(--shelf-pad-y) var(--gutter);
+    padding: var(--shelf-pad-y) 0;
     border-top: var(--bw) solid var(--line);
     border-bottom: var(--bw) solid var(--line);
     background: var(--shelf);
+  }
+
+  .shelf .section-title {
+    padding-inline: var(--gutter);
+  }
+
+  /* A shelf you push along rather than one that grows downwards. It holds one
+     row however many are pinned, so pinning a seventh document cannot push the
+     library about — and it scrolls itself rather than the window, which is the
+     honest fix for the overflow the wrap was covering up.
+     `scroll-padding` is what makes a card come to rest on the gutter rather
+     than against the glass, and it is the reason the padding is here and not on
+     the band: the two have to agree. */
+  .pinned-row {
+    display: flex;
+    flex-wrap: nowrap;
+    gap: var(--shelf-gap);
+    margin: 0;
+    padding-inline: var(--gutter);
+    overflow-x: auto;
+    overflow-y: hidden;
+    scroll-snap-type: x mandatory;
+    scroll-padding-inline: var(--gutter);
+    /* A sideways swipe on a trackpad is a back-navigation gesture before it is
+       anything else. This is what stops the shelf handing one over. */
+    overscroll-behavior-x: contain;
+    scroll-behavior: smooth;
+  }
+
+  /* Hidden here alone. Everywhere else in Press a scrollbar says how much more
+     there is; under a row of three book covers it is a permanent 12px rule
+     across the page. What says there is more here is the next cover, showing
+     at the edge because the snap leaves it there. */
+  .pinned-row {
+    scrollbar-width: none;
+  }
+
+  .pinned-row::-webkit-scrollbar {
+    height: 0;
+  }
+
+  .pinned-card {
+    scroll-snap-align: start;
+  }
+
+  /* Smooth scrolling is a preference, not a decoration. */
+  @media (prefers-reduced-motion: reduce) {
+    .pinned-row {
+      scroll-behavior: auto;
+    }
+  }
+
+  .grid-section {
+    padding: var(--space-2xl) var(--gutter) 0;
+  }
+
+  /* The uppercase eyebrow, moved. It used to sit on every card saying `LATEX`,
+     which is the loudest treatment a card has spent on the one thing about a
+     document that is almost never in question. Naming a section is what that
+     treatment is for: it is structure rather than content, and there are two of
+     them on the page instead of one per document. */
+  .section-title {
+    margin: 0 0 var(--section-gap);
+    color: var(--ink-3);
+    font-size: var(--fs-label);
+    font-weight: var(--fw-label);
+    letter-spacing: var(--tracking-label);
+    text-transform: uppercase;
   }
 
   /* No card chrome: the page image is the card. */
@@ -1937,7 +2103,7 @@
   .pinned-open {
     display: flex;
     flex-direction: column;
-    gap: 0.75rem;
+    gap: var(--space-md);
     width: 100%;
     padding: 0;
     border: 0;
@@ -1996,13 +2162,12 @@
     grid-template-columns: repeat(auto-fill, var(--grid-card-w));
     justify-content: start;
     gap: var(--grid-gap-y) var(--grid-gap-x);
-    padding: 1.875rem var(--gutter) 0;
   }
 
   .project-card {
     display: flex;
     align-items: center;
-    gap: 0.8125rem;
+    gap: var(--space-md);
     padding: var(--row-pad);
     margin: calc(var(--row-pad) * -1);
     border: 0;
@@ -2021,7 +2186,7 @@
     /* The text block is shorter than the page image, so it is centred against
        it rather than hung from the top edge. */
     align-items: center;
-    gap: 0.8125rem;
+    gap: var(--space-md);
     display: flex;
     flex: 1;
     min-width: 0;
@@ -2043,36 +2208,66 @@
     box-shadow: var(--shadow-sm);
   }
 
+  /* Three lines, and each is told apart from the one above it by a different
+     thing: the name by weight and ink, the path by family, the state by colour.
+     They used to differ by letter-spacing alone, two of them sharing a size and
+     a colour, which is why they read as one block with a loud first line. */
   .project-lines {
-    gap: 0.375rem;
+    gap: var(--space-xs);
     display: grid;
     flex: 1;
     min-width: 0;
   }
 
-  /* When the PDF under the thumbnail was made, and how many versions are kept —
-     the faintest tier, and the only line that changes on its own. */
-  .project-lines .when {
+  /* Where the document is, and — through the extension it ends in — what it is
+     written in. Monospaced because it is a path, which is also what tells it
+     apart from the line below without spending a size or a colour on doing so.
+     A narrow column clips this rather than letting it push on its neighbour:
+     the name above it is the part that has to survive. */
+  .where {
+    display: flex;
+    min-width: 0;
+    overflow: hidden;
+    font-family: var(--font-mono);
+    font-size: var(--fs-meta);
+    line-height: 1.2;
+    color: var(--ink-3);
+    white-space: nowrap;
+  }
+
+  /* The folder gives way and the file name does not. Truncating this line from
+     the right would eat the extension, and the extension is the half that says
+     what the document is written in — the whole reason this line replaced the
+     `LATEX` one. So the folder ellipsises and the file always survives. */
+  .where-folder {
+    min-width: 0;
+    flex: 0 1 auto;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .where-file {
+    flex: none;
+  }
+
+  /* The state of the document, and the faintest tier — the only line that
+     changes on its own. Quiet is the ordinary case: a colour here means
+     something wants doing. */
+  .state {
     overflow: hidden;
     font-size: var(--fs-meta);
-    line-height: 1;
+    line-height: 1.2;
     color: var(--ink-3);
     text-overflow: ellipsis;
     white-space: nowrap;
   }
 
-  /* One recipe for both shelf and grid: a document's name and its kind read the
-     same wherever it is shown. */
-  .kind {
-    overflow: hidden;
-    color: var(--ink-3);
-    font: 600 var(--fs-label) var(--font-sans);
-    letter-spacing: var(--tracking-label);
-    text-transform: uppercase;
-    /* A narrow column clips this line rather than pushing into its neighbour;
-       the name above it is the part that has to survive. */
-    text-overflow: ellipsis;
-    white-space: nowrap;
+  .state.busy {
+    color: var(--warning);
+  }
+
+  .state.bad {
+    color: var(--danger);
   }
 
   .name {
@@ -2109,6 +2304,19 @@
     align-content: center;
     min-height: 55vh;
     text-align: center;
+  }
+
+  /* The window while a document is being held over it. An accent edge and the
+     faintest wash of the same colour — enough to say the drop will land, and
+     little enough that the library is still readable underneath it. */
+  .drop-veil {
+    position: fixed;
+    inset: 0.5rem;
+    z-index: 45;
+    border: var(--bw-2) solid var(--accent);
+    border-radius: var(--radius);
+    background: var(--accent-wash);
+    pointer-events: none;
   }
 
   /* -- peek --------------------------------------------------------------- */
