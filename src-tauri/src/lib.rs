@@ -98,6 +98,14 @@ pub fn run() {
             // interface collects it the same way it collects a path from the
             // command line.
             let startup_notice = repository.notice().map(ToOwned::to_owned);
+            // The editor command is written once, on the first run, rather than
+            // defaulted on every read. A machine with a terminal editor on it
+            // gets one that opens it; a machine without gets the system's own
+            // answer. Either way it is an ordinary setting from then on, and
+            // Press does not offer an opinion about it again.
+            if repository.setting(editor::SETTING)?.is_none() {
+                repository.set_setting(editor::SETTING, &editor::suggested_command())?;
+            }
             sweep_storage(&artifact_root, &work_root, &objects_root, &repository);
             let builds = Arc::new(BuildManager::new(
                 Arc::clone(&repository),
@@ -150,8 +158,9 @@ pub fn run() {
             commands::delete_snapshot,
             commands::export_artifact,
             commands::get_build_log,
-            commands::launch_neovim,
-            commands::editor_status,
+            commands::launch_editor,
+            commands::editor_command,
+            commands::set_editor_command,
             commands::take_pending_open,
             commands::expecting_open,
             commands::take_startup_notice,

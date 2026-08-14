@@ -244,8 +244,10 @@ pub enum Severity {
     Warning,
 }
 
-/// One structured problem from a build. Shaped for Neovim's quickfix list, which
-/// is where these are headed once the RPC channel exists.
+/// One structured problem from a build: a file, a line and a message, rather
+/// than a formatted string. Press keeps them apart so the panel can show the
+/// place separately from what went wrong, and so an editor plugin reading them
+/// over the CLI gets fields instead of something to parse.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Diagnostic {
@@ -410,10 +412,11 @@ pub struct ToolchainReport {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct EditorLaunchResult {
-    pub status: String,
-    pub socket_path: String,
-    pub message: String,
+pub struct EditorCommand {
+    /// What the button will run — the stored command, or the system's default.
+    pub command: String,
+    /// A command for this machine, offered on a first run and behind reset.
+    pub suggested: String,
 }
 
 /// One document a path resolved to.

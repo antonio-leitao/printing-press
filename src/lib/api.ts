@@ -1,6 +1,6 @@
 import { invoke } from '@tauri-apps/api/core';
 import type {
-  EditorLaunchResult,
+  EditorCommand,
   Engine,
   LooseDocument,
   LinkBox,
@@ -102,11 +102,13 @@ export const api = {
   getBuildLog: (projectId: number, sourceRef?: SourceRef) =>
     invoke<string>('get_build_log', { projectId, sourceRef }),
 
-  launchNeovim: (projectId: number) =>
-    invoke<EditorLaunchResult>('launch_neovim', { projectId }),
+  /** Runs the editor command on a document. Nothing is kept open afterwards. */
+  launchEditor: (projectId: number) => invoke<string>('launch_editor', { projectId }),
 
-  editorStatus: (projectId: number) =>
-    invoke<string>('editor_status', { projectId }),
+  editorCommand: () => invoke<EditorCommand>('editor_command'),
+
+  /** An empty command clears the setting, putting the button back on the default. */
+  setEditorCommand: (command: string) => invoke<void>('set_editor_command', { command }),
 
   /** Collects a path Press was launched with. Taking it clears it. */
   takePendingOpen: () => invoke<OpenRequest | null>('take_pending_open'),

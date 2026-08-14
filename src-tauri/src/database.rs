@@ -91,6 +91,31 @@ impl Repository {
         self.notice.as_deref()
     }
 
+    // -- settings ---------------------------------------------------------
+
+    /// A preference, or nothing if it has never been set. Absent and empty are
+    /// the same answer: a reader who clears the field is asking for the default
+    /// back, not for a command that is the empty string.
+    pub fn setting(&self, key: &str) -> AppResult<Option<String>> {
+        let connection = self.lock()?;
+        let value: Option<String> = connection
+            .query_row("SELECT value FROM settings WHERE key = ?1", [key], |row| {
+                row.get(0)
+            })
+            .optional()?;
+        Ok(value.filter(|value| !value.trim().is_empty()))
+    }
+
+    pub fn set_setting(&self, key: &str, value: &str) -> AppResult<()> {
+        let connection = self.lock()?;
+        connection.execute(
+            "INSERT INTO settings (key, value) VALUES (?1, ?2)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            [key, value],
+        )?;
+        Ok(())
+    }
+
     // -- projects ---------------------------------------------------------
 
     pub fn list_projects(&self) -> AppResult<Vec<ProjectSummary>> {
@@ -1024,6 +1049,14 @@ const SCHEMA: &str = "
         PRIMARY KEY (snapshot_id, path)
     );
     CREATE INDEX IF NOT EXISTS snapshot_files_object_idx ON snapshot_files(object);
+
+    -- Preferences that belong to the reader rather than to any one document.
+    -- Key and value rather than a column each: there are two of these, and a
+    -- table that grows a column per preference is a migration per preference.
+    CREATE TABLE IF NOT EXISTS settings (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL
+    );
 
     CREATE TABLE IF NOT EXISTS build_states (
         project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,

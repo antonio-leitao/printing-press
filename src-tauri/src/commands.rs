@@ -12,7 +12,7 @@ use crate::{
     documents, editor,
     error::{AppError, AppResult},
     model::{
-        DocumentKind, EditorLaunchResult, Engine, OpenRequest, PageSize, ProjectSummary, SearchHit,
+        DocumentKind, EditorCommand, Engine, OpenRequest, PageSize, ProjectSummary, SearchHit,
         SnapshotOutcome, SourceRef, TextBox, VersionSummary,
     },
 };
@@ -620,20 +620,43 @@ pub async fn get_build_log(
 }
 
 #[tauri::command]
-pub async fn launch_neovim(
-    project_id: i64,
-    state: State<'_, AppState>,
-) -> AppResult<EditorLaunchResult> {
+pub async fn launch_editor(project_id: i64, state: State<'_, AppState>) -> AppResult<String> {
     let repository = Arc::clone(&state.repository);
     blocking(move || {
         let project = repository.get_project(project_id)?;
-        editor::launch(&project)
+        let command = repository
+            .setting(editor::SETTING)?
+            .unwrap_or_else(|| editor::default_command().to_owned());
+        editor::launch(&project, &command)
     })
     .await
 }
 
-/// Collects anything Press wants to say about how it started. Taking it clears
-/// it, so it is said once.
+/// What the editor button will run, and whether it can be found. Nothing stored
+/// means the system's own answer, which is what the button uses.
+#[tauri::command]
+pub async fn editor_command(state: State<'_, AppState>) -> AppResult<EditorCommand> {
+    let repository = Arc::clone(&state.repository);
+    blocking(move || {
+        let command = repository
+            .setting(editor::SETTING)?
+            .unwrap_or_else(|| editor::default_command().to_owned());
+        Ok(EditorCommand {
+            command,
+            suggested: editor::suggested_command(),
+        })
+    })
+    .await
+}
+
+/// Stores the editor command. An empty one clears it, which puts the button
+/// back on the system default rather than leaving it with nothing to run.
+#[tauri::command]
+pub async fn set_editor_command(command: String, state: State<'_, AppState>) -> AppResult<()> {
+    let repository = Arc::clone(&state.repository);
+    blocking(move || repository.set_setting(editor::SETTING, command.trim())).await
+}
+
 /// Whether a path is on its way to becoming an open request. Asked once at
 /// startup, so that the library is not put up in front of a document that is
 /// still being resolved.
@@ -645,6 +668,8 @@ pub async fn expecting_open(state: State<'_, AppState>) -> AppResult<bool> {
         > 0)
 }
 
+/// Collects anything Press wants to say about how it started. Taking it clears
+/// it, so it is said once.
 #[tauri::command]
 pub async fn take_startup_notice(state: State<'_, AppState>) -> AppResult<Option<String>> {
     Ok(state
@@ -663,14 +688,4 @@ pub async fn take_pending_open(state: State<'_, AppState>) -> AppResult<Option<O
         .lock()
         .map_err(|_| AppError::Task("the pending request was lost".into()))?
         .take())
-}
-
-#[tauri::command]
-pub async fn editor_status(project_id: i64, state: State<'_, AppState>) -> AppResult<String> {
-    let repository = Arc::clone(&state.repository);
-    blocking(move || {
-        let project = repository.get_project(project_id)?;
-        Ok(editor::status(&project).to_owned())
-    })
-    .await
 }

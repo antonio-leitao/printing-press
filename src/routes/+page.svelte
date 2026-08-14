@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount, untrack, type Component } from 'svelte';
   import { fade } from 'svelte/transition';
-  import { Download, Moon, Pencil, Pin, PinOff, Sun, Trash2 } from '@lucide/svelte';
+  import { Download, Moon, Pencil, Pin, PinOff, Settings, Sun, Trash2 } from '@lucide/svelte';
   import { listen } from '@tauri-apps/api/event';
   import { getCurrentWebview } from '@tauri-apps/api/webview';
   import { open } from '@tauri-apps/plugin-dialog';
@@ -20,6 +20,7 @@
     type OpenCandidate,
     type OpenRequest,
     type ArtifactSummary,
+    type EditorCommand,
     type LooseDocument,
     type ProjectSummary,
     type SourcePeek,
@@ -75,11 +76,17 @@
   /** How long Press will wait on a document before showing the library anyway. */
   const OPEN_GRACE = 4000;
   let buildLog = $state('');
-  let editorState = $state('closed');
   let progress = $state<BuildProgress | null>(null);
   let settingsFor = $state<ProjectSummary | null>(null);
   let settingsName = $state('');
   let settingsEngine = $state<Engine>('pdflatex');
+  /// What the Editor button runs. A command line rather than a list of editors
+  /// Press knows: an editor Press has never heard of is one line here, and
+  /// anything that will not fit on one line fits in a script, which is a better
+  /// home for it than a table inside Press.
+  let editorOpen = $state(false);
+  let editorCommand = $state('');
+  let editorDefault = $state<EditorCommand | null>(null);
   let confirmDelete = $state<ProjectSummary | null>(null);
   let confirmDiscard = $state<VersionSummary | null>(null);
 
@@ -268,7 +275,14 @@
 
   const dialogOpen = $derived(
     Boolean(
-      choosing || settingsFor || confirmDelete || confirmDiscard || snapshotOpen || renaming || menu
+      choosing ||
+        settingsFor ||
+        editorOpen ||
+        confirmDelete ||
+        confirmDiscard ||
+        snapshotOpen ||
+        renaming ||
+        menu
     )
   );
 
@@ -438,21 +452,10 @@
     };
     window.addEventListener('keydown', shortcuts);
 
-    // A cheap socket probe, so this cadence costs almost nothing.
-    const editorPoll = window.setInterval(() => {
-      const id = activeProject?.id;
-      if (id === undefined) return;
-      void api
-        .editorStatus(id)
-        .then((status) => (editorState = status))
-        .catch(() => (editorState = 'closed'));
-    }, 5000);
-
     return () => {
       disposed = true;
       for (const unlisten of unlisteners) unlisten();
       window.removeEventListener('keydown', shortcuts);
-      window.clearInterval(editorPoll);
       clearTimeout(barHide);
     };
   });
@@ -638,7 +641,6 @@
       const opened = await api.openProject(project.id);
       await closeViewing();
       activeProject = opened;
-      editorState = await api.editorStatus(project.id);
       panel = 'none';
       selectedKey = WORKTREE;
       await refreshVersions();
@@ -663,7 +665,6 @@
       await closeViewing();
       await api.closeProject();
       activeProject = null;
-      editorState = 'closed';
       buildLog = '';
       progress = null;
       panel = 'none';
@@ -830,14 +831,43 @@
     }
   }
 
+  /// Opens the document in whatever the reader writes with, and has nothing
+  /// more to do with it. Press watches the working tree, so a save rebuilds the
+  /// document whoever wrote it — there is no channel to hold open and no editor
+  /// process to keep track of.
   async function launchEditor() {
     if (!activeProject) return;
     try {
-      const result = await api.launchNeovim(activeProject.id);
-      notify(result.message);
-      editorState = result.status === 'connected' ? 'connected' : 'starting';
+      notify(await api.launchEditor(activeProject.id));
     } catch (reason) {
       fail(reason);
+    }
+  }
+
+  // -- preferences -----------------------------------------------------------
+
+  async function openEditorSettings() {
+    try {
+      const current = await api.editorCommand();
+      editorDefault = current;
+      // An unset command shows the default it is standing in for, so that
+      // editing it is a change to something visible rather than to a blank.
+      editorCommand = current.command;
+      editorOpen = true;
+    } catch (reason) {
+      fail(reason);
+    }
+  }
+
+  async function saveEditorCommand() {
+    busy = true;
+    try {
+      await api.setEditorCommand(editorCommand.trim());
+      editorOpen = false;
+    } catch (reason) {
+      fail(reason);
+    } finally {
+      busy = false;
     }
   }
 
@@ -1304,6 +1334,14 @@
             <Moon size={16} strokeWidth={1.75} aria-hidden="true" />
           {/if}
         </button>
+        <button
+          class="theme-toggle"
+          onclick={openEditorSettings}
+          title="Settings"
+          aria-label="Settings"
+        >
+          <Settings size={16} strokeWidth={1.75} aria-hidden="true" />
+        </button>
         <button onclick={chooseDocument} disabled={busy}>
           {busy ? 'Opening…' : 'Open document'}
         </button>
@@ -1557,6 +1595,48 @@
     <div class="dialog-actions">
       <button onclick={() => (renaming = null)} disabled={busy}>Cancel</button>
       <button onclick={saveRename} disabled={busy || !renameTitle.trim()}>Save</button>
+    </div>
+  </dialog>
+{/if}
+
+{#if editorOpen}
+  <dialog use:modal={() => (editorOpen = false)} aria-labelledby="editor-title">
+    <h2 id="editor-title">Editor</h2>
+    <p class="quiet">
+      What the Editor button runs. Press opens the document and has nothing more
+      to do with it — the folder is watched either way, so a save rebuilds
+      whoever wrote it.
+    </p>
+    <label>
+      Command
+      <!-- svelte-ignore a11y_autofocus -->
+      <input
+        bind:value={editorCommand}
+        autofocus
+        spellcheck="false"
+        autocapitalize="off"
+        autocorrect="off"
+        onkeydown={(event) => {
+          if (event.key === 'Enter') saveEditorCommand();
+        }}
+      />
+    </label>
+    <p class="quiet">
+      <code>{'{file}'}</code> is the document and <code>{'{dir}'}</code> is its folder. Quote a word
+      that has a space in it. Left empty, Press hands the document to the system and lets it open
+      whatever you have set for that kind of file.
+    </p>
+    {#if editorDefault && editorCommand.trim() !== editorDefault.suggested}
+      <p class="quiet">
+        Suggested for this machine:
+        <button class="link" onclick={() => (editorCommand = editorDefault?.suggested ?? '')}>
+          <code>{editorDefault.suggested}</code>
+        </button>
+      </p>
+    {/if}
+    <div class="dialog-actions">
+      <button onclick={() => (editorOpen = false)} disabled={busy}>Cancel</button>
+      <button onclick={saveEditorCommand} disabled={busy}>Save</button>
     </div>
   </dialog>
 {/if}

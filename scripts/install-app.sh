@@ -1,41 +1,48 @@
 #!/bin/sh
-# Installs the release bundle into /Applications.
+# Installs the release bundle into /Applications. Builds nothing: run
+# `npm run tauri build` first, or `npm run release` to do both.
 #
-# Two things this does that a plain `cp -R` does not.
+# Idempotent, and indifferent to where it is called from — it resolves its own
+# paths rather than trusting the working directory.
+#
+# Two things this does that a plain `cp -R` does not, and both are why it starts
+# by uninstalling.
 #
 # It quits Press first. Replacing the bundle under a running process leaves that
 # process with a code signature that no longer resolves, and macOS then starts
 # refusing it access to protected folders — the app keeps running but stops
 # working, in a way that looks like anything but an update.
 #
-# It removes the old bundle before copying. `cp -R` onto an existing directory
-# merges into it, so a file that disappears between versions is left behind
-# forever.
+# It removes the old bundle rather than copying over it. `cp -R` onto an
+# existing directory merges into it, so a file that disappears between versions
+# is left behind forever.
+#
+# Both of those are what `uninstall-app.sh` already does, so it does them,
+# rather than this script keeping a second copy of the same care.
 set -eu
 
-BUNDLE="src-tauri/target/release/bundle/macos/Press.app"
+root=$(
+	CDPATH= cd -- "$(dirname -- "$0")/.." && pwd
+)
+BUNDLE="$root/src-tauri/target/release/bundle/macos/Press.app"
 TARGET="/Applications/Press.app"
 
 if [ ! -d "$BUNDLE" ]; then
-	echo "No release bundle at $BUNDLE — run 'npm run tauri build' first." >&2
+	echo "No release bundle at $BUNDLE" >&2
+	echo "Run 'npm run tauri build' first, or 'npm run release' to do both." >&2
 	exit 1
 fi
 
-if pgrep -x press >/dev/null 2>&1; then
-	echo "Quitting the running Press…"
-	osascript -e 'quit app "Press"' >/dev/null 2>&1 || true
-	# Give it a moment to exit cleanly before insisting.
-	for _ in 1 2 3 4 5 6 7 8 9 10; do
-		pgrep -x press >/dev/null 2>&1 || break
-		sleep 0.3
-	done
-	pkill -x press >/dev/null 2>&1 || true
-fi
+sh "$root/scripts/uninstall-app.sh" --quiet
 
-rm -rf "$TARGET"
 # ditto rather than cp: it is the macOS-native copy and keeps extended
 # attributes and the signature intact.
 ditto "$BUNDLE" "$TARGET"
+
+if [ ! -x "$TARGET/Contents/MacOS/press" ]; then
+	echo "Copied $TARGET but its binary is missing or not executable." >&2
+	exit 1
+fi
 
 echo "Installed $TARGET"
 codesign -dv "$TARGET" 2>&1 | grep -E "^Identifier" || true

@@ -210,10 +210,16 @@ export type OpenRequest = {
   };
 };
 
-export type EditorLaunchResult = {
-  status: 'launched' | 'connected';
-  socketPath: string;
-  message: string;
+/**
+ * The command the Editor button runs. Press spawns it and forgets it: the
+ * working tree is watched, so a save rebuilds the document whoever wrote it,
+ * and there is no connection to the editor to keep or to lose.
+ */
+export type EditorCommand = {
+  /** What will run — the stored command, or the system's own default. */
+  command: string;
+  /** A command that suits this machine, offered on a first run. */
+  suggested: string;
 };
 
 /** Parsed from latexmk's own output, not from a timer. */

@@ -20,8 +20,8 @@ a *set of files*, for which a folder is merely the cheapest description.
 Three things follow, and they are the reason the model is worth stating:
 
 - **Documents sharing a folder are separate projects.** Two markdown essays, a paper and its
-  supplementary material, a thesis and its poster. Each has its own history, its own build cache,
-  its own editor socket.
+  supplementary material, a thesis and its poster. Each has its own history and its own build
+  cache.
 - **Naming a part opens the whole.** `:Press` inside `chapters/three.tex` opens the thesis,
   because a named file resolves to its document root — through `% !TEX root` first, then the
   inclusion graph. A `standalone` figure that some paper `\input`s opens that paper.
@@ -59,7 +59,7 @@ incomplete, and says so at build time rather than silently.
 - A finished build always publishes, even if the source changed while it ran. Discarding it
   would mean a document that saves faster than it compiles never updates.
 - Structured diagnostics parsed from the `.log` file — file, line, severity, message — rather
-  than a formatted string, ready for Neovim's quickfix list.
+  than a formatted string, so the place is separate from what went wrong.
 - Real build progress parsed from latexmk's own output: rule, pass number, and page count
   against the previous build's page total.
 - Native rendering on MuPDF, whose C source is vendored in the `mupdf` crate, so nothing enters
@@ -75,8 +75,10 @@ incomplete, and says so at build time rather than silently.
   viewport, and cached documents are evicted against a byte budget.
 - Project rename, engine change and removal. There is no "change the main file": a different
   document is a different project, which is what lets several live in one folder.
-- A **Launch Neovim** action that reuses one stable socket per document and supports Alacritty,
-  kitty, Ghostty and WezTerm.
+- An **Editor** action that runs a command of your choosing — `{file}` is the document and `{dir}`
+  its folder. Press spawns it and has nothing further to do with it: the working tree is watched
+  either way, so a save rebuilds the document whoever wrote it. Unset, the document is handed to
+  the system to open with whatever you already use for that kind of file.
 - Opening from the editor: `press <path>` resolves whatever it is handed. A second launch does not
   start a second Press — its arguments are handed to the running instance, which raises its window.
 - Startup sweep of interrupted staging files, unreferenced PDFs and storage belonging to deleted
@@ -87,7 +89,7 @@ incomplete, and says so at build time rather than silently.
 - macOS for the currently tested desktop integration
 - A TeX distribution containing `latexmk` in `PATH` or a standard macOS location
 - pandoc, for markdown projects only
-- Neovim and one of the supported terminals
+- An editor, if you want the Editor button to open one; any command will do
 - Node.js and Rust for development
 
 MuPDF is AGPL-3.0. That binds Press only if it is distributed.
@@ -219,7 +221,6 @@ mount, and taking it clears it so nothing opens twice.
 - Side-by-side version tabs
 - Text selection and in-document search, both of which the renderer already supplies: MuPDF
   returns word boxes in about 1ms per page and searches with its own engine
-- Neovim RPC diagnostics and quickfix synchronization
 - Configurable compiler arguments
 - Export/print
 - Semantic scroll anchoring across changed pagination
