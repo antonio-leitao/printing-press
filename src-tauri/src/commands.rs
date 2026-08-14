@@ -7,7 +7,7 @@ use std::{
 use tauri::{AppHandle, Manager, State};
 
 use crate::{
-    AppState,
+    AppState, appearance,
     database::{NewProject, ProjectEdit},
     documents, editor,
     error::{AppError, AppResult},
@@ -655,6 +655,31 @@ pub async fn editor_command(state: State<'_, AppState>) -> AppResult<EditorComma
 pub async fn set_editor_command(command: String, state: State<'_, AppState>) -> AppResult<()> {
     let repository = Arc::clone(&state.repository);
     blocking(move || repository.set_setting(editor::SETTING, command.trim())).await
+}
+
+/// Which tile Press is wearing in the Dock.
+#[tauri::command]
+pub async fn icon_choice(state: State<'_, AppState>) -> AppResult<String> {
+    let repository = Arc::clone(&state.repository);
+    blocking(move || Ok(appearance::resolve(repository.setting(appearance::SETTING)?))).await
+}
+
+/// Stores the chosen tile and writes it onto the bundle.
+///
+/// Answers whether there was a bundle to write on. A development build is a
+/// bare binary and has none, and the interface says so — a choice that is
+/// stored and shows nowhere is worth a word, and it is not an error.
+#[tauri::command]
+pub async fn set_icon_choice(name: String, state: State<'_, AppState>) -> AppResult<bool> {
+    let repository = Arc::clone(&state.repository);
+    blocking(move || {
+        // Refused before it is stored, rather than stored and puzzled over at
+        // the next start.
+        appearance::validate(&name)?;
+        repository.set_setting(appearance::SETTING, &name)?;
+        appearance::apply(&name)
+    })
+    .await
 }
 
 /// Whether a path is on its way to becoming an open request. Asked once at

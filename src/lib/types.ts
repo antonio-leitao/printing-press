@@ -222,6 +222,17 @@ export type EditorCommand = {
   suggested: string;
 };
 
+/**
+ * Which tile Press wears in the Dock.
+ *
+ * The names are the ones `make-icons.py` writes and `appearance.rs` compiles
+ * in, so all three lists are the same three words or none of this works.
+ */
+export type IconChoice = 'green' | 'ink' | 'sheet';
+
+/** The three, in the order the settings dialog offers them. */
+export const ICON_CHOICES: readonly IconChoice[] = ['green', 'ink', 'sheet'];
+
 /** Parsed from latexmk's own output, not from a timer. */
 export type BuildProgress = {
   buildId: number;

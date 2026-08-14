@@ -12,8 +12,12 @@
 
   // The one place the attribute is written; everything else throws the switch
   // and lets it arrive here — see `$lib/theme.svelte`.
+  //
+  // `resolved` rather than `preference`: the stylesheet knows two themes, and
+  // `data-theme="system"` would match neither and leave Press light by default
+  // for a reader who had asked to follow a dark system.
   $effect(() => {
-    document.documentElement.setAttribute('data-theme', theme.chosen);
+    document.documentElement.setAttribute('data-theme', theme.resolved);
   });
 </script>
 

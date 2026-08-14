@@ -2,6 +2,7 @@ import { invoke } from '@tauri-apps/api/core';
 import type {
   EditorCommand,
   Engine,
+  IconChoice,
   LooseDocument,
   LinkBox,
   OpenRequest,
@@ -109,6 +110,18 @@ export const api = {
 
   /** An empty command clears the setting, putting the button back on the default. */
   setEditorCommand: (command: string) => invoke<void>('set_editor_command', { command }),
+
+  /** Which of the three tiles Press wears in the Dock. */
+  iconChoice: () => invoke<IconChoice>('icon_choice'),
+
+  /**
+   * Stores the tile and writes it onto the bundle.
+   *
+   * Answers whether there was a bundle to write on. A development build is a
+   * bare binary with none, so the choice is kept and shows nowhere until the
+   * next install — worth saying, and not an error.
+   */
+  setIconChoice: (name: IconChoice) => invoke<boolean>('set_icon_choice', { name }),
 
   /** Collects a path Press was launched with. Taking it clears it. */
   takePendingOpen: () => invoke<OpenRequest | null>('take_pending_open'),

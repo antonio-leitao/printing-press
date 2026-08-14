@@ -1,4 +1,5 @@
 mod anchors;
+mod appearance;
 mod build;
 mod commands;
 mod database;
@@ -106,6 +107,18 @@ pub fn run() {
             if repository.setting(editor::SETTING)?.is_none() {
                 repository.set_setting(editor::SETTING, &editor::suggested_command())?;
             }
+            // The bundle carries the icon and installing replaces the bundle,
+            // so a chosen one is put back rather than assumed to have survived.
+            // Only when it is not the built-in tile: writing the default onto a
+            // bundle that was built with it would touch `/Applications` at every
+            // start to no visible effect. Failing here is not worth refusing to
+            // open over — Press wearing the wrong icon still reads documents.
+            let icon = appearance::resolve(repository.setting(appearance::SETTING)?);
+            if icon != appearance::DEFAULT
+                && let Err(error) = appearance::apply(&icon)
+            {
+                eprintln!("Press could not put its icon back: {error}");
+            }
             sweep_storage(&artifact_root, &work_root, &objects_root, &repository);
             let builds = Arc::new(BuildManager::new(
                 Arc::clone(&repository),
@@ -161,6 +174,8 @@ pub fn run() {
             commands::launch_editor,
             commands::editor_command,
             commands::set_editor_command,
+            commands::icon_choice,
+            commands::set_icon_choice,
             commands::take_pending_open,
             commands::expecting_open,
             commands::take_startup_notice,

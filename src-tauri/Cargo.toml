@@ -3,6 +3,8 @@ name = "press"
 version = "0.1.0"
 description = "A clean LaTeX project builder and PDF viewer"
 authors = ["Antonio Leitao"]
+# Inherited from MuPDF, whose C is compiled into the binary.
+license = "AGPL-3.0-only"
 edition = "2024"
 rust-version = "1.88"
 
@@ -34,6 +36,24 @@ tauri-plugin-single-instance = "2.4.3"
 thiserror = "2.0.19"
 tokio = { version = "1.53.1", features = ["fs", "io-util", "macros", "process", "sync", "time"] }
 walkdir = "2.5.0"
+
+# Writing the chosen Dock icon onto the bundle is the one thing Press asks
+# AppKit for directly. Tauri's own icon call is `#[cfg(dev)]` and does not
+# survive into a release build, and there is no interface above it that does.
+# All three are already in the tree underneath tao; naming them here makes the
+# dependency Press's own rather than one it borrows from a runtime.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", default-features = false, features = [
+	"std",
+	"NSImage",
+	"NSWorkspace",
+] }
+objc2-foundation = { version = "0.3", default-features = false, features = [
+	"std",
+	"NSData",
+	"NSString",
+] }
 
 [dev-dependencies]
 tempfile = "3.27.0"

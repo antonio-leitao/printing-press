@@ -1,8 +1,9 @@
 # Press
 
 Press is a Tauri desktop app that keeps source trees clean while providing a cached PDF viewer, a
-compiler, and a Neovim workflow. Neovim remains the editor; Press owns the PDF, the build, and the
-history.
+compiler, and a history. Your editor stays your editor — Neovim through
+[press.nvim](https://github.com/antonio-leitao/press.nvim), or any command you name; Press owns the
+PDF, the build, and the history.
 
 The backend is built around a source reference — the working tree or a snapshot — so that builds,
 caches, database rows and events all carry the dimension the history needs.
@@ -90,38 +91,83 @@ incomplete, and says so at build time rather than silently.
 - A TeX distribution containing `latexmk` in `PATH` or a standard macOS location
 - pandoc, for markdown projects only
 - An editor, if you want the Editor button to open one; any command will do
-- Node.js and Rust for development
+- Node.js and Rust, to build it — see below
 
-MuPDF is AGPL-3.0. That binds Press only if it is distributed.
+MuPDF is AGPL-3.0 and its C is compiled into the binary, so Press is AGPL-3.0 too. See
+[License](#license).
 
 Press deliberately does not enable `--shell-escape`. A `.latexmkrc` is still executable Perl, and
 latexmk loads one from the directory it runs in — the document's own — so such a file is reported
 before the document is opened for the first time. Only open documents in folders you trust.
 
-## Development
+## Building it
+
+Press is not distributed. You build it and install it yourself, which takes two commands from a
+fresh clone:
 
 ```sh
 npm install
-npm run check
-npm run test:frontend
-cargo test --manifest-path src-tauri/Cargo.toml
-npm run tauri dev
+npm run install:app
 ```
 
-To build and install the app into `/Applications`:
+That builds the app and installs it into `/Applications`. It is safe to run again on top of
+itself, and safe to run from any directory. MuPDF is vendored C, so the first build is slow and
+later ones are not.
+
+Optionally, `--link` also puts a `press` command on your PATH:
 
 ```sh
-npm run release
+npm run install:app -- --link
 ```
 
-`scripts/install-app.sh` quits any running Press before replacing the bundle, and removes the old
-one rather than copying over it. Both matter: `cp -R` onto an existing bundle merges into it, so a
-file dropped between versions is left behind, and replacing the bundle under a running process
-leaves that process with a signature that no longer resolves — after which macOS refuses it access
-to protected folders, and the app keeps running while quietly failing at everything.
+It writes a small script to `~/.local/bin/press` — off by default, because an app you built
+yourself should not quietly add things to your PATH, and [press.nvim](https://github.com/antonio-leitao/press.nvim)
+does not need it: it finds the bundle on its own. The flag is only needed once. It points at
+`/Applications/Press.app`, and a later rebuild that finds the script already there writes it back
+without being asked again.
+
+That script runs the app through `open`, so Press comes up owned by launchd rather than by the
+shell you typed in — close the terminal and Press lives on. It also makes relative paths absolute
+first: `open` starts the app with a working directory of its own, not yours, so `press paper.tex`
+would otherwise be resolved against the wrong folder.
+
+To remove it:
+
+```sh
+npm run uninstall:app            # the app
+npm run uninstall:app -- --purge # the app and everything it stored
+```
+
+Either removes the `press` script too, but only if it is the one Press wrote — a file of your own
+at that path is left alone and said so.
+
+Without `--purge` your history stays. Snapshots live in Press's own object store — not in your
+project folders and not in git — so `~/Library/Application Support/com.antonio.press` is the only
+copy of every version you ever kept. Rebuilding the app is easy; that is not.
+
+`npm run tauri build` builds without installing, and `sh scripts/install-app.sh` installs without
+building, for when you want only one of the two.
+
+`scripts/install-app.sh` starts by uninstalling, because both halves of that matter. `cp -R` onto
+an existing bundle merges into it, so a file dropped between versions is left behind; and replacing
+the bundle under a running process leaves that process with a signature that no longer resolves,
+after which macOS refuses it access to protected folders and the app keeps running while quietly
+failing at everything.
+
+### Working on it
+
+```sh
+npm run tauri dev     # the app, rebuilt as you edit
+npm run check         # svelte-check
+npm run test          # everything: check, frontend, clippy, backend
+```
 
 The two build tests in `src-tauri/src/runner.rs` compile real documents and are skipped when
 `latexmk` is not installed.
+
+An installed Press and a development build are both called `press`, and only one runs at a time.
+[press.nvim](https://github.com/antonio-leitao/press.nvim) finds the installed one on its own, so
+point its `app_command` at `src-tauri/target/debug/press` while you are working on Press itself.
 
 ## Backend boundaries
 
@@ -211,8 +257,10 @@ paper opens as itself, because nothing includes it.
 picker: the documents Press already keeps first, then the ones it found.
 
 The transport is `tauri-plugin-single-instance`, which was already in place. Launching the binary
-a second time delivers its arguments to the instance already running, so there is no socket, no
-port and no URL scheme to register. The resolved request is held rather than only emitted, because
+a second time delivers its arguments to the instance already running, over a Unix socket in `/tmp`
+that the plugin opens and cleans up itself — so there is no port and no URL scheme for Press to
+register, and nothing about the transport is Press's to maintain. The resolved request is held
+rather than only emitted, because
 a launch from the editor arrives before the webview is listening; the interface collects it on
 mount, and taking it clears it so nothing opens twice.
 
@@ -225,3 +273,13 @@ mount, and taking it clears it so nothing opens twice.
 - Export/print
 - Semantic scroll anchoring across changed pagination
 - Polished visual design
+
+## License
+
+Copyright (C) 2025 Antonio Leitao. GNU Affero General Public License, version 3 — the full text is
+in [LICENSE](LICENSE).
+
+Not a choice so much as an inheritance: Press rasterises with MuPDF, whose C is compiled into the
+binary, and MuPDF is AGPL-3.0. Anything linking it and going out the door goes out under the same
+terms. Press is built rather than shipped, so nothing about that binds you while the binary stays
+on the machine that compiled it — but the source is here, and the source should say what it is.

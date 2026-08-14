@@ -12,11 +12,14 @@
 set -eu
 
 TARGET="/Applications/Press.app"
+LINK="$HOME/.local/bin/press"
 DATA="$HOME/Library/Application Support/com.antonio.press"
 CACHE="$HOME/Library/Caches/com.antonio.press"
 # Left behind by a Press that was killed rather than quit. Harmless — the next
-# start clears it — but an uninstall should not leave litter either.
-SOCKET="/tmp/com.antonio.press_si.sock"
+# start clears it — but an uninstall should not leave litter either. The name is
+# the bundle identifier with every `.` and `-` turned into `_`, which is what
+# tauri-plugin-single-instance does before it opens the socket.
+SOCKET="/tmp/com_antonio_press_si.sock"
 
 purge=no
 quiet=no
@@ -57,6 +60,18 @@ if [ -d "$TARGET" ]; then
 	removed=yes
 fi
 rm -f "$SOCKET"
+
+# The `press` command, and only if it is the one we wrote. A file of your own at
+# that path is not ours to delete, and saying so is better than either removing
+# it or silently leaving it looking installed.
+if [ -e "$LINK" ]; then
+	if head -5 "$LINK" 2>/dev/null | grep -q press-cli-shim; then
+		rm -f "$LINK"
+		say "Removed $LINK"
+	else
+		say "Left $LINK alone — it is not the one Press wrote."
+	fi
+fi
 
 if [ "$purge" = yes ]; then
 	rm -rf "$DATA" "$CACHE"

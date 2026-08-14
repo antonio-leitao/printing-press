@@ -1,7 +1,17 @@
 <script lang="ts">
   import { onMount, untrack, type Component } from 'svelte';
   import { fade } from 'svelte/transition';
-  import { Download, Moon, Pencil, Pin, PinOff, Settings, Sun, Trash2 } from '@lucide/svelte';
+  import {
+    Download,
+    Monitor,
+    Moon,
+    Pencil,
+    Pin,
+    PinOff,
+    Settings,
+    Sun,
+    Trash2
+  } from '@lucide/svelte';
   import { listen } from '@tauri-apps/api/event';
   import { getCurrentWebview } from '@tauri-apps/api/webview';
   import { open } from '@tauri-apps/plugin-dialog';
@@ -10,9 +20,10 @@
   import { api, errorMessage } from '$lib/api';
   import { fail, notify } from '$lib/messages.svelte';
   import { modal } from '$lib/modal';
-  import { theme } from '$lib/theme.svelte';
+  import { theme, type ThemePreference } from '$lib/theme.svelte';
   import {
     ENGINES,
+    ICON_CHOICES,
     WORKTREE,
     type BuildProgress,
     type BuildUpdate,
@@ -21,12 +32,20 @@
     type OpenRequest,
     type ArtifactSummary,
     type EditorCommand,
+    type IconChoice,
     type LooseDocument,
     type ProjectSummary,
     type SourcePeek,
     type VersionSummary,
     type WatcherError
   } from '$lib/types';
+
+  /** The three theme preferences, each with the thing it looks like. */
+  const THEME_OPTIONS: Array<{ value: ThemePreference; label: string; icon: Component }> = [
+    { value: 'light', label: 'Light', icon: Sun },
+    { value: 'dark', label: 'Dark', icon: Moon },
+    { value: 'system', label: 'System', icon: Monitor }
+  ];
 
   /** Matches the `.pinned-card` track width below, so nothing larger is drawn. */
   const PINNED_THUMB_WIDTH = 150
@@ -77,16 +96,28 @@
   const OPEN_GRACE = 4000;
   let buildLog = $state('');
   let progress = $state<BuildProgress | null>(null);
-  let settingsFor = $state<ProjectSummary | null>(null);
-  let settingsName = $state('');
-  let settingsEngine = $state<Engine>('pdflatex');
+  /// One project's own dialog — its name and which engine builds it. Named for
+  /// the project rather than for settings, because Settings below is the
+  /// application's and two things called settings in one file is one too many.
+  let projectFor = $state<ProjectSummary | null>(null);
+  let projectName = $state('');
+  let projectEngine = $state<Engine>('pdflatex');
+
+  /// Settings: the preferences that belong to Press rather than to a document.
+  ///
+  /// Nothing here has a Save button. Theme and icon are visual and want to be
+  /// seen at once, and a dialog where two of three controls apply themselves
+  /// and the third waits for a button is a dialog you have to read. The command
+  /// is written when the field is left, which is the same rule stated for a
+  /// control that cannot show its effect.
+  let settingsOpen = $state(false);
   /// What the Editor button runs. A command line rather than a list of editors
   /// Press knows: an editor Press has never heard of is one line here, and
   /// anything that will not fit on one line fits in a script, which is a better
   /// home for it than a table inside Press.
-  let editorOpen = $state(false);
   let editorCommand = $state('');
   let editorDefault = $state<EditorCommand | null>(null);
+  let iconChoice = $state<IconChoice>('green');
   let confirmDelete = $state<ProjectSummary | null>(null);
   let confirmDiscard = $state<VersionSummary | null>(null);
 
@@ -182,7 +213,7 @@
         icon: project.pinned ? PinOff : Pin,
         run: () => void setPinned(project, !project.pinned)
       },
-      { label: 'Rename…', icon: Pencil, run: () => openSettings(project) },
+      { label: 'Rename…', icon: Pencil, run: () => editProject(project) },
       {
         label: 'Download PDF',
         icon: Download,
@@ -276,8 +307,8 @@
   const dialogOpen = $derived(
     Boolean(
       choosing ||
-        settingsFor ||
-        editorOpen ||
+        projectFor ||
+        settingsOpen ||
         confirmDelete ||
         confirmDiscard ||
         snapshotOpen ||
@@ -846,53 +877,89 @@
 
   // -- preferences -----------------------------------------------------------
 
-  async function openEditorSettings() {
+  async function openSettings() {
     try {
-      const current = await api.editorCommand();
-      editorDefault = current;
+      const [command, icon] = await Promise.all([api.editorCommand(), api.iconChoice()]);
+      editorDefault = command;
       // An unset command shows the default it is standing in for, so that
       // editing it is a change to something visible rather than to a blank.
-      editorCommand = current.command;
-      editorOpen = true;
+      editorCommand = command.command;
+      iconChoice = icon;
+      settingsOpen = true;
     } catch (reason) {
       fail(reason);
     }
   }
 
+  /// The command, written when the field is left rather than on every keystroke.
+  ///
+  /// Called from blur and from closing the dialog, which between them cover
+  /// every way of being finished with it — and it is worth nothing to write the
+  /// same string twice, so neither has to know about the other.
   async function saveEditorCommand() {
-    busy = true;
+    // Nothing is known about the command until the dialog has fetched it, and
+    // writing before then would save a field that is still empty over a command
+    // that is not.
+    if (!editorDefault) return;
+    const wanted = editorCommand.trim();
+    if (wanted === editorDefault.command.trim()) return;
     try {
-      await api.setEditorCommand(editorCommand.trim());
-      editorOpen = false;
+      await api.setEditorCommand(wanted);
+      // What was saved is what the field now stands for, so a second blur has
+      // nothing left to do.
+      editorDefault = { ...editorDefault, command: wanted };
     } catch (reason) {
       fail(reason);
-    } finally {
-      busy = false;
     }
   }
 
-  function openSettings(project: ProjectSummary) {
-    settingsFor = project;
-    settingsName = project.name;
-    settingsEngine = project.engine;
+  /// The icon, applied at once — it is a picture, and a picture you have to
+  /// press Save to see is a picture you cannot choose between.
+  async function chooseIcon(name: IconChoice) {
+    const previous = iconChoice;
+    iconChoice = name;
+    try {
+      const shown = await api.setIconChoice(name);
+      if (!shown) {
+        // A development build is a bare binary with no bundle to write on. The
+        // choice is stored and will be worn by the next installed Press.
+        notify('Icon saved. A development build has no bundle to show it on.');
+      }
+    } catch (reason) {
+      iconChoice = previous;
+      fail(reason);
+    }
   }
 
-  async function saveSettings() {
-    const project = settingsFor;
+  async function closeSettings() {
+    await saveEditorCommand();
+    settingsOpen = false;
+  }
+
+  /// Not `openProject` — that one opens the document. This one opens the dialog
+  /// that edits it.
+  function editProject(project: ProjectSummary) {
+    projectFor = project;
+    projectName = project.name;
+    projectEngine = project.engine;
+  }
+
+  async function saveProject() {
+    const project = projectFor;
     if (!project) return;
     busy = true;
     try {
-      const name = settingsName.trim();
+      const name = projectName.trim();
       if (name && name !== project.name) {
         mergeProject(await api.renameProject(project.id, name));
       }
-      if (settingsEngine !== project.engine) {
+      if (projectEngine !== project.engine) {
         // Discards every cached PDF. The new build produces a new artifact id,
         // so nothing stale can be shown.
-        mergeProject(await api.setProjectEngine(project.id, settingsEngine));
+        mergeProject(await api.setProjectEngine(project.id, projectEngine));
         notify('Engine changed. Cached PDFs were discarded and a rebuild has started.');
       }
-      settingsFor = null;
+      projectFor = null;
     } catch (reason) {
       fail(reason);
     } finally {
@@ -1321,22 +1388,9 @@
         </p>
       </div>
       <div class="library-actions">
-        <!-- Shows what it will do rather than where it is: a moon to go dark. -->
         <button
-          class="theme-toggle"
-          onclick={() => theme.toggle()}
-          title={dark ? 'Light theme' : 'Dark theme'}
-          aria-label={dark ? 'Switch to the light theme' : 'Switch to the dark theme'}
-        >
-          {#if dark}
-            <Sun size={16} strokeWidth={1.75} aria-hidden="true" />
-          {:else}
-            <Moon size={16} strokeWidth={1.75} aria-hidden="true" />
-          {/if}
-        </button>
-        <button
-          class="theme-toggle"
-          onclick={openEditorSettings}
+          class="quiet-action"
+          onclick={openSettings}
           title="Settings"
           aria-label="Settings"
         >
@@ -1599,59 +1653,111 @@
   </dialog>
 {/if}
 
-{#if editorOpen}
-  <dialog use:modal={() => (editorOpen = false)} aria-labelledby="editor-title">
-    <h2 id="editor-title">Editor</h2>
-    <p class="quiet">
-      What the Editor button runs. Press opens the document and has nothing more
-      to do with it — the folder is watched either way, so a save rebuilds
-      whoever wrote it.
-    </p>
-    <label>
-      Command
-      <!-- svelte-ignore a11y_autofocus -->
-      <input
-        bind:value={editorCommand}
-        autofocus
-        spellcheck="false"
-        autocapitalize="off"
-        autocorrect="off"
-        onkeydown={(event) => {
-          if (event.key === 'Enter') saveEditorCommand();
-        }}
-      />
-    </label>
-    <p class="quiet">
-      <code>{'{file}'}</code> is the document and <code>{'{dir}'}</code> is its folder. Quote a word
-      that has a space in it. Left empty, Press hands the document to the system and lets it open
-      whatever you have set for that kind of file.
-    </p>
-    {#if editorDefault && editorCommand.trim() !== editorDefault.suggested}
+{#if settingsOpen}
+  <dialog
+    class="settings"
+    use:modal={closeSettings}
+    aria-labelledby="settings-title"
+  >
+    <h2 id="settings-title">Settings</h2>
+
+    <section>
+      <h3>Theme</h3>
+      <!-- The same switch as ⌃r, not a second preference that has to agree with
+           it. System is not a third way for a page to look — it is declining to
+           choose, and it follows macOS for as long as it is set. -->
+      <div class="choices" role="radiogroup" aria-label="Theme">
+        {#each THEME_OPTIONS as option (option.value)}
+          <button
+            class="choice"
+            role="radio"
+            aria-checked={theme.preference === option.value}
+            onclick={() => (theme.preference = option.value)}
+          >
+            <option.icon size={16} strokeWidth={1.75} aria-hidden="true" />
+            {option.label}
+          </button>
+        {/each}
+      </div>
+    </section>
+
+    <section>
+      <h3>Icon</h3>
+      <!-- No names under these. They are pictures, and the thing a picture is
+           called adds nothing to choosing between three of them you can see. -->
+      <div class="choices" role="radiogroup" aria-label="Dock icon">
+        {#each ICON_CHOICES as name (name)}
+          <button
+            class="choice tile"
+            role="radio"
+            aria-checked={iconChoice === name}
+            onclick={() => chooseIcon(name)}
+            title={name}
+            aria-label={name}
+          >
+            <img src="/icons/press-{name}.png" alt="" width="72" height="72" />
+            <span class="dot" aria-hidden="true"></span>
+          </button>
+        {/each}
+      </div>
       <p class="quiet">
-        Suggested for this machine:
-        <button class="link" onclick={() => (editorCommand = editorDefault?.suggested ?? '')}>
-          <code>{editorDefault.suggested}</code>
-        </button>
+        Written onto the application itself, so the Dock shows it from the moment
+        Press is launched rather than once it is up. Installing replaces the
+        bundle and takes the icon with it; the choice is kept and put back at the
+        next start.
       </p>
-    {/if}
+    </section>
+
+    <section>
+      <h3>Editor</h3>
+      <label>
+        Command
+        <input
+          bind:value={editorCommand}
+          spellcheck="false"
+          autocapitalize="off"
+          autocorrect="off"
+          onblur={saveEditorCommand}
+          onkeydown={(event) => {
+            if (event.key === 'Enter') saveEditorCommand();
+          }}
+        />
+      </label>
+      <p class="quiet">
+        What the Editor button runs. <code>{'{file}'}</code> is the document and
+        <code>{'{dir}'}</code> is its folder. Quote a word that has a space in it. Left empty, Press
+        hands the document to the system and lets it open whatever you have set for that kind of
+        file.
+      </p>
+      {#if editorDefault && editorCommand.trim() !== editorDefault.suggested}
+        <p class="quiet">
+          Suggested for this machine:
+          <button class="link" onclick={() => (editorCommand = editorDefault?.suggested ?? '')}>
+            <code>{editorDefault.suggested}</code>
+          </button>
+        </p>
+      {/if}
+    </section>
+
+    <!-- One button, and it is not Save. Everything here has applied itself
+         already; this only puts the dialog away. -->
     <div class="dialog-actions">
-      <button onclick={() => (editorOpen = false)} disabled={busy}>Cancel</button>
-      <button onclick={saveEditorCommand} disabled={busy}>Save</button>
+      <button onclick={closeSettings} disabled={busy}>Done</button>
     </div>
   </dialog>
 {/if}
 
-{#if settingsFor}
-  <dialog use:modal={() => (settingsFor = null)} aria-labelledby="settings-title">
-    <h2 id="settings-title">{settingsFor.name}</h2>
+{#if projectFor}
+  <dialog use:modal={() => (projectFor = null)} aria-labelledby="settings-title">
+    <h2 id="settings-title">{projectFor.name}</h2>
     <label>
       Name
-      <input bind:value={settingsName} maxlength="80" />
+      <input bind:value={projectName} maxlength="80" />
     </label>
-    <p class="quiet"><code>{settingsFor.documentPath}</code></p>
+    <p class="quiet"><code>{projectFor.documentPath}</code></p>
     <label>
       Engine
-      <select bind:value={settingsEngine}>
+      <select bind:value={projectEngine}>
         {#each ENGINES as engine}<option value={engine}>{engine}</option>{/each}
       </select>
     </label>
@@ -1661,8 +1767,8 @@
       own project.
     </p>
     <div class="dialog-actions">
-      <button onclick={() => (settingsFor = null)} disabled={busy}>Cancel</button>
-      <button onclick={saveSettings} disabled={busy}>Save</button>
+      <button onclick={() => (projectFor = null)} disabled={busy}>Cancel</button>
+      <button onclick={saveProject} disabled={busy}>Save</button>
     </div>
   </dialog>
 {/if}
@@ -2072,10 +2178,11 @@
     background: var(--accent-hover);
   }
 
-  /* The theme is a preference, not an action, so it is an icon in the quietest
-     ink beside the one filled control rather than a second thing competing with
-     it. Two classes, so it outranks the rule above without disowning it. */
-  .library-actions .theme-toggle {
+  /* Settings is a way in rather than a thing to do, so it is an icon in the
+     quietest ink beside the one filled control rather than a second thing
+     competing with it. Two classes, so it outranks the rule above without
+     disowning it. */
+  .library-actions .quiet-action {
     display: grid;
     place-items: center;
     padding: 0.5rem;
@@ -2085,7 +2192,7 @@
     transition: background var(--duration), color var(--duration);
   }
 
-  .library-actions .theme-toggle:hover {
+  .library-actions .quiet-action:hover {
     background: var(--paper-2);
     color: var(--ink);
   }
@@ -2584,6 +2691,134 @@
      a cutout resting on the desk, not a spotlight on a stage. */
   dialog::backdrop {
     background: var(--backdrop);
+  }
+
+  /* Settings is the one dialog with more than one subject in it, so the
+     subjects are ruled off from each other rather than left to run together.
+     The last one is not, because a line above the Done button would read as a
+     fourth section that had lost its heading. */
+  dialog.settings section {
+    padding-bottom: 1rem;
+    margin-bottom: 1rem;
+    border-bottom: var(--bw) solid var(--line-1);
+  }
+
+  dialog.settings section:last-of-type {
+    padding-bottom: 0;
+    border-bottom: 0;
+  }
+
+  /* The same eyebrow a field label wears — these name a group of controls
+     rather than announcing a new part of the interface. */
+  dialog.settings h3 {
+    margin-bottom: 0.5rem;
+    color: var(--ink-3);
+    font-size: var(--fs-label);
+    font-weight: var(--fw-label);
+    letter-spacing: var(--tracking-label);
+    text-transform: uppercase;
+  }
+
+  dialog.settings section p:last-child {
+    margin-bottom: 0;
+  }
+
+  /* Centred: three of anything sitting left in a dialog this wide reads as the
+     start of a longer list rather than as the whole of a choice. */
+  .choices {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: center;
+    gap: 0.5rem;
+    margin-bottom: 0.75rem;
+  }
+
+  /* Radios drawn as what they select. A native radio beside a word would put
+     the choice in the dot rather than in the thing chosen, which is the wrong
+     way round when the thing chosen is a picture. */
+  .choice {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    padding: 0.45rem 0.7rem;
+    border: var(--bw) solid var(--line-2);
+    border-radius: var(--radius-sm);
+    background: transparent;
+    color: var(--ink-2);
+    font-family: var(--font-sans);
+    font-size: var(--fs-menu);
+    line-height: 1;
+    cursor: pointer;
+    transition:
+      border-color var(--duration),
+      color var(--duration);
+  }
+
+  .choice:hover {
+    color: var(--ink);
+    border-color: var(--line-3);
+  }
+
+  .choice[aria-checked='true'] {
+    border-color: var(--accent);
+    color: var(--ink);
+  }
+
+  /* The word options carry their selection in the ring, having no room below
+     for anything else. The tiles below carry theirs in the dot instead. */
+  .choice:not(.tile)[aria-checked='true'] {
+    box-shadow: inset 0 0 0 var(--bw) var(--accent);
+  }
+
+  /* A tile is the picture and nothing else — no frame competing with artwork
+     that already has its own edge, and no name under it. What marks the chosen
+     one is the dot, which is the only part of a radio worth keeping when the
+     label has gone. */
+  .choice.tile {
+    flex-direction: column;
+    gap: 0.55rem;
+    padding: 0;
+    border: 0;
+  }
+
+  .choice.tile img {
+    display: block;
+    width: 72px;
+    height: 72px;
+    /* Unchosen tiles step back rather than grey out: these are the same picture
+       in three colourways, and a desaturated preview of a colour is no preview
+       at all. */
+    opacity: 0.55;
+    transition: opacity var(--duration);
+  }
+
+  .choice.tile:hover img,
+  .choice.tile[aria-checked='true'] img {
+    opacity: 1;
+  }
+
+  .choice.tile .dot {
+    width: 0.75rem;
+    height: 0.75rem;
+    border: var(--bw) solid var(--line-3);
+    border-radius: 50%;
+    background: transparent;
+    transition:
+      border-color var(--duration),
+      background var(--duration),
+      box-shadow var(--duration);
+  }
+
+  .choice.tile:hover .dot {
+    border-color: var(--ink-3);
+  }
+
+  /* Filled in the accent, with the ring holding a hairline of the card between
+     dot and border — the way a real radio is drawn. */
+  .choice.tile[aria-checked='true'] .dot {
+    border-color: var(--accent);
+    background: var(--accent);
+    box-shadow: inset 0 0 0 2px var(--card);
   }
 
   /* One step above the dialog's own text, and well below the library's
