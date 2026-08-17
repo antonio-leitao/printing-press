@@ -10,8 +10,8 @@ use rusqlite::{Connection, OptionalExtension, Row, Transaction, params};
 use crate::{
     error::{AppError, AppResult},
     model::{
-        ArtifactSummary, BuildState, Diagnostic, Engine, Project, ProjectSummary, SnapshotOutcome,
-        SnapshotSummary, SourceRef, VersionSummary,
+        ArtifactSummary, BuildState, Diagnostic, Engine, Preset, Project, ProjectSummary,
+        SnapshotOutcome, SnapshotSummary, SourceRef, VersionSummary,
     },
 };
 
@@ -113,6 +113,85 @@ impl Repository {
              ON CONFLICT(key) DO UPDATE SET value = excluded.value",
             [key, value],
         )?;
+        Ok(())
+    }
+
+    pub fn clear_setting(&self, key: &str) -> AppResult<()> {
+        let connection = self.lock()?;
+        connection.execute("DELETE FROM settings WHERE key = ?1", [key])?;
+        Ok(())
+    }
+
+    // -- frontmatter presets ----------------------------------------------
+
+    /// By name, because a set with no order of its own should at least be
+    /// shown in the same order twice running.
+    pub fn list_presets(&self) -> AppResult<Vec<Preset>> {
+        let connection = self.lock()?;
+        let mut statement = connection
+            .prepare("SELECT id, name, body FROM presets ORDER BY name COLLATE NOCASE, id")?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok(Preset {
+                    id: row.get(0)?,
+                    name: row.get(1)?,
+                    body: row.get(2)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    pub fn preset(&self, id: i64) -> AppResult<Option<Preset>> {
+        let connection = self.lock()?;
+        let found = connection
+            .query_row(
+                "SELECT id, name, body FROM presets WHERE id = ?1",
+                [id],
+                |row| {
+                    Ok(Preset {
+                        id: row.get(0)?,
+                        name: row.get(1)?,
+                        body: row.get(2)?,
+                    })
+                },
+            )
+            .optional()?;
+        Ok(found)
+    }
+
+    /// Creates one, or replaces the body and name of the one identified.
+    pub fn save_preset(&self, id: Option<i64>, name: &str, body: &str) -> AppResult<Preset> {
+        let connection = self.lock()?;
+        let id = match id {
+            Some(id) => {
+                let changed = connection.execute(
+                    "UPDATE presets SET name = ?2, body = ?3 WHERE id = ?1",
+                    params![id, name, body],
+                )?;
+                if changed == 0 {
+                    return Err(AppError::NotFound(format!("no preset with id {id}")));
+                }
+                id
+            }
+            None => {
+                connection.execute(
+                    "INSERT INTO presets (name, body) VALUES (?1, ?2)",
+                    params![name, body],
+                )?;
+                connection.last_insert_rowid()
+            }
+        };
+        Ok(Preset {
+            id,
+            name: name.to_owned(),
+            body: body.to_owned(),
+        })
+    }
+
+    pub fn delete_preset(&self, id: i64) -> AppResult<()> {
+        let connection = self.lock()?;
+        connection.execute("DELETE FROM presets WHERE id = ?1", [id])?;
         Ok(())
     }
 
@@ -1056,6 +1135,15 @@ const SCHEMA: &str = "
     CREATE TABLE IF NOT EXISTS settings (
         key TEXT PRIMARY KEY,
         value TEXT NOT NULL
+    );
+
+    -- YAML frontmatter Press hands pandoc for a markdown document that carries
+    -- none of its own. A table rather than more settings rows: these have a
+    -- name and a body and there are several of them, which is a record.
+    CREATE TABLE IF NOT EXISTS presets (
+        id INTEGER PRIMARY KEY,
+        name TEXT NOT NULL,
+        body TEXT NOT NULL
     );
 
     CREATE TABLE IF NOT EXISTS build_states (

@@ -2,12 +2,15 @@
   import { onMount, untrack, type Component } from 'svelte';
   import { fade } from 'svelte/transition';
   import {
+    ChevronDown,
+    ChevronRight,
     Download,
     Monitor,
     Moon,
     Pencil,
     Pin,
     PinOff,
+    Plus,
     Settings,
     Sun,
     Trash2
@@ -16,6 +19,7 @@
   import { getCurrentWebview } from '@tauri-apps/api/webview';
   import { open } from '@tauri-apps/plugin-dialog';
   import PdfThumbnail from '$lib/PdfThumbnail.svelte';
+  import PresetPreview from '$lib/PresetPreview.svelte';
   import PdfViewer, { type PeekRequest } from '$lib/PdfViewer.svelte';
   import { api, errorMessage } from '$lib/api';
   import { fail, notify } from '$lib/messages.svelte';
@@ -33,6 +37,7 @@
     type ArtifactSummary,
     type EditorCommand,
     type IconChoice,
+    type Preset,
     type LooseDocument,
     type ProjectSummary,
     type SourcePeek,
@@ -46,6 +51,11 @@
     { value: 'dark', label: 'Dark', icon: Moon },
     { value: 'system', label: 'System', icon: Monitor }
   ];
+
+  /** The box the sample page is fitted into. One page rather than several, so
+      it can be large enough that the type is read rather than inferred. */
+  const PRESET_PAGE_WIDTH = 380;
+  const PRESET_PAGE_HEIGHT = 500;
 
   /** Matches the `.pinned-card` track width below, so nothing larger is drawn. */
   const PINNED_THUMB_WIDTH = 150
@@ -118,6 +128,21 @@
   let editorCommand = $state('');
   let editorDefault = $state<EditorCommand | null>(null);
   let iconChoice = $state<IconChoice>('green');
+  /// The frontmatter presets, the chosen one, and the draft of whichever is
+  /// open for editing. The draft is separate from the list so that typing does
+  /// not rewrite a row on every keystroke — it is written back on blur, the
+  /// same rule the editor command follows.
+  let presets = $state<Preset[]>([]);
+  let presetSelected = $state<number | null>(null);
+  let presetName = $state('');
+  let presetBody = $state('');
+  /// Whether the frontmatter itself is open. Collapsed by default: picking a
+  /// preset is the common act and editing one is the rare one, and a textarea
+  /// standing open pushes the shelf off the top of the dialog.
+  let presetOpen = $state(false);
+  /// Why the chosen preset would not compile, as pandoc or TeX put it. Reported
+  /// by the card that failed, shown here where there is room for a sentence.
+  let presetError = $state('');
   let confirmDelete = $state<ProjectSummary | null>(null);
   let confirmDiscard = $state<VersionSummary | null>(null);
 
@@ -879,13 +904,113 @@
 
   async function openSettings() {
     try {
-      const [command, icon] = await Promise.all([api.editorCommand(), api.iconChoice()]);
+      const [command, icon, list] = await Promise.all([
+        api.editorCommand(),
+        api.iconChoice(),
+        api.listPresets()
+      ]);
       editorDefault = command;
       // An unset command shows the default it is standing in for, so that
       // editing it is a change to something visible rather than to a blank.
       editorCommand = command.command;
       iconChoice = icon;
+      presets = list.presets;
+      presetSelected = list.selected;
+      syncPresetDraft();
       settingsOpen = true;
+    } catch (reason) {
+      fail(reason);
+    }
+  }
+
+  /// The draft follows the selection: the row that is open for editing is the
+  /// chosen one, so that choosing and editing are not two things to keep track
+  /// of at once.
+  function syncPresetDraft() {
+    const current = presets.find((preset) => preset.id === presetSelected);
+    presetName = current?.name ?? '';
+    presetBody = current?.body ?? '';
+  }
+
+  async function choosePreset(id: number | null) {
+    // Whatever was being edited is written before moving off it, or a change
+    // typed and then abandoned by clicking another row would be lost.
+    await savePresetDraft();
+    const previous = presetSelected;
+    presetSelected = id;
+    syncPresetDraft();
+    // Belongs to the preset that failed, not to the shelf.
+    presetError = '';
+    try {
+      await api.selectPreset(id);
+    } catch (reason) {
+      presetSelected = previous;
+      syncPresetDraft();
+      fail(reason);
+    }
+  }
+
+  /// Written on blur rather than on every keystroke, and only when it differs
+  /// from what is stored.
+  async function savePresetDraft() {
+    const id = presetSelected;
+    if (id === null) return;
+    const current = presets.find((preset) => preset.id === id);
+    if (!current) return;
+    const name = presetName.trim();
+    // A preset is chosen by its name, so it has to keep one. An emptied field
+    // goes back to what it was rather than refusing to close the dialog.
+    if (!name) {
+      presetName = current.name;
+      return;
+    }
+    if (name === current.name && presetBody === current.body) return;
+    try {
+      const saved = await api.savePreset(id, name, presetBody);
+      presets = presets
+        .map((preset) => (preset.id === id ? saved : preset))
+        .sort((a, b) => a.name.localeCompare(b.name));
+      presetName = saved.name;
+    } catch (reason) {
+      fail(reason);
+    }
+  }
+
+  async function addPreset() {
+    await savePresetDraft();
+    // Named rather than blank, because the name is how it is chosen and an
+    // unnamed row is a row you cannot tell from the next one.
+    const taken = new Set(presets.map((preset) => preset.name));
+    let name = 'New preset';
+    for (let n = 2; taken.has(name); n += 1) name = `New preset ${n}`;
+    try {
+      const created = await api.savePreset(null, name, '');
+      presets = [...presets, created].sort((a, b) => a.name.localeCompare(b.name));
+      // Created and chosen in one move: adding one you then have to select is a
+      // step that never has a reason to be skipped.
+      presetSelected = created.id;
+      syncPresetDraft();
+      presetError = '';
+      // A preset you have just made is one you are about to write, so the field
+      // is open without being asked for.
+      presetOpen = true;
+      await api.selectPreset(created.id);
+    } catch (reason) {
+      fail(reason);
+    }
+  }
+
+  async function deletePreset(id: number) {
+    try {
+      await api.deletePreset(id);
+      presets = presets.filter((preset) => preset.id !== id);
+      if (presetSelected === id) {
+        // Deleting the chosen one falls back to none rather than to whichever
+        // card happens to be next.
+        presetSelected = null;
+        syncPresetDraft();
+        presetError = '';
+      }
     } catch (reason) {
       fail(reason);
     }
@@ -933,6 +1058,7 @@
 
   async function closeSettings() {
     await saveEditorCommand();
+    await savePresetDraft();
     settingsOpen = false;
   }
 
@@ -1700,12 +1826,6 @@
           </button>
         {/each}
       </div>
-      <p class="quiet">
-        Written onto the application itself, so the Dock shows it from the moment
-        Press is launched rather than once it is up. Installing replaces the
-        bundle and takes the icon with it; the choice is kept and put back at the
-        next start.
-      </p>
     </section>
 
     <section>
@@ -1725,9 +1845,8 @@
       </label>
       <p class="quiet">
         What the Editor button runs. <code>{'{file}'}</code> is the document and
-        <code>{'{dir}'}</code> is its folder. Quote a word that has a space in it. Left empty, Press
-        hands the document to the system and lets it open whatever you have set for that kind of
-        file.
+        <code>{'{dir}'}</code> its folder; quote anything with a space in it. Left empty, the
+        document opens in whatever your system uses for that kind of file.
       </p>
       {#if editorDefault && editorCommand.trim() !== editorDefault.suggested}
         <p class="quiet">
@@ -1737,6 +1856,125 @@
           </button>
         </p>
       {/if}
+    </section>
+
+    <section>
+      <h3>Markdown frontmatter</h3>
+      <p class="quiet">
+        Applied to markdown documents that set none of their own, so a preamble
+        you use everywhere is written once instead of at the top of every file.
+      </p>
+
+      <!-- One page, as large as the dialog will carry it, and a list that
+           changes what it shows. Several small pages side by side could be
+           compared but not read: at thumbnail size a preset is a texture, and
+           the face — which is most of what a preset decides — needs to be
+           looked at rather than glanced at. -->
+      <!-- A two-panel selector: what is chosen on the left, what it produces on
+           the right, in that order because that is the order they are read in.
+           Side by side rather than stacked so that editing the frontmatter and
+           watching the page it makes are the same glance — stacked, the page
+           would be scrolled off the top at the moment it mattered.
+
+           Held together by spacing rather than by a border. Everything on the
+           left is one group because it is close; the page is another because it
+           is far. A box around either would be a boundary doing work the gap is
+           already doing. -->
+      <div class="preset-layout">
+        <div class="preset-controls">
+          <label class="preset-field">
+            Template
+            <span class="select-shell">
+              <select
+                value={presetSelected === null ? '' : String(presetSelected)}
+                onchange={(event) => {
+                  const value = event.currentTarget.value;
+                  choosePreset(value === '' ? null : Number(value));
+                }}
+              >
+                <option value="">None</option>
+                {#each presets as preset (preset.id)}
+                  <option value={String(preset.id)}>{preset.name}</option>
+                {/each}
+              </select>
+              <ChevronDown size={14} strokeWidth={2} aria-hidden="true" />
+            </span>
+          </label>
+
+          <div class="preset-buttons">
+            <button class="preset-action" onclick={addPreset}>
+              <Plus size={14} strokeWidth={2} aria-hidden="true" />
+              New
+            </button>
+            {#if presetSelected !== null}
+              <button class="preset-delete" onclick={() => deletePreset(presetSelected!)}>
+                <Trash2 size={14} strokeWidth={1.75} aria-hidden="true" />
+                Delete
+              </button>
+            {/if}
+          </div>
+
+          {#if presetSelected !== null}
+            <label class="preset-field">
+              Name
+              <input bind:value={presetName} maxlength="60" onblur={savePresetDraft} />
+            </label>
+
+            <div class="preset-frontmatter">
+              <button
+                class="preset-disclosure"
+                onclick={() => (presetOpen = !presetOpen)}
+                aria-expanded={presetOpen}
+              >
+                {#if presetOpen}
+                  <ChevronDown size={14} strokeWidth={2} aria-hidden="true" />
+                {:else}
+                  <ChevronRight size={14} strokeWidth={2} aria-hidden="true" />
+                {/if}
+                <span>Frontmatter</span>
+              </button>
+
+              {#if presetOpen}
+                <textarea
+                  bind:value={presetBody}
+                  rows="12"
+                  spellcheck="false"
+                  autocapitalize="off"
+                  aria-label="Frontmatter"
+                  placeholder={'geometry: margin=1in\nfontsize: 11pt'}
+                  onblur={savePresetDraft}
+                ></textarea>
+                <p class="quiet">
+                  YAML, without the <code>---</code> fences. Always applied. A document overrides it
+                  by setting the same key, or by adding its own <code>header-includes</code> — those
+                  come after these, so they win.
+                </p>
+              {/if}
+            </div>
+          {/if}
+
+          {#if presetError}
+            <p class="preset-error">{presetError}</p>
+          {/if}
+        </div>
+
+        <div class="preset-stage">
+          <!-- Not keyed on the selection. Remounting would blank the page on
+               every switch; left alone, the previous one stays up until the
+               next has been drawn, which is what the preview was built to do. -->
+          <PresetPreview
+            body={presetSelected === null ? '' : presetBody}
+            width={PRESET_PAGE_WIDTH}
+            height={PRESET_PAGE_HEIGHT}
+            onerror={(reason: string) => (presetError = reason)}
+          />
+        </div>
+      </div>
+
+      <p class="quiet">
+        Changing this does not rebuild. Save the document, or press Build, to see
+        it applied.
+      </p>
     </section>
 
     <!-- One button, and it is not Save. Everything here has applied itself
@@ -2693,6 +2931,16 @@
     background: var(--backdrop);
   }
 
+  /* Wider than the rest, and only this one: every other dialog is a question
+     with a field under it, while this holds a YAML editor with a compiled page
+     beside it. Widening `dialog` itself would give a rename box the same
+     measure and make it look like a form. */
+  dialog.settings {
+    /* Two columns wide: a page beside the field that changes it, with enough
+       left over that a line of YAML is read rather than scrolled. */
+    width: min(54rem, calc(100% - 2rem));
+  }
+
   /* Settings is the one dialog with more than one subject in it, so the
      subjects are ruled off from each other rather than left to run together.
      The last one is not, because a line above the Done button would read as a
@@ -2721,6 +2969,19 @@
 
   dialog.settings section p:last-child {
     margin-bottom: 0;
+  }
+
+  /* Two levels, told apart. Uppercase is what names a section; a field inside
+     one wearing the same treatment made EDITOR and COMMAND look like siblings
+     when the first contains the second. Scoped to Settings, because a dialog
+     that is one question and one field has no hierarchy to show. */
+  dialog.settings label,
+  .preset-disclosure {
+    color: var(--ink-3);
+    font-size: var(--fs-meta);
+    font-weight: 500;
+    letter-spacing: normal;
+    text-transform: none;
   }
 
   /* Centred: three of anything sitting left in a dialog this wide reads as the
@@ -2797,7 +3058,10 @@
     opacity: 1;
   }
 
-  .choice.tile .dot {
+  /* One radio mark, wherever a radio is drawn: under an icon tile, or beside a
+     preset's name. */
+  .dot {
+    flex: none;
     width: 0.75rem;
     height: 0.75rem;
     border: var(--bw) solid var(--line-3);
@@ -2819,6 +3083,165 @@
     border-color: var(--accent);
     background: var(--accent);
     box-shadow: inset 0 0 0 2px var(--card);
+  }
+
+  /* Chosen on the left, produced on the right. No border on either: the gap
+     between the columns is wider than any gap inside one, which is the whole of
+     what says they are two groups. */
+  .preset-layout {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 1.5rem;
+    align-items: start;
+    margin-bottom: 0.75rem;
+  }
+
+  /* One rhythm inside the column, wider than the space between a label and its
+     field and narrower than the space between sections — so the fields read as
+     a group without anything being drawn around them. */
+  .preset-controls {
+    display: flex;
+    flex-direction: column;
+    gap: 1rem;
+    min-width: 0;
+  }
+
+  .preset-controls .preset-field {
+    margin-bottom: 0;
+  }
+
+  /* Tight under the field they act on, because they act on it. */
+  .preset-buttons {
+    display: flex;
+    gap: 0.4rem;
+    margin-top: -0.5rem;
+  }
+
+  .preset-action {
+    display: flex;
+    align-items: center;
+    gap: 0.3rem;
+    padding: 0.35rem 0.55rem;
+    border: var(--bw) solid var(--line-2);
+    border-radius: var(--radius-sm);
+    background: transparent;
+    color: var(--ink-2);
+    font-family: var(--font-sans);
+    font-size: var(--fs-menu);
+    line-height: 1;
+    cursor: pointer;
+    transition:
+      border-color var(--duration),
+      color var(--duration);
+  }
+
+  .preset-action:hover {
+    border-color: var(--accent);
+    color: var(--accent);
+  }
+
+  /* The disclosure and what it opens are one thing, so they sit closer to each
+     other than to the field above. */
+  .preset-frontmatter {
+    display: flex;
+    flex-direction: column;
+    gap: 0.4rem;
+  }
+
+  .preset-stage {
+    display: grid;
+    place-items: center;
+  }
+
+  /* A native menu wearing the app's own field: `appearance: none` takes the
+     platform chrome off, and the chevron is drawn beside it in ink that follows
+     the theme — which a background image could not do. The element underneath
+     is still a `select`, so the keyboard and the screen reader get the control
+     they know. */
+  .select-shell {
+    position: relative;
+    display: block;
+  }
+
+  .select-shell :global(svg) {
+    position: absolute;
+    top: 50%;
+    right: 0.5rem;
+    transform: translateY(-50%);
+    color: var(--ink-3);
+    pointer-events: none;
+  }
+
+  /* Scoped to the shell, because the chevron above only exists here: stripping
+     the platform's own from every `select` in the application would leave the
+     project dialog's engine menu with nothing to say it opens. */
+  .select-shell select {
+    appearance: none;
+    padding-right: 1.75rem;
+    background: var(--paper);
+    cursor: pointer;
+  }
+
+  /* The frontmatter's own heading, and the control that opens it — one target,
+     so the word is as clickable as the arrow. */
+  .preset-disclosure {
+    display: flex;
+    align-items: center;
+    gap: 0.35rem;
+    padding: 0.2rem 0;
+    border: 0;
+    background: transparent;
+    font-family: var(--font-sans);
+    cursor: pointer;
+    transition: color var(--duration);
+  }
+
+  .preset-disclosure:hover {
+    color: var(--ink);
+  }
+
+  /* Named, because an unlabelled wastebasket beside a text field reads as
+     emptying the field. */
+  .preset-delete {
+    display: flex;
+    align-items: center;
+    gap: 0.35rem;
+    padding: 0.45rem 0.6rem;
+    border: var(--bw) solid transparent;
+    border-radius: var(--radius-sm);
+    background: transparent;
+    color: var(--ink-3);
+    font-family: var(--font-sans);
+    font-size: var(--fs-menu);
+    line-height: 1;
+    cursor: pointer;
+    transition:
+      background var(--duration),
+      color var(--duration);
+  }
+
+  .preset-delete:hover {
+    border-color: var(--danger-line);
+    background: var(--danger-tint);
+    color: var(--danger);
+  }
+
+  .preset-controls textarea {
+    font-family: var(--font-mono);
+    font-size: var(--fs-meta);
+    line-height: 1.5;
+    resize: vertical;
+    white-space: pre;
+  }
+
+  /* pandoc's or TeX's own words, so they are set as the machine said them. */
+  .preset-error {
+    margin: 0.4rem 0 0;
+    color: var(--danger);
+    font-family: var(--font-mono);
+    font-size: var(--fs-meta);
+    line-height: 1.45;
+    overflow-wrap: anywhere;
   }
 
   /* One step above the dialog's own text, and well below the library's

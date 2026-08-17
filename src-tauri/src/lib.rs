@@ -8,8 +8,10 @@ mod documents;
 mod editor;
 mod error;
 mod files;
+mod frontmatter;
 mod model;
 mod peek;
+mod preview;
 mod protocol;
 mod render;
 mod runner;
@@ -40,6 +42,10 @@ pub struct AppState {
     /// Snapshot file contents, addressed by hash. Data, not cache: losing this
     /// loses the history itself.
     objects_root: PathBuf,
+    /// Compiled preset previews, addressed by the hash of the preset. Cache in
+    /// the truest sense: every one of them can be made again from the preset it
+    /// was made from.
+    preview_root: PathBuf,
     /// Something worth telling the user about how Press started, collected by
     /// the interface once it is listening.
     startup_notice: Mutex<Option<String>>,
@@ -90,9 +96,13 @@ pub fn run() {
             let artifact_root = data_root.join("projects");
             let work_root = cache_root.join("projects");
             let objects_root = data_root.join("objects");
+            // Cache: a preview is one TeX run away from existing again, and it
+            // belongs to a preset rather than to any document.
+            let preview_root = cache_root.join("previews");
             std::fs::create_dir_all(&artifact_root)?;
             std::fs::create_dir_all(&work_root)?;
             std::fs::create_dir_all(&objects_root)?;
+            std::fs::create_dir_all(&preview_root)?;
 
             let repository = Arc::new(Repository::open(&data_root.join("press.sqlite3"))?);
             // Anything the database wants to say about how it opened. The
@@ -132,6 +142,7 @@ pub fn run() {
                 renderer: Arc::new(RenderPool::with_default_size()),
                 artifact_root,
                 objects_root,
+                preview_root,
                 pending_open: Mutex::new(None),
                 startup_notice: Mutex::new(startup_notice),
                 viewing: Arc::new(viewing::Viewing::default()),
@@ -176,6 +187,11 @@ pub fn run() {
             commands::set_editor_command,
             commands::icon_choice,
             commands::set_icon_choice,
+            commands::list_presets,
+            commands::save_preset,
+            commands::delete_preset,
+            commands::select_preset,
+            commands::preview_preset,
             commands::take_pending_open,
             commands::expecting_open,
             commands::take_startup_notice,

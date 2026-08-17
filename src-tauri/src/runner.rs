@@ -125,6 +125,11 @@ pub struct BuildInputs<'a> {
     pub log_path: PathBuf,
     /// Where published PDFs live.
     pub artifact_directory: PathBuf,
+    /// YAML handed to pandoc beneath the document's own frontmatter, for
+    /// markdown documents that carry none. `None` is a pandoc call identical to
+    /// the one Press made before presets existed. Ignored for LaTeX, which has
+    /// its own preamble and no use for one of ours.
+    pub frontmatter: Option<String>,
 }
 
 pub struct BuildProduct {
@@ -405,6 +410,17 @@ async fn convert_markdown(inputs: &BuildInputs<'_>, job_name: &str) -> Result<Pa
         Err(_) => source.clone(),
     };
 
+    // The reader's default frontmatter, written where pandoc can be pointed at
+    // it. Beneath the document's own for every ordinary key, and ahead of it for
+    // the preamble — see `frontmatter.rs`, which is where that distinction and
+    // the reason for it live.
+    let preset = match inputs.frontmatter.as_deref() {
+        Some(body) => Some(
+            crate::frontmatter::prepare(&pandoc, &inputs.work_directory, job_name, body).await?,
+        ),
+        None => None,
+    };
+
     let run = |input: PathBuf| {
         let mut command = Command::new(&pandoc);
         command.current_dir(&inputs.source.directory);
@@ -414,6 +430,14 @@ async fn convert_markdown(inputs: &BuildInputs<'_>, job_name: &str) -> Result<Pa
         // the YAML frontmatter — title, author, documentclass, geometry —
         // through pandoc's default template.
         command.arg("--standalone");
+        // Absolute, because pandoc runs in the source directory while these
+        // live in the work directory.
+        if let Some(preset) = &preset {
+            command.arg("--metadata-file").arg(&preset.metadata);
+            if let Some(template) = &preset.template {
+                command.arg("--template").arg(template);
+            }
+        }
         command.arg("--output").arg(&staging);
         command.arg(input);
         command.stdin(Stdio::null());
@@ -856,6 +880,7 @@ mod tests {
                 work_directory: directory.path().join("work"),
                 log_path: directory.path().join("work/last-build.log"),
                 artifact_directory: directory.path().join("artifacts"),
+                frontmatter: None,
             },
             cancel,
             Arc::new(PidRegistry::default()),
@@ -914,6 +939,7 @@ mod tests {
                 work_directory: work.clone(),
                 log_path: work.join("last-build.log"),
                 artifact_directory: directory.path().join("artifacts"),
+                frontmatter: None,
             },
             cancel,
             Arc::new(PidRegistry::default()),
@@ -953,6 +979,7 @@ mod tests {
                 work_directory: work.clone(),
                 log_path: work.join("last-build.log"),
                 artifact_directory: directory.path().join("artifacts"),
+                frontmatter: None,
             },
             cancel,
             Arc::new(PidRegistry::default()),
@@ -965,6 +992,105 @@ mod tests {
             stamp,
             "an unchanged document leaves pandoc's output alone"
         );
+    }
+
+    /// Which of the preset and the document wins is pandoc's rule rather than
+    /// one Press implements. What this guards is that Press hands the preset
+    /// over in a way that lets pandoc apply that rule at all — through the
+    /// marked copy, from a working directory that is not the source directory,
+    /// which is where a relative path or a mangled frontmatter block would show
+    /// up as the preset silently doing nothing.
+    ///
+    /// Needs pandoc but not latexmk: what is being checked is the LaTeX pandoc
+    /// writes, and compiling it proves nothing more.
+    #[tokio::test]
+    async fn a_preset_fills_in_only_what_the_document_leaves_out() {
+        if resolve_executable("pandoc").is_none() {
+            eprintln!("skipping: pandoc is not installed");
+            return;
+        }
+        const PRESET: &str = "geometry: paperwidth=5.5in, paperheight=8in\n\
+             header-includes:\n  - \\renewcommand{\\baselinestretch}{1.2}\n";
+
+        async fn generated(
+            work: &Path,
+            root: &Path,
+            store: &Path,
+            file: &str,
+            markdown: &str,
+            frontmatter: Option<String>,
+        ) -> String {
+            std::fs::write(root.join(file), markdown).unwrap();
+            std::fs::create_dir_all(work).unwrap();
+            let project = fixture_project(&root.join(file));
+            let source = crate::sources::prepare(
+                &project,
+                &SourceRef::Worktree,
+                &crate::database::Repository::open(store).unwrap(),
+                work.parent().unwrap(),
+            )
+            .unwrap();
+            let inputs = BuildInputs {
+                build_id: 9,
+                project: &project,
+                source: &source,
+                work_directory: work.to_path_buf(),
+                log_path: work.join("last-build.log"),
+                artifact_directory: work.join("artifacts"),
+                frontmatter,
+            };
+            let path = convert_markdown(&inputs, "doc").await.unwrap();
+            std::fs::read_to_string(path).unwrap()
+        }
+
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("source");
+        std::fs::create_dir(&root).unwrap();
+        let store = directory.path().join("press.db");
+
+        // A document that says nothing takes the preset entire.
+        let bare = generated(
+            &directory.path().join("w1"),
+            &root,
+            &store,
+            "bare.md",
+            "# Plain\n\nNo frontmatter here.\n",
+            Some(PRESET.to_owned()),
+        )
+        .await;
+        assert!(bare.contains("paperwidth=5.5in"), "the preset's geometry applies");
+        assert!(bare.contains("baselinestretch"), "and its header-includes");
+
+        // A document that sets one key overrides that key and keeps the rest.
+        let partial = generated(
+            &directory.path().join("w2"),
+            &root,
+            &store,
+            "partial.md",
+            "---\ngeometry: margin=3in\n---\n\n# Partial\n\nSets its own geometry.\n",
+            Some(PRESET.to_owned()),
+        )
+        .await;
+        assert!(
+            partial.contains("margin=3in") && !partial.contains("paperwidth"),
+            "the document's own geometry wins"
+        );
+        assert!(
+            partial.contains("baselinestretch"),
+            "a key the document never mentioned still comes from the preset"
+        );
+
+        // And without a preset, nothing of it is anywhere.
+        let none = generated(
+            &directory.path().join("w3"),
+            &root,
+            &store,
+            "none.md",
+            "# Plain\n\nNo frontmatter here.\n",
+            None,
+        )
+        .await;
+        assert!(!none.contains("paperwidth") && !none.contains("baselinestretch"));
     }
 
     #[test]
@@ -1036,6 +1162,7 @@ mod tests {
                 work_directory: directory.path().join("work"),
                 log_path: directory.path().join("work/last-build.log"),
                 artifact_directory: directory.path().join("artifacts"),
+                frontmatter: None,
             },
             cancel,
             Arc::new(PidRegistry::default()),

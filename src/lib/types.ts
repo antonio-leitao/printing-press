@@ -233,6 +233,38 @@ export type IconChoice = 'green' | 'ink' | 'sheet';
 /** The three, in the order the settings dialog offers them. */
 export const ICON_CHOICES: readonly IconChoice[] = ['green', 'ink', 'sheet'];
 
+/**
+ * YAML frontmatter kept under a name, handed to pandoc for markdown documents
+ * that carry none of their own.
+ *
+ * `body` is bare YAML without the `---` fences — pandoc reads it as a metadata
+ * file, and a metadata file has none.
+ */
+export type Preset = {
+  id: number;
+  name: string;
+  body: string;
+};
+
+/**
+ * A compiled example of what a preset does.
+ *
+ * `width` and `height` are the first page in points. They are needed to ask for
+ * the page at a scale that fits, and are themselves part of what the preview
+ * shows: a preset that changes the paper changes these.
+ */
+export type PresetPreview = {
+  digest: string;
+  width: number;
+  height: number;
+};
+
+/** The presets and the chosen one; `null` is the deliberate choice of none. */
+export type PresetList = {
+  presets: Preset[];
+  selected: number | null;
+};
+
 /** Parsed from latexmk's own output, not from a timer. */
 export type BuildProgress = {
   buildId: number;

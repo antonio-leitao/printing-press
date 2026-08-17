@@ -60,6 +60,18 @@ export function pageUrl(
 }
 
 /**
+ * A compiled preset's sample page.
+ *
+ * The digest is the hash of the preset body, which is both the address and the
+ * file it names — so an edited preset is a different URL and nothing has to be
+ * invalidated.
+ */
+export function previewUrl(digest: string, page: number, scale: number, invert = false): string {
+  const ink = invert ? '&invert=1' : '';
+  return `${ORIGIN}/preview/${digest}/${page}?scale=${scale.toFixed(4)}${ink}`;
+}
+
+/**
  * Bytes of dimensions in front of the samples: width then height, little-endian
  * `u32`. They travel in the body rather than in headers because this response is
  * cross-origin, and a cross-origin reader cannot see custom headers unless the

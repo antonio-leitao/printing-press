@@ -357,6 +357,10 @@ impl BuildManager {
             source_ref.clone(),
             expected_pages,
         );
+        // Read per build rather than held: the reader can change it between two
+        // builds of the same document, and the next build should be the one
+        // they asked for rather than the one Press remembered.
+        let frontmatter = crate::frontmatter::selected(&self.repository).unwrap_or_default();
         let inputs = BuildInputs {
             build_id,
             project,
@@ -364,6 +368,7 @@ impl BuildManager {
             work_directory: self.work_directory(project.id, source_ref),
             log_path: self.log_path(project.id, source_ref),
             artifact_directory: self.artifact_directory(project.id, source_ref),
+            frontmatter,
         };
 
         let outcome = runner::run(inputs, cancel.clone(), Arc::clone(&self.pids), sink).await;

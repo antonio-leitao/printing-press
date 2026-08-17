@@ -4,6 +4,9 @@ import type {
   Engine,
   IconChoice,
   LooseDocument,
+  Preset,
+  PresetList,
+  PresetPreview,
   LinkBox,
   OpenRequest,
   PageSize,
@@ -122,6 +125,31 @@ export const api = {
    * next install — worth saying, and not an error.
    */
   setIconChoice: (name: IconChoice) => invoke<boolean>('set_icon_choice', { name }),
+
+  /** The frontmatter presets, and which is chosen. */
+  listPresets: () => invoke<PresetList>('list_presets'),
+
+  /** Creates one when `id` is null, otherwise replaces the one named. */
+  savePreset: (id: number | null, name: string, body: string) =>
+    invoke<Preset>('save_preset', { id, name, body }),
+
+  deletePreset: (id: number) => invoke<void>('delete_preset', { id }),
+
+  /**
+   * Chooses a preset, or `null` for none.
+   *
+   * Nothing is rebuilt: a document keeps the PDF it was compiled with until it
+   * is built again, by a save or by the Build button.
+   */
+  selectPreset: (id: number | null) => invoke<void>('select_preset', { id }),
+
+  /**
+   * Compiles the sample document under a preset.
+   *
+   * Also how a preset is checked: a rejection carries pandoc's or TeX's own
+   * complaint about it.
+   */
+  previewPreset: (body: string) => invoke<PresetPreview>('preview_preset', { body }),
 
   /** Collects a path Press was launched with. Taking it clears it. */
   takePendingOpen: () => invoke<OpenRequest | null>('take_pending_open'),

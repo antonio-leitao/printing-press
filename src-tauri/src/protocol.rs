@@ -80,6 +80,30 @@ async fn serve<R: Runtime>(
             let invert = query_value(uri.query(), "invert").is_some_and(|value| value == "1");
             render(app, artifact_id, page, scale, invert).await
         }
+        // /preview/{digest}/{index}?scale=2.6&invert=1
+        // A preset's compiled sample. The digest is the address and the file
+        // name both, so there is no registry to consult — but it arrives from
+        // the webview, so its shape is checked before it is put in a path.
+        ["preview", digest, index] => {
+            if !crate::preview::is_digest(digest) {
+                return Err(AppError::InvalidInput("malformed preview id".into()));
+            }
+            let page = index
+                .parse::<usize>()
+                .map_err(|_| AppError::InvalidInput("malformed page number".into()))?;
+            let scale = query_value(uri.query(), "scale")
+                .and_then(|value| value.parse::<f32>().ok())
+                .filter(|scale| scale.is_finite() && *scale > 0.0 && *scale <= 12.0)
+                .ok_or_else(|| AppError::InvalidInput("missing or unusable scale".into()))?;
+            let invert = query_value(uri.query(), "invert").is_some_and(|value| value == "1");
+            let state = app.state::<AppState>();
+            let path = crate::preview::pdf_path(&state.preview_root, digest);
+            if !path.is_file() {
+                return Err(AppError::NotFound("that preview is not compiled".into()));
+            }
+            let rendered = state.renderer.render(path, page, scale, invert).await?;
+            ok(frame(rendered))
+        }
         _ => Err(AppError::NotFound(format!("no route for {}", uri.path()))),
     }
 }

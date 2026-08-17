@@ -501,6 +501,7 @@ mod tests {
                 work_directory: work.to_path_buf(),
                 log_path: work.join("last-build.log"),
                 artifact_directory: artifacts.to_path_buf(),
+                frontmatter: None,
             },
             cancel,
             Arc::new(PidRegistry::default()),

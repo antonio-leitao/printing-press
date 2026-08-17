@@ -419,6 +419,43 @@ pub struct EditorCommand {
     pub suggested: String,
 }
 
+/// A block of YAML frontmatter kept under a name, to be handed to pandoc for
+/// markdown documents that carry none of their own.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Preset {
+    pub id: i64,
+    pub name: String,
+    /// The frontmatter itself, without the `---` fences: this is handed to
+    /// pandoc as a metadata file, and a metadata file is bare YAML.
+    pub body: String,
+}
+
+/// A compiled example of what a preset does.
+///
+/// The digest addresses the drawn page over the `press:` scheme; the size is
+/// what the interface needs to ask for it at the right scale, and is itself
+/// part of what the preview shows — a preset that changes the paper changes
+/// this.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PresetPreview {
+    pub digest: String,
+    pub width: f32,
+    pub height: f32,
+}
+
+/// The presets and which one is chosen, answered together because the
+/// interface never wants one without the other.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PresetList {
+    pub presets: Vec<Preset>,
+    /// `None` is "no default frontmatter", which is a choice rather than an
+    /// absence of one.
+    pub selected: Option<i64>,
+}
+
 /// One document a path resolved to.
 ///
 /// `project_id` is set when Press already keeps this document, which is the

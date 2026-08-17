@@ -11,10 +11,13 @@ use crate::{
     database::{NewProject, ProjectEdit},
     documents, editor,
     error::{AppError, AppResult},
+    frontmatter,
     model::{
-        DocumentKind, EditorCommand, Engine, OpenRequest, PageSize, ProjectSummary, SearchHit,
-        SnapshotOutcome, SourceRef, TextBox, VersionSummary,
+        DocumentKind, EditorCommand, Engine, OpenRequest, PageSize, Preset, PresetList,
+        PresetPreview, ProjectSummary, SearchHit, SnapshotOutcome, SourceRef, TextBox,
+        VersionSummary,
     },
+    preview,
 };
 
 /// Every database and filesystem call goes through here, off the async runtime.
@@ -680,6 +683,108 @@ pub async fn set_icon_choice(name: String, state: State<'_, AppState>) -> AppRes
         appearance::apply(&name)
     })
     .await
+}
+
+/// The frontmatter presets, and which of them is selected. `None` for the
+/// selection means markdown is compiled exactly as it was before presets.
+#[tauri::command]
+pub async fn list_presets(state: State<'_, AppState>) -> AppResult<PresetList> {
+    let repository = Arc::clone(&state.repository);
+    blocking(move || {
+        let presets = repository.list_presets()?;
+        // Read against the presets that exist rather than trusted: a selection
+        // naming one that was deleted is no selection.
+        let selected = repository
+            .setting(frontmatter::SETTING)?
+            .and_then(|id| id.parse::<i64>().ok())
+            .filter(|id| presets.iter().any(|preset| preset.id == *id));
+        Ok(PresetList { presets, selected })
+    })
+    .await
+}
+
+/// Creates a preset, or replaces the one identified. Answers with what was
+/// stored, so the interface holds an id it can select and edit.
+#[tauri::command]
+pub async fn save_preset(
+    id: Option<i64>,
+    name: String,
+    body: String,
+    state: State<'_, AppState>,
+) -> AppResult<Preset> {
+    let name = name.trim().to_owned();
+    if name.is_empty() {
+        return Err(AppError::InvalidInput(
+            "a preset needs a name to be chosen by".to_owned(),
+        ));
+    }
+    let repository = Arc::clone(&state.repository);
+    blocking(move || repository.save_preset(id, &name, &body)).await
+}
+
+/// Removes a preset. Selecting it is undone with it: a selection pointing at
+/// nothing already reads as none, but leaving it there means the next preset to
+/// take that id would be selected by an accident of numbering.
+#[tauri::command]
+pub async fn delete_preset(id: i64, state: State<'_, AppState>) -> AppResult<()> {
+    let repository = Arc::clone(&state.repository);
+    blocking(move || {
+        repository.delete_preset(id)?;
+        if repository.setting(frontmatter::SETTING)? == Some(id.to_string()) {
+            repository.clear_setting(frontmatter::SETTING)?;
+        }
+        Ok(())
+    })
+    .await
+}
+
+/// Chooses a preset, or none of them.
+///
+/// Nothing is rebuilt here. A document already compiled keeps the PDF it was
+/// compiled with until it is built again — by a save, or by the Build button —
+/// which is the same rule as every other reason a document might be out of
+/// date, and one less thing that happens without being asked for.
+#[tauri::command]
+pub async fn select_preset(id: Option<i64>, state: State<'_, AppState>) -> AppResult<()> {
+    let repository = Arc::clone(&state.repository);
+    blocking(move || match id {
+        Some(id) => {
+            if repository.preset(id)?.is_none() {
+                return Err(AppError::NotFound(format!("no preset with id {id}")));
+            }
+            repository.set_setting(frontmatter::SETTING, &id.to_string())
+        }
+        None => repository.clear_setting(frontmatter::SETTING),
+    })
+    .await
+}
+
+/// Compiles the sample document under a preset and answers where to draw it.
+///
+/// This is also how a preset is checked. `Err` carries pandoc's or TeX's own
+/// complaint, which is the reader's answer to "why does this not work" — and
+/// far better received here, while they are looking at the field, than at the
+/// next build of a real document. A preset applies to every markdown document
+/// Press compiles, so a broken one is not a small problem.
+#[tauri::command]
+pub async fn preview_preset(body: String, state: State<'_, AppState>) -> AppResult<PresetPreview> {
+    let root = state.preview_root.clone();
+    let renderer = Arc::clone(&state.renderer);
+    let pdf = preview::compile(&root, &body)
+        .await
+        .map_err(AppError::Build)?;
+    // The page size is part of what the preview shows — a preset that changes
+    // the paper changes this — and the interface needs it to ask for the page
+    // at a scale that fits.
+    let geometry = renderer.geometry(pdf).await?;
+    let first = geometry
+        .first()
+        .ok_or_else(|| AppError::Build("this preset produced no pages".to_owned()))?;
+    Ok(PresetPreview {
+        digest: preview::digest(&body),
+        width: first.width,
+        height: first.height,
+    })
 }
 
 /// Whether a path is on its way to becoming an open request. Asked once at
