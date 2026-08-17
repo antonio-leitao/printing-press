@@ -1,285 +1,218 @@
-# Press
+<p align="center">
+  <img src='static/press.svg' height='200px' align="center"></img>
+</p>
 
-Press is a Tauri desktop app that keeps source trees clean while providing a cached PDF viewer, a
-compiler, and a history. Your editor stays your editor — Neovim through
-[press.nvim](https://github.com/antonio-leitao/press.nvim), or any command you name; Press owns the
-PDF, the build, and the history.
+<div align="center">
+<h3 max-width='200px' align="center">Printing Press</h3>
+  <p><i>Write LaTeX and Markdown in your own editor<br/>
+  Press compiles it, shows the PDF, and keeps every version you save<br/>
+  Built with Rust</i><br/></p>
+  <p>
+    <img alt="macOS" src="https://img.shields.io/badge/macOS-black?style=for-the-badge&logo=apple&logoColor=white">
+    <img alt="Rust" src="https://img.shields.io/badge/rust-black?style=for-the-badge&logo=rust&logoColor=white">
+    <img alt="AGPL-3.0" src="https://img.shields.io/badge/AGPL--3.0-black?style=for-the-badge">
+  </p>
+</div>
 
-The backend is built around a source reference — the working tree or a snapshot — so that builds,
-caches, database rows and events all carry the dimension the history needs.
+#
 
-## A project is a document
+### Contents
 
-One idea does most of the work here: **a project is a document, and its path is its identity.**
+- [Installation](#installation)
+- [Opening a document](#opening-a-document)
+- [Editing](#editing)
+  - [Neovim](#neovim)
+- [Versions](#versions)
+- [Markdown](#markdown)
+- [Keys](#keys)
+- [Settings](#settings)
+- [Requirements](#requirements)
+- [Building from source](#building-from-source)
+- [Not there yet](#not-there-yet)
+- [License](#license)
 
-Nothing else about a project is stored. The directory latexmk runs in, the tree the watcher
-follows, the files a snapshot holds, whether it is markdown, the job name — all of it derives from
-the one path. There is no stored folder, because nothing needed one: latexmk wants a working
-directory (the document's own), the watcher wants a path to watch (the same), and a snapshot wants
-a *set of files*, for which a folder is merely the cheapest description.
+Press is a desktop app for writing LaTeX and Markdown. You keep your editor; Press watches the
+file, compiles it when you save, and shows the PDF. Nothing is ever written into your project
+folder — no build files, no template files, no `.aux` litter beside your paper.
 
-Three things follow, and they are the reason the model is worth stating:
+It also keeps a history. Hit `⌘K` and Press stores the document as it is right now, under a title
+you choose. Every version stays readable and compilable, and none of it goes anywhere near your
+git repository.
 
-- **Documents sharing a folder are separate projects.** Two markdown essays, a paper and its
-  supplementary material, a thesis and its poster. Each has its own history and its own build
-  cache.
-- **Naming a part opens the whole.** `:Press` inside `chapters/three.tex` opens the thesis,
-  because a named file resolves to its document root — through `% !TEX root` first, then the
-  inclusion graph. A `standalone` figure that some paper `\input`s opens that paper.
-- **A directory is never a project, only a place to look for one.** Point Press at a folder and it
-  lists the documents it found, known ones first. It never picks for you.
+## Installation
 
-The one layout this gives up: a document that references files *above* its own directory. Its
-working tree still builds — latexmk reads the real filesystem — but a snapshot of it would be
-incomplete, and says so at build time rather than silently.
-
-## Included
-
-- Point Press at a document — `.tex`, `.ltx`, `.Rnw`, or markdown — and it compiles that document.
-  One way in: the Add button, `:Press`, and `press <path>` all resolve a path the same way and get
-  the same answer back.
-- Document-root resolution from `% !TEX root`, `\documentclass`, and an
-  `\input`/`\include`/`\subimport`/`\subimport` graph that tells parts from wholes.
-- A picker when a path means more than one document, with the projects Press already knows listed
-  first.
-- TeX engine detection from `% !TEX program`, overridable per project.
-- Markdown and LaTeX on one path. A markdown document is a project like any other, so snapshots,
-  the history, the watcher and the viewer all work on it unchanged.
-- Rust-owned SQLite persistence. One schema, no migrations: Press has a single user, and a stale
-  database is cheaper to replace than to migrate. A database from another schema is set aside
-  under a `.schemaN.old` name and a fresh one started, so a schema change never stops the
-  application from opening and never destroys what was there.
-- Build state and published PDFs keyed on `(project, source reference, engine)`, so one project
-  can hold many versions at once and a cached build never needs invalidating.
-- Press's own history of a project, stored outside the project folder and independent of any
-  version control the user already has.
-- A build queue: several versions can compile concurrently while the interface stays live.
-  Duplicate requests for the same version coalesce instead of piling up.
-- Debounced, cancellable builds in a warm cache outside the source tree, one scratch directory
-  per version.
-- A finished build always publishes, even if the source changed while it ran. Discarding it
-  would mean a document that saves faster than it compiles never updates.
-- Structured diagnostics parsed from the `.log` file — file, line, severity, message — rather
-  than a formatted string, so the place is separate from what went wrong.
-- Real build progress parsed from latexmk's own output: rule, pass number, and page count
-  against the previous build's page total.
-- Native rendering on MuPDF, whose C source is vendored in the `mupdf` crate, so nothing enters
-  the build from outside crates.io. Pages are rasterised on a small pool of threads that own the
-  documents, and travel to the webview as raw RGBA over a `press:` URI scheme — no PNG encode, no
-  image decode. About 9ms per page warm, off the UI thread.
-- Zathura's keymap: `j`/`k`, `h`/`l`, `d`/`u`, `f`/`b`/space, `J`/`K`, `gg`/`G`, counts such as
-  `12G`, `+`/`-`/`0`, `a` fit page, `s` fit width. Scrolling glides, and repeated keys add to the
-  glide already in flight.
-- The viewer never blanks: a new PDF replaces the old one only once its geometry has arrived, and
-  a failed load leaves the last good document on screen.
-- Bounded viewer memory: page bitmaps are released once a page scrolls well clear of the
-  viewport, and cached documents are evicted against a byte budget.
-- Project rename, engine change and removal. There is no "change the main file": a different
-  document is a different project, which is what lets several live in one folder.
-- An **Editor** action that runs a command of your choosing — `{file}` is the document and `{dir}`
-  its folder. Press spawns it and has nothing further to do with it: the working tree is watched
-  either way, so a save rebuilds the document whoever wrote it. Unset, the document is handed to
-  the system to open with whatever you already use for that kind of file.
-- Opening from the editor: `press <path>` resolves whatever it is handed. A second launch does not
-  start a second Press — its arguments are handed to the running instance, which raises its window.
-- Startup sweep of interrupted staging files, unreferenced PDFs and storage belonging to deleted
-  projects.
-
-## Requirements
-
-- macOS for the currently tested desktop integration
-- A TeX distribution containing `latexmk` in `PATH` or a standard macOS location
-- pandoc, for markdown projects only
-- An editor, if you want the Editor button to open one; any command will do
-- Node.js and Rust, to build it — see below
-
-MuPDF is AGPL-3.0 and its C is compiled into the binary, so Press is AGPL-3.0 too. See
-[License](#license).
-
-Press deliberately does not enable `--shell-escape`. A `.latexmkrc` is still executable Perl, and
-latexmk loads one from the directory it runs in — the document's own — so such a file is reported
-before the document is opened for the first time. Only open documents in folders you trust.
-
-## Building it
-
-Press is not distributed. You build it and install it yourself, which takes two commands from a
-fresh clone:
+Press is not distributed as a download — you build it and install it yourself. From a fresh clone:
 
 ```sh
 npm install
 npm run install:app
 ```
 
-That builds the app and installs it into `/Applications`. It is safe to run again on top of
-itself, and safe to run from any directory. MuPDF is vendored C, so the first build is slow and
-later ones are not.
+That puts `Press.app` in `/Applications`. It is safe to run again to upgrade. The first build is
+slow, because the PDF renderer is C that gets compiled in; later ones are not.
 
-Optionally, `--link` also puts a `press` command on your PATH:
+To also get a `press` command in your terminal:
 
 ```sh
 npm run install:app -- --link
 ```
 
-It writes a small script to `~/.local/bin/press` — off by default, because an app you built
-yourself should not quietly add things to your PATH, and [press.nvim](https://github.com/antonio-leitao/press.nvim)
-does not need it: it finds the bundle on its own. The flag is only needed once. It points at
-`/Applications/Press.app`, and a later rebuild that finds the script already there writes it back
-without being asked again.
+That writes a small script to `~/.local/bin/press`, so you can run `press paper.tex` from
+anywhere. You only need the flag once.
 
-That script runs the app through `open`, so Press comes up owned by launchd rather than by the
-shell you typed in — close the terminal and Press lives on. It also makes relative paths absolute
-first: `open` starts the app with a working directory of its own, not yours, so `press paper.tex`
-would otherwise be resolved against the wrong folder.
-
-To remove it:
+To remove Press:
 
 ```sh
 npm run uninstall:app            # the app
-npm run uninstall:app -- --purge # the app and everything it stored
+npm run uninstall:app -- --purge # the app and every version it stored
 ```
 
-Either removes the `press` script too, but only if it is the one Press wrote — a file of your own
-at that path is left alone and said so.
+Without `--purge` your history stays. Snapshots live in Press's own storage rather than in your
+project folders, so that folder is the only copy of the versions you kept — rebuilding the app is
+easy, and that is not.
 
-Without `--purge` your history stays. Snapshots live in Press's own object store — not in your
-project folders and not in git — so `~/Library/Application Support/com.antonio.press` is the only
-copy of every version you ever kept. Rebuilding the app is easy; that is not.
+## Opening a document
 
-`npm run tauri build` builds without installing, and `sh scripts/install-app.sh` installs without
-building, for when you want only one of the two.
+Three ways in, all equivalent:
 
-`scripts/install-app.sh` starts by uninstalling, because both halves of that matter. `cp -R` onto
-an existing bundle merges into it, so a file dropped between versions is left behind; and replacing
-the bundle under a running process leaves that process with a signature that no longer resolves,
-after which macOS refuses it access to protected folders and the app keeps running while quietly
-failing at everything.
+- **Drag** a `.tex` or `.md` file onto the Press window, or use the Add button.
+- **`press paper.tex`** from the terminal, if you linked the command.
+- **`:Press`** from Neovim.
 
-### Working on it
+Point Press at a file and it opens that document. Point it at a folder and it lists the documents
+it found — the ones you already use first — and lets you pick. It never chooses for you.
 
-```sh
-npm run tauri dev     # the app, rebuilt as you edit
-npm run check         # svelte-check
-npm run test          # everything: check, frontend, clippy, backend
-```
+Naming any file opens the document it belongs to. `:Press` inside `chapters/three.tex` opens the
+thesis, because Press follows `% !TEX root` and the `\input` graph up to the real document root.
+Two papers in one folder are two separate projects, each with its own history and its own build.
 
-The two build tests in `src-tauri/src/runner.rs` compile real documents and are skipped when
-`latexmk` is not installed.
+## Editing
 
-An installed Press and a development build are both called `press`, and only one runs at a time.
-[press.nvim](https://github.com/antonio-leitao/press.nvim) finds the installed one on its own, so
-point its `app_command` at `src-tauri/target/debug/press` while you are working on Press itself.
+Press does not edit anything. The **Editor** button hands the file to whatever command you set in
+Settings — `{file}` is the document, `{dir}` its folder. Leave it unset and the file opens in
+whatever your system already uses for it.
 
-## Backend boundaries
+Whichever editor you use, saving rebuilds the document. The PDF updates in place, keeping your
+scroll position, and never blanks while it recompiles.
 
-The Svelte webview can open the native file picker and invoke a small set of typed commands. It
-has no generic filesystem, shell, or SQL access. Rust owns path validation, discovery,
-persistence, process execution, cache publication, and lifecycle cleanup. PDFs are addressed by
-artifact id, and their paths are checked to be inside Press-managed storage before any bytes are
-read.
+Click a reference, a citation or a link in the PDF to jump to it. `⌘click` anywhere in the PDF
+shows the source behind that spot — the file, the line, and the text itself, which you can copy.
+It works on old versions too, whose source is no longer on disk.
 
-SQLite and successful PDFs live in Tauri's application-data directory. Reusable LaTeX auxiliary
-files and the latest build log live in the application-cache directory. Only an explicit future
-export feature will write generated files into a source project.
+### Neovim
 
-## History
+[press.nvim](https://github.com/antonio-leitao/press.nvim) is a thin wrapper around Press for
+Neovim users. It adds `:Press`, which sends the path of the file you are editing and lets Press
+work out which document that is. It finds an installed Press on its own, so it needs no `--link`
+and no configuration.
 
-`⌘K` stores the project's source under a title. Deliberate and titled, never automatic: the
-editor's undo already covers keystrokes, and a history worth reading is one where every entry was
-meant. The sidebar lists the working tree pinned at the top, then each version with its age and
-whether it is built, unbuilt, or fails to compile. Selecting a version shows it and builds it in
-the background if it has never been compiled.
+## Versions
 
-It is **not git**, and deliberately so — Press is not a client for the user's repository, and
-branches, merges and remotes have no meaning here. `snapshot.rs` is a content-addressed store:
-files are named by the hash of their contents, so a hundred versions of a thesis whose figures
-never change store those figures once. A version's `revision` is the hash of its manifest, so two
-snapshots of identical content share a revision and therefore share one cached build.
+`⌘K` saves the document as it stands, under a title. It is deliberate and never automatic: your
+editor's undo already covers keystrokes, and a history is worth reading only when every entry was
+meant.
 
-Only this document's source is stored. `files.rs` holds the single rule that both the watcher and
-the snapshot store use — `belongs_to_project` — so "worth rebuilding for" and "worth keeping"
-cannot drift apart. Build output, editor scratch files and anyone else's `.git` are skipped, and
-so are the documents belonging to other projects in the same folder: a neighbour's draft is not
-this document's version, and saving it does not rebuild this one. Everything else there is shared
-and counts for both — a figure, a `.bib`, a chapter one of them `\input`s.
+The sidebar lists your working copy pinned at the top, then each saved version with its age and
+whether it builds. Select one to read it; Press compiles it in the background if it never has.
+Versions are compiled from a temporary copy, so nothing is ever written into your folder.
 
-**Nothing is ever written to the project folder**; a version is compiled from a temporary checkout
-that is removed with the build.
+This is **not** git, and it does not want to be. There are no branches, no merges, no remotes —
+just a list of versions of one document, kept outside the project and independent of whatever
+version control you already use. Identical content is stored once, so a hundred versions of a
+thesis whose figures never change store those figures once.
 
-Discarding a version drops its build, and file contents no longer referenced by any version are
-swept at the next start.
+Only this document's files are stored: its source, its figures, its `.bib`, the chapters it
+includes. Build output, editor scratch files, your `.git`, and the other documents sharing the
+folder are all left out.
 
 ## Markdown
 
-Markdown needs no special case any more. It is a document with a path, like any other, and it gets
-the same history, watcher, viewer and picker.
+A Markdown file is a project like any other — same history, same viewer, same watcher. Press runs
+it through pandoc and then latexmk.
 
-The one place the two differ is *listing*. A LaTeX file carries evidence of being a document root
-— `\documentclass`, a `% !TEX root` directive, an inclusion graph that tells parts from wholes —
-so a directory scan can say which `.tex` files are documents and which are chapters. Markdown
-carries none of that, so every markdown file in a directory is listed as a candidate and the user
-picks. Listing is not guessing: what was unreliable before was *auto-selecting* one, and Press
-still never does that. Only `README`, `CHANGELOG`, `CONTRIBUTING`, `LICENSE` and `AUTHORS` are left
-out of a directory listing, and naming one of those directly still compiles it — naming a file is
-always the last word.
+Markdown has nowhere to put a LaTeX preamble, so Press lets you keep one. Settings → **Markdown
+frontmatter** holds named presets: a block of YAML — fonts, `geometry`, `documentclass`,
+`header-includes` — applied to every markdown document. A document's own frontmatter wins key by
+key, so setting a title in one file keeps the preset's typography, and adding a `\usepackage` adds
+to the preset's preamble rather than replacing it.
 
-`pandoc --pdf-engine` is already two stages: markdown to LaTeX, then a TeX run. Press runs the
-stages itself — pandoc writes `<work>/<jobname>.tex`, latexmk builds it — because pandoc driving
-the PDF discards latexmk's auxiliary files on every invocation, and the TeX run is what a build
-actually costs. Doing it this way also reuses the existing progress parsing, `.log` diagnostics
-and publish path rather than adding a second pipeline beside them.
+One limitation worth knowing: errors in a markdown build name the file but carry no line number.
+The numbers in the log refer to the LaTeX pandoc generated, and pointing at a line in your
+markdown would be plausible and wrong.
 
-latexmk runs from the source directory even though its input is in the work directory, so
-`\includegraphics` and other relative paths resolve against the folder the author wrote in. The
-generated `.tex` is only rewritten when its contents changed, so an unedited rebuild leaves
-latexmk's cache intact. Nothing is written to the project folder.
+## Keys
 
-YAML frontmatter reaches the LaTeX through pandoc's `--standalone` template, which is how `title`,
-`author`, `documentclass` and `geometry` take effect. Per-project pandoc arguments and templates
-are not configurable yet.
+The viewer uses [zathura](https://pwmt.org/projects/zathura/)'s keymap, counts included — `12G`
+goes to page 12, `3j` scrolls three steps.
 
-One honest limitation: diagnostics from a markdown build name the markdown file but carry no line
-number. The numbers in the log refer to pandoc's generated LaTeX, and there is no map back, so a
-line number would point somewhere plausible and wrong.
+| Key                 | Does                                         |
+| ------------------- | -------------------------------------------- |
+| `j` / `k`           | scroll down / up                             |
+| `h` / `l`           | scroll left / right                          |
+| `d` / `u`           | half page down / up                          |
+| `f` / `b` / `space` | page down / up                               |
+| `J` / `K`           | next / previous page                         |
+| `gg` / `G`          | first / last page                            |
+| `12G`               | go to page 12                                |
+| `⌃o` / `⌃i`         | back / forward after a jump                  |
+| `+` / `-`           | zoom in / out                                |
+| `0`                 | actual size                                  |
+| `a` / `s`           | fit page / fit width                         |
+| `⌃r`                | dark theme — the page, and Press around it   |
+| click               | follow a reference, a citation or a link     |
+| `⌘click`            | show the source behind that place in the PDF |
+| `R`                 | rebuild this version                         |
+| `⌘K`                | snapshot the working copy                    |
+| `?`                 | this list, in the app                        |
 
-## Opening from Neovim
+## Settings
 
-`:Press` in the companion plugin hands Press the path of the file being edited and nothing else.
-Working out what that path means is Press's job, and `documents.rs` is the only place that answers
-it — for `:Press`, for `press <path>`, and for the library's own button.
+- **Theme** — light, dark, or follow the system. Dark inverts the page too, for reading at night.
+- **Icon** — three Dock icons to choose from.
+- **Editor** — the command the Editor button runs.
+- **Markdown frontmatter** — the presets described [above](#markdown), with a live preview.
 
-A named file resolves to its document root: itself if nothing includes it, otherwise the document
-that does, found through `% !TEX root` and then the inclusion graph, walking up until a document
-appears or a repository boundary stops it. Editing `chapters/three.tex` opens the paper; a paper
-inside a large repository opens as the paper, not the repository; `supplementary.tex` beside that
-paper opens as itself, because nothing includes it.
+Per document, from its entry in the library: rename it, change its TeX engine, or remove it.
+There is no "change the main file" — a different document is a different project, which is what
+lets several live in one folder.
 
-`:Press` from an empty buffer sends the working directory, and a directory always opens the
-picker: the documents Press already keeps first, then the ones it found.
+## Requirements
 
-The transport is `tauri-plugin-single-instance`, which was already in place. Launching the binary
-a second time delivers its arguments to the instance already running, over a Unix socket in `/tmp`
-that the plugin opens and cleans up itself — so there is no port and no URL scheme for Press to
-register, and nothing about the transport is Press's to maintain. The resolved request is held
-rather than only emitted, because
-a launch from the editor arrives before the webview is listening; the interface collects it on
-mount, and taking it clears it so nothing opens twice.
+- macOS
+- A TeX distribution with `latexmk` (MacTeX, TeX Live, BasicTeX)
+- pandoc, for Markdown documents only
+- Node.js and Rust, to build Press
 
-## Deliberately deferred
+Press does not enable `--shell-escape`. It does warn you when a document's folder contains a
+`.latexmkrc`, which latexmk would execute as Perl — open documents in folders you trust.
 
-- Side-by-side version tabs
-- Text selection and in-document search, both of which the renderer already supplies: MuPDF
-  returns word boxes in about 1ms per page and searches with its own engine
+## Building from source
+
+`npm run install:app` covers the normal case. The pieces, when you want only one of them:
+
+```sh
+npm run tauri build            # build without installing
+sh scripts/install-app.sh      # install without building
+npm run tauri dev              # run it, rebuilt as you edit
+npm run test                   # svelte-check, frontend tests, clippy, cargo test
+```
+
+An installed Press and a development build are both called `press`, and only one runs at a time.
+Point `press.nvim`'s `app_command` at `src-tauri/target/debug/press` while working on Press
+itself.
+
+## Not there yet
+
+- Text selection and in-document search
+- Side-by-side version comparison
 - Configurable compiler arguments
-- Export/print
-- Semantic scroll anchoring across changed pagination
-- Polished visual design
+- Export and print
+- Linux and Windows
 
 ## License
 
 Copyright (C) 2025 Antonio Leitao. GNU Affero General Public License, version 3 — the full text is
 in [LICENSE](LICENSE).
 
-Not a choice so much as an inheritance: Press rasterises with MuPDF, whose C is compiled into the
-binary, and MuPDF is AGPL-3.0. Anything linking it and going out the door goes out under the same
-terms. Press is built rather than shipped, so nothing about that binds you while the binary stays
-on the machine that compiled it — but the source is here, and the source should say what it is.
+Not a choice so much as an inheritance: Press renders with MuPDF, which is AGPL-3.0, and its C is
+compiled into the binary. Anything linking it goes out under the same terms.
