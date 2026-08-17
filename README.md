@@ -4,8 +4,8 @@
 
 <div align="center">
 <h3 max-width='200px' align="center">Printing Press</h3>
-  <p><i>Write LaTeX and Markdown in your own editor<br/>
-  Press compiles it, shows the PDF, and keeps every version you save<br/>
+  <p><i>A PDF viewer that does not need a PDF<br/>
+  Hand it LaTeX or Markdown — compiling is the viewer's job, not yours<br/>
   Built with Rust</i><br/></p>
   <p>
     <img alt="macOS" src="https://img.shields.io/badge/macOS-black?style=for-the-badge&logo=apple&logoColor=white">
@@ -31,13 +31,31 @@
 - [Not there yet](#not-there-yet)
 - [License](#license)
 
-Press is a desktop app for writing LaTeX and Markdown. You keep your editor; Press watches the
-file, compiles it when you save, and shows the PDF. Nothing is ever written into your project
-folder — no build files, no template files, no `.aux` litter beside your paper.
+Press is a PDF viewer that does not need a PDF. You give it LaTeX or Markdown source, and it shows
+you the document.
 
-It also keeps a history. Hit `⌘K` and Press stores the document as it is right now, under a title
-you choose. Every version stays readable and compilable, and none of it goes anywhere near your
-git repository.
+Working on a document normally comes in three parts, and you own all three: write the source,
+compile it, open the result. Press moves the parentheses:
+
+`(write + compile) + view` → `write + (compile + view)`
+
+Compiling stops being a step in your work and becomes part of the viewer. You are left with the
+one part that was ever yours — the source. Producing a document from it is the viewer's problem,
+the way rendering glyphs is a viewer's problem, and you never ask for it.
+
+Everything else in Press follows from that regrouping:
+
+- **The viewer watches your source itself.** Because the compile happens inside Press, Press knows
+  when to run it. Save in your editor and what you are looking at is already current. There is no
+  `latexmk -pvc`, no watcher script, no viewer to tell to reload, no three programs to wire
+  together — the loop is closed inside one application, and there is nothing about it to set up.
+- **The PDF is a view, not a product.** It is not a file you made and now have to keep, name, or
+  clean up. Press stores it in its own cache and nothing is ever written into your project folder.
+  Delete Press tomorrow and your folder is exactly the source you wrote.
+- **A view is cheap, so any state of the source can have one.** That is what the history is: `⌘K`
+  keeps the document as it stands right now, under a title, and any version you kept can be
+  looked at like the live one — Press compiles it if it never has. No version is the final one.
+  The document is the source; a PDF is only what it looks like at some moment.
 
 ## Installation
 
@@ -86,14 +104,19 @@ Naming any file opens the document it belongs to. `:Press` inside `chapters/thre
 thesis, because Press follows `% !TEX root` and the `\input` graph up to the real document root.
 Two papers in one folder are two separate projects, each with its own history and its own build.
 
+You do this once per document. From then on it is in the library, and opening it is opening a
+view — there is nothing to rebuild first, and no PDF to go and find.
+
 ## Editing
 
 Press does not edit anything. The **Editor** button hands the file to whatever command you set in
 Settings — `{file}` is the document, `{dir}` its folder. Leave it unset and the file opens in
 whatever your system already uses for it.
 
-Whichever editor you use, saving rebuilds the document. The PDF updates in place, keeping your
-scroll position, and never blanks while it recompiles.
+Saving rebuilds the document, whatever wrote the file — Vim, VS Code, Emacs, TextEdit, a script
+running behind your back. Press watches the files itself and needs nothing from the editor's side:
+no plugin, no save hook, no reload command, no port to agree on. The PDF updates in place, keeps
+your scroll position, and never blanks while it recompiles.
 
 Click a reference, a citation or a link in the PDF to jump to it. `⌘click` anywhere in the PDF
 shows the source behind that spot — the file, the line, and the text itself, which you can copy.
@@ -106,15 +129,21 @@ Neovim users. It adds `:Press`, which sends the path of the file you are editing
 work out which document that is. It finds an installed Press on its own, so it needs no `--link`
 and no configuration.
 
+That is the whole plugin. It opens a document and then stops — it takes no part in compiling,
+watching or reloading, because none of those need anything from your editor. A wrapper for any
+other editor would be the same one line, and not having one costs you only the keystroke.
+
 ## Versions
 
-`⌘K` saves the document as it stands, under a title. It is deliberate and never automatic: your
-editor's undo already covers keystrokes, and a history is worth reading only when every entry was
-meant.
+Once the PDF is a view rather than a product, there is no reason only the current source should
+have one. `⌘K` saves the document as it stands, under a title. It is deliberate and never
+automatic: your editor's undo already covers keystrokes, and a history is worth reading only when
+every entry was meant.
 
 The sidebar lists your working copy pinned at the top, then each saved version with its age and
-whether it builds. Select one to read it; Press compiles it in the background if it never has.
-Versions are compiled from a temporary copy, so nothing is ever written into your folder.
+whether it builds. Select one and you are reading it, exactly as you read the live document —
+Press compiles it in the background if it never has, and you find out only because the page
+arrives. Versions are compiled from a temporary copy, so nothing is ever written into your folder.
 
 This is **not** git, and it does not want to be. There are no branches, no merges, no remotes —
 just a list of versions of one document, kept outside the project and independent of whatever
@@ -127,8 +156,9 @@ folder are all left out.
 
 ## Markdown
 
-A Markdown file is a project like any other — same history, same viewer, same watcher. Press runs
-it through pandoc and then latexmk.
+A Markdown file is a document like any other — same viewer, same watching, same history. Press
+runs it through pandoc and then latexmk, which is a thing you are being told rather than a thing
+you have to do.
 
 Markdown has nowhere to put a LaTeX preamble, so Press lets you keep one. Settings → **Markdown
 frontmatter** holds named presets: a block of YAML — fonts, `geometry`, `documentclass`,
