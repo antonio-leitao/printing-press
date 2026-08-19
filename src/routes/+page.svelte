@@ -2,16 +2,20 @@
   import { onMount, untrack, type Component } from 'svelte';
   import { fade } from 'svelte/transition';
   import {
-    ChevronDown,
-    ChevronRight,
+    Check,
     Download,
+    FilePlus,
+    Files,
+    Folder,
+    FolderOpen,
+    Minus,
     Monitor,
     Moon,
     Pencil,
     Pin,
     PinOff,
-    Plus,
     Settings,
+    Stamp,
     Sun,
     Trash2
   } from '@lucide/svelte';
@@ -19,7 +23,7 @@
   import { getCurrentWebview } from '@tauri-apps/api/webview';
   import { open } from '@tauri-apps/plugin-dialog';
   import PdfThumbnail from '$lib/PdfThumbnail.svelte';
-  import PresetPreview from '$lib/PresetPreview.svelte';
+  import TemplateCover from '$lib/TemplateCover.svelte';
   import PdfViewer, { type PeekRequest } from '$lib/PdfViewer.svelte';
   import { api, errorMessage } from '$lib/api';
   import { fail, notify } from '$lib/messages.svelte';
@@ -37,10 +41,12 @@
     type ArtifactSummary,
     type EditorCommand,
     type IconChoice,
-    type Preset,
     type LooseDocument,
     type ProjectSummary,
+    type ProjectFile,
     type SourcePeek,
+    type TemplateScope,
+    type TemplateSummary,
     type VersionSummary,
     type WatcherError
   } from '$lib/types';
@@ -52,10 +58,11 @@
     { value: 'system', label: 'System', icon: Monitor }
   ];
 
-  /** The box the sample page is fitted into. One page rather than several, so
-      it can be large enough that the type is read rather than inferred. */
-  const PRESET_PAGE_WIDTH = 380;
-  const PRESET_PAGE_HEIGHT = 500;
+  /** The box a template's page is fitted into. The shelf's card, because
+      choosing a template is the same act as choosing off the shelf: you are
+      looking at a page and deciding whether it is the one. */
+  const TEMPLATE_PAGE_WIDTH = 150;
+  const TEMPLATE_PAGE_HEIGHT = 194;
 
   /** Matches the `.pinned-card` track width below, so nothing larger is drawn. */
   const PINNED_THUMB_WIDTH = 150
@@ -113,6 +120,30 @@
   let projectName = $state('');
   let projectEngine = $state<Engine>('pdflatex');
 
+  /// Starting a document, which is the one thing Press does that writes into a
+  /// folder of the reader's. A place rather than a dialog: what is being chosen
+  /// is a page, and pages want the room the library gives them.
+  let creating = $state(false);
+  let templates = $state<TemplateSummary[]>([]);
+  let templatePick = $state<number | null>(null);
+  let newName = $state('');
+  /// Remembered between documents. Nobody keeps their papers somewhere new each
+  /// time, and the folder is the one part of this that is usually the same.
+  let newFolder = $state<string | null>(null);
+
+  /// Keeping a project as stationery: the name it will be chosen by, and which
+  /// of its files go with it.
+  ///
+  /// The listing is fetched when the dialog opens and is Press's own walk, so
+  /// what can be ticked is exactly what a version would hold. `chosen` is a set
+  /// of the same paths, and the document's own is in it and cannot leave.
+  let savingFor = $state<ProjectSummary | null>(null);
+  let templateName = $state('');
+  let templateScope = $state<TemplateScope>('document');
+  let projectFiles = $state<ProjectFile[]>([]);
+  let chosenFiles = $state<Set<string>>(new Set());
+  let listingFiles = $state(false);
+
   /// Settings: the preferences that belong to Press rather than to a document.
   ///
   /// Nothing here has a Save button. Theme and icon are visual and want to be
@@ -128,21 +159,6 @@
   let editorCommand = $state('');
   let editorDefault = $state<EditorCommand | null>(null);
   let iconChoice = $state<IconChoice>('green');
-  /// The frontmatter presets, the chosen one, and the draft of whichever is
-  /// open for editing. The draft is separate from the list so that typing does
-  /// not rewrite a row on every keystroke — it is written back on blur, the
-  /// same rule the editor command follows.
-  let presets = $state<Preset[]>([]);
-  let presetSelected = $state<number | null>(null);
-  let presetName = $state('');
-  let presetBody = $state('');
-  /// Whether the frontmatter itself is open. Collapsed by default: picking a
-  /// preset is the common act and editing one is the rare one, and a textarea
-  /// standing open pushes the shelf off the top of the dialog.
-  let presetOpen = $state(false);
-  /// Why the chosen preset would not compile, as pandoc or TeX put it. Reported
-  /// by the card that failed, shown here where there is room for a sentence.
-  let presetError = $state('');
   let confirmDelete = $state<ProjectSummary | null>(null);
   let confirmDiscard = $state<VersionSummary | null>(null);
 
@@ -240,6 +256,11 @@
       },
       { label: 'Rename…', icon: Pencil, run: () => editProject(project) },
       {
+        label: 'Save as template…',
+        icon: Stamp,
+        run: () => void openSaveTemplate(project)
+      },
+      {
         label: 'Download PDF',
         icon: Download,
         run: () => void downloadArtifact(project.artifact?.id),
@@ -319,6 +340,67 @@
   /// question somebody actually has.
   ///
   /// A kind with none of it says nothing rather than saying zero.
+  /// Split by kind, because that is how the reader thinks about starting: a
+  /// markdown note and a LaTeX paper are different decisions, not two rows of
+  /// one list.
+  const markdownTemplates = $derived(templates.filter((one) => one.kind === 'markdown'));
+  const latexTemplates = $derived(templates.filter((one) => one.kind === 'latex'));
+  const picked = $derived(templates.find((one) => one.id === templatePick) ?? null);
+
+  /// The listing as a tree, flattened to rows.
+  ///
+  /// Paths sort so that a folder's files are contiguous, which is the whole
+  /// trick: one pass emits a folder row the first time a prefix appears and a
+  /// file row for every file, each carrying the depth to indent by. A tree
+  /// drawn without a recursive component, and one that can be walked to work
+  /// out what a folder's tick should say.
+  const fileRows = $derived.by(() => {
+    const sorted = [...projectFiles].sort((a, b) => a.path.localeCompare(b.path));
+    const rows: Array<{
+      kind: 'folder' | 'file';
+      path: string;
+      name: string;
+      depth: number;
+      byteSize: number;
+      /** Every file under this row: itself, or a folder's descendants. */
+      files: string[];
+    }> = [];
+    const seen = new Set<string>();
+
+    for (const file of sorted) {
+      const parts = file.path.split('/');
+      for (let depth = 0; depth < parts.length - 1; depth += 1) {
+        const prefix = parts.slice(0, depth + 1).join('/');
+        if (seen.has(prefix)) continue;
+        seen.add(prefix);
+        const under = sorted.filter((one) => one.path.startsWith(`${prefix}/`));
+        rows.push({
+          kind: 'folder',
+          path: prefix,
+          name: parts[depth],
+          depth,
+          byteSize: under.reduce((total, one) => total + one.byteSize, 0),
+          files: under.map((one) => one.path)
+        });
+      }
+      rows.push({
+        kind: 'file',
+        path: file.path,
+        name: parts[parts.length - 1],
+        depth: parts.length - 1,
+        byteSize: file.byteSize,
+        files: [file.path]
+      });
+    }
+    return rows;
+  });
+
+  const chosenBytes = $derived(
+    projectFiles
+      .filter((file) => chosenFiles.has(file.path))
+      .reduce((total, file) => total + file.byteSize, 0)
+  );
+
   const librarySummary = $derived.by(() => {
     const names: Record<string, string> = { latex: 'LaTeX', markdown: 'Markdown' };
     const counts = new Map<string, number>();
@@ -482,6 +564,13 @@
         if ((event.metaKey || event.ctrlKey) && !event.altKey && isO) {
           event.preventDefault();
           void chooseDocument();
+          return;
+        }
+        const isN = event.code === 'KeyN' || event.key.toLowerCase() === 'n';
+        if ((event.metaKey || event.ctrlKey) && !event.altKey && isN) {
+          event.preventDefault();
+          if (!creating) void openGallery();
+          return;
         }
         return;
       }
@@ -904,113 +993,13 @@
 
   async function openSettings() {
     try {
-      const [command, icon, list] = await Promise.all([
-        api.editorCommand(),
-        api.iconChoice(),
-        api.listPresets()
-      ]);
+      const [command, icon] = await Promise.all([api.editorCommand(), api.iconChoice()]);
       editorDefault = command;
       // An unset command shows the default it is standing in for, so that
       // editing it is a change to something visible rather than to a blank.
       editorCommand = command.command;
       iconChoice = icon;
-      presets = list.presets;
-      presetSelected = list.selected;
-      syncPresetDraft();
       settingsOpen = true;
-    } catch (reason) {
-      fail(reason);
-    }
-  }
-
-  /// The draft follows the selection: the row that is open for editing is the
-  /// chosen one, so that choosing and editing are not two things to keep track
-  /// of at once.
-  function syncPresetDraft() {
-    const current = presets.find((preset) => preset.id === presetSelected);
-    presetName = current?.name ?? '';
-    presetBody = current?.body ?? '';
-  }
-
-  async function choosePreset(id: number | null) {
-    // Whatever was being edited is written before moving off it, or a change
-    // typed and then abandoned by clicking another row would be lost.
-    await savePresetDraft();
-    const previous = presetSelected;
-    presetSelected = id;
-    syncPresetDraft();
-    // Belongs to the preset that failed, not to the shelf.
-    presetError = '';
-    try {
-      await api.selectPreset(id);
-    } catch (reason) {
-      presetSelected = previous;
-      syncPresetDraft();
-      fail(reason);
-    }
-  }
-
-  /// Written on blur rather than on every keystroke, and only when it differs
-  /// from what is stored.
-  async function savePresetDraft() {
-    const id = presetSelected;
-    if (id === null) return;
-    const current = presets.find((preset) => preset.id === id);
-    if (!current) return;
-    const name = presetName.trim();
-    // A preset is chosen by its name, so it has to keep one. An emptied field
-    // goes back to what it was rather than refusing to close the dialog.
-    if (!name) {
-      presetName = current.name;
-      return;
-    }
-    if (name === current.name && presetBody === current.body) return;
-    try {
-      const saved = await api.savePreset(id, name, presetBody);
-      presets = presets
-        .map((preset) => (preset.id === id ? saved : preset))
-        .sort((a, b) => a.name.localeCompare(b.name));
-      presetName = saved.name;
-    } catch (reason) {
-      fail(reason);
-    }
-  }
-
-  async function addPreset() {
-    await savePresetDraft();
-    // Named rather than blank, because the name is how it is chosen and an
-    // unnamed row is a row you cannot tell from the next one.
-    const taken = new Set(presets.map((preset) => preset.name));
-    let name = 'New preset';
-    for (let n = 2; taken.has(name); n += 1) name = `New preset ${n}`;
-    try {
-      const created = await api.savePreset(null, name, '');
-      presets = [...presets, created].sort((a, b) => a.name.localeCompare(b.name));
-      // Created and chosen in one move: adding one you then have to select is a
-      // step that never has a reason to be skipped.
-      presetSelected = created.id;
-      syncPresetDraft();
-      presetError = '';
-      // A preset you have just made is one you are about to write, so the field
-      // is open without being asked for.
-      presetOpen = true;
-      await api.selectPreset(created.id);
-    } catch (reason) {
-      fail(reason);
-    }
-  }
-
-  async function deletePreset(id: number) {
-    try {
-      await api.deletePreset(id);
-      presets = presets.filter((preset) => preset.id !== id);
-      if (presetSelected === id) {
-        // Deleting the chosen one falls back to none rather than to whichever
-        // card happens to be next.
-        presetSelected = null;
-        syncPresetDraft();
-        presetError = '';
-      }
     } catch (reason) {
       fail(reason);
     }
@@ -1058,8 +1047,185 @@
 
   async function closeSettings() {
     await saveEditorCommand();
-    await savePresetDraft();
     settingsOpen = false;
+  }
+
+  // -- templates -------------------------------------------------------------
+
+  /// Opens the gallery. Fetched each time rather than held: a template saved
+  /// from the reader in the meantime should be on the shelf when they come
+  /// looking for it.
+  async function openGallery() {
+    busy = true;
+    try {
+      templates = await api.listTemplates();
+      templatePick = null;
+      newName = '';
+      creating = true;
+    } catch (reason) {
+      fail(reason);
+    } finally {
+      busy = false;
+    }
+  }
+
+  function closeGallery() {
+    creating = false;
+    templatePick = null;
+  }
+
+  async function chooseFolder() {
+    try {
+      const selected = await open({
+        directory: true,
+        multiple: false,
+        title: 'Choose a folder',
+        defaultPath: newFolder ?? undefined
+      });
+      if (typeof selected === 'string') newFolder = selected;
+    } catch (reason) {
+      fail(reason);
+    }
+  }
+
+  /// Writes the template out, keeps what it wrote, and opens it.
+  ///
+  /// A document that has just been made is one that is about to be written, so
+  /// the editor is started with it. Press has done its half of `write + (compile
+  /// + view)`; this is the other half being handed over.
+  async function createDocument() {
+    if (!picked || !newFolder || !newName.trim()) return;
+    busy = true;
+    try {
+      const project = await api.createFromTemplate(picked.id, newFolder, newName.trim());
+      creating = false;
+      templatePick = null;
+      projects = [project, ...projects.filter((item) => item.id !== project.id)];
+      await openProject(project);
+      // Not worth failing the creation over: the document exists and is open,
+      // and an editor that would not start is a separate complaint.
+      try {
+        await api.launchEditor(project.id);
+      } catch (reason) {
+        notify(errorMessage(reason), 'error');
+      }
+    } catch (reason) {
+      fail(reason);
+    } finally {
+      busy = false;
+    }
+  }
+
+  function templateMenu(template: TemplateSummary): MenuItem[] {
+    return [
+      {
+        label: 'Remove…',
+        icon: Trash2,
+        danger: true,
+        run: () => void removeTemplate(template)
+      }
+    ];
+  }
+
+  /// No confirmation. A template is a copy of something that still exists, so
+  /// removing one loses nothing that cannot be saved again from the document it
+  /// came from — which is not true of a project, and is why that one asks.
+  async function removeTemplate(template: TemplateSummary) {
+    try {
+      await api.deleteTemplate(template.id);
+      templates = templates.filter((one) => one.id !== template.id);
+      if (templatePick === template.id) templatePick = null;
+    } catch (reason) {
+      fail(reason);
+    }
+  }
+
+  async function openSaveTemplate(project: ProjectSummary) {
+    savingFor = project;
+    // The document's own name without its extension. The project's name carries
+    // the folder above it, which is what tells two `main.tex`es apart in a
+    // library and is not what a template wants to be called.
+    templateName = project.fileName.replace(/\.[^.]+$/, '');
+    templateScope = 'document';
+    chosenFiles = new Set([project.fileName]);
+    projectFiles = [];
+    // Fetched with the dialog rather than when the tree is asked for, so
+    // choosing to select files shows them rather than a wait.
+    listingFiles = true;
+    try {
+      projectFiles = await api.projectFiles(project.id);
+    } catch (reason) {
+      fail(reason);
+    } finally {
+      listingFiles = false;
+    }
+  }
+
+  /// The document alone, or all of it and then strike things out. Starting the
+  /// tree fully ticked is the honest default for a choice named "select files":
+  /// what is on screen when it opens is what will be kept if nothing is touched.
+  function chooseScope(scope: TemplateScope) {
+    templateScope = scope;
+    const entry = savingFor?.fileName;
+    chosenFiles =
+      scope === 'document'
+        ? new Set(entry ? [entry] : [])
+        : new Set(projectFiles.map((file) => file.path));
+  }
+
+  /// The document's own file cannot be struck out: a template without it is not
+  /// a template, and the backend refuses one for the same reason.
+  function locked(path: string) {
+    return path === savingFor?.fileName;
+  }
+
+  /// A folder is ticked when everything under it is. Half of it is neither, and
+  /// says so with a dash rather than by rounding to one of the two.
+  function tickState(files: string[]): 'all' | 'some' | 'none' {
+    const held = files.filter((path) => chosenFiles.has(path)).length;
+    if (held === 0) return 'none';
+    return held === files.length ? 'all' : 'some';
+  }
+
+  /// Reassigned rather than mutated: a `Set` changed in place is the same `Set`,
+  /// and nothing downstream would hear about it.
+  function toggleFiles(files: string[]) {
+    const next = new Set(chosenFiles);
+    if (tickState(files) === 'all') {
+      for (const path of files) if (!locked(path)) next.delete(path);
+    } else {
+      for (const path of files) next.add(path);
+    }
+    chosenFiles = next;
+  }
+
+  /// Bytes as a person reads them. Only ever describing a selection, so one
+  /// decimal on the way up and none below a kilobyte.
+  function readableSize(bytes: number) {
+    if (bytes < 1024) return `${bytes} B`;
+    const units = ['kB', 'MB', 'GB'];
+    let value = bytes / 1024;
+    let unit = 0;
+    while (value >= 1024 && unit < units.length - 1) {
+      value /= 1024;
+      unit += 1;
+    }
+    return `${value < 10 ? value.toFixed(1) : Math.round(value)} ${units[unit]}`;
+  }
+
+  async function saveTemplate() {
+    const project = savingFor;
+    if (!project || !templateName.trim() || chosenFiles.size === 0) return;
+    busy = true;
+    try {
+      await api.saveAsTemplate(project.id, templateName.trim(), [...chosenFiles]);
+      savingFor = null;
+      notify(`Saved “${templateName.trim()}” as a template.`);
+    } catch (reason) {
+      fail(reason);
+    } finally {
+      busy = false;
+    }
   }
 
   /// Not `openProject` — that one opens the document. This one opens the dialog
@@ -1522,6 +1688,10 @@
         >
           <Settings size={16} strokeWidth={1.75} aria-hidden="true" />
         </button>
+        <button class="quiet-action wide" onclick={openGallery} disabled={busy}>
+          <FilePlus size={16} strokeWidth={1.75} aria-hidden="true" />
+          New document
+        </button>
         <button onclick={chooseDocument} disabled={busy}>
           {busy ? 'Opening…' : 'Open document'}
         </button>
@@ -1538,7 +1708,10 @@
           into the folder.
         </p>
         <div class="library-actions">
-          <button onclick={chooseDocument} disabled={busy}>Open document</button>
+          <button onclick={openGallery} disabled={busy}>New document</button>
+          <button class="quiet-action wide" onclick={chooseDocument} disabled={busy}>
+            Open document
+          </button>
         </div>
       </section>
     {:else}
@@ -1858,125 +2031,6 @@
       {/if}
     </section>
 
-    <section>
-      <h3>Markdown frontmatter</h3>
-      <p class="quiet">
-        Applied to markdown documents that set none of their own, so a preamble
-        you use everywhere is written once instead of at the top of every file.
-      </p>
-
-      <!-- One page, as large as the dialog will carry it, and a list that
-           changes what it shows. Several small pages side by side could be
-           compared but not read: at thumbnail size a preset is a texture, and
-           the face — which is most of what a preset decides — needs to be
-           looked at rather than glanced at. -->
-      <!-- A two-panel selector: what is chosen on the left, what it produces on
-           the right, in that order because that is the order they are read in.
-           Side by side rather than stacked so that editing the frontmatter and
-           watching the page it makes are the same glance — stacked, the page
-           would be scrolled off the top at the moment it mattered.
-
-           Held together by spacing rather than by a border. Everything on the
-           left is one group because it is close; the page is another because it
-           is far. A box around either would be a boundary doing work the gap is
-           already doing. -->
-      <div class="preset-layout">
-        <div class="preset-controls">
-          <label class="preset-field">
-            Template
-            <span class="select-shell">
-              <select
-                value={presetSelected === null ? '' : String(presetSelected)}
-                onchange={(event) => {
-                  const value = event.currentTarget.value;
-                  choosePreset(value === '' ? null : Number(value));
-                }}
-              >
-                <option value="">None</option>
-                {#each presets as preset (preset.id)}
-                  <option value={String(preset.id)}>{preset.name}</option>
-                {/each}
-              </select>
-              <ChevronDown size={14} strokeWidth={2} aria-hidden="true" />
-            </span>
-          </label>
-
-          <div class="preset-buttons">
-            <button class="preset-action" onclick={addPreset}>
-              <Plus size={14} strokeWidth={2} aria-hidden="true" />
-              New
-            </button>
-            {#if presetSelected !== null}
-              <button class="preset-delete" onclick={() => deletePreset(presetSelected!)}>
-                <Trash2 size={14} strokeWidth={1.75} aria-hidden="true" />
-                Delete
-              </button>
-            {/if}
-          </div>
-
-          {#if presetSelected !== null}
-            <label class="preset-field">
-              Name
-              <input bind:value={presetName} maxlength="60" onblur={savePresetDraft} />
-            </label>
-
-            <div class="preset-frontmatter">
-              <button
-                class="preset-disclosure"
-                onclick={() => (presetOpen = !presetOpen)}
-                aria-expanded={presetOpen}
-              >
-                {#if presetOpen}
-                  <ChevronDown size={14} strokeWidth={2} aria-hidden="true" />
-                {:else}
-                  <ChevronRight size={14} strokeWidth={2} aria-hidden="true" />
-                {/if}
-                <span>Frontmatter</span>
-              </button>
-
-              {#if presetOpen}
-                <textarea
-                  bind:value={presetBody}
-                  rows="12"
-                  spellcheck="false"
-                  autocapitalize="off"
-                  aria-label="Frontmatter"
-                  placeholder={'geometry: margin=1in\nfontsize: 11pt'}
-                  onblur={savePresetDraft}
-                ></textarea>
-                <p class="quiet">
-                  YAML, without the <code>---</code> fences. Always applied. A document overrides it
-                  by setting the same key, or by adding its own <code>header-includes</code> — those
-                  come after these, so they win.
-                </p>
-              {/if}
-            </div>
-          {/if}
-
-          {#if presetError}
-            <p class="preset-error">{presetError}</p>
-          {/if}
-        </div>
-
-        <div class="preset-stage">
-          <!-- Not keyed on the selection. Remounting would blank the page on
-               every switch; left alone, the previous one stays up until the
-               next has been drawn, which is what the preview was built to do. -->
-          <PresetPreview
-            body={presetSelected === null ? '' : presetBody}
-            width={PRESET_PAGE_WIDTH}
-            height={PRESET_PAGE_HEIGHT}
-            onerror={(reason: string) => (presetError = reason)}
-          />
-        </div>
-      </div>
-
-      <p class="quiet">
-        Changing this does not rebuild. Save the document, or press Build, to see
-        it applied.
-      </p>
-    </section>
-
     <!-- One button, and it is not Save. Everything here has applied itself
          already; this only puts the dialog away. -->
     <div class="dialog-actions">
@@ -2007,6 +2061,226 @@
     <div class="dialog-actions">
       <button onclick={() => (projectFor = null)} disabled={busy}>Cancel</button>
       <button onclick={saveProject} disabled={busy}>Save</button>
+    </div>
+  </dialog>
+{/if}
+
+{#if creating}
+  <!-- Wider than the rest, and for the same reason Settings no longer is: what
+       is being chosen here is a page, and pages have to be looked at. Still a
+       dialog — starting a document is one act with three questions in it, not a
+       place to be. -->
+  <dialog class="gallery" use:modal={closeGallery} aria-labelledby="gallery-title">
+    <h2 id="gallery-title">New document</h2>
+
+    {#if templates.length === 0}
+      <p class="quiet">
+        Press ships with no templates — a template is a document of yours, kept. Right-click a
+        document in the library and choose <strong>Save as template</strong>. It is copied as it
+        stands: the project carries on untouched, and editing it later does not change the
+        template.
+      </p>
+    {:else}
+      <p class="quiet">Start from one of your templates.</p>
+
+      <div class="gallery-shelf">
+        {#each [{ title: 'Markdown', items: markdownTemplates }, { title: 'LaTeX', items: latexTemplates }] as group (group.title)}
+          {#if group.items.length > 0}
+            <section class="gallery-group">
+              <h3>{group.title}</h3>
+              <div class="template-grid">
+                {#each group.items as template (template.id)}
+                  <article class="template-card" class:chosen={templatePick === template.id}>
+                    <!-- Right-click to remove, the same place every other card
+                         in Press keeps what can be done to it. -->
+                    <button
+                      class="template-open"
+                      onclick={() => (templatePick = template.id)}
+                      ondblclick={() => void createDocument()}
+                      oncontextmenu={(event) => openMenu(event, templateMenu(template))}
+                      aria-pressed={templatePick === template.id}
+                    >
+                      <span class="template-page">
+                        {#if template.cover}
+                          <TemplateCover
+                            id={template.id}
+                            cover={template.cover}
+                            width={TEMPLATE_PAGE_WIDTH}
+                            height={TEMPLATE_PAGE_HEIGHT}
+                            invert={dark}
+                          />
+                        {:else}
+                          <!-- Never compiled when it was saved, so Press has
+                               never seen what it looks like. Saying so is better
+                               than drawing a page that is not this one's. -->
+                          <span class="template-blank">No page yet</span>
+                        {/if}
+                      </span>
+                      <span class="template-lines">
+                        <strong class="name">{template.name}</strong>
+                        {#if template.fileCount > 1}
+                          <!-- This one brings a folder rather than a file, which
+                               changes what appears on disk and is worth knowing
+                               before rather than after. -->
+                          <span class="where">
+                            <Files size={12} strokeWidth={1.75} aria-hidden="true" />
+                            {template.fileCount} files
+                          </span>
+                        {/if}
+                      </span>
+                    </button>
+                  </article>
+                {/each}
+              </div>
+            </section>
+          {/if}
+        {/each}
+      </div>
+
+      <!-- Only once a template is chosen. Before that there is nothing to name
+           and nowhere to put it, and a row of empty fields would be two
+           questions asked ahead of the one that decides them. -->
+      {#if picked}
+        <div class="create-row">
+          <label class="create-field">
+            Name
+            <span class="create-name">
+              <input
+                bind:value={newName}
+                placeholder="untitled"
+                spellcheck="false"
+                autocapitalize="off"
+                autocorrect="off"
+                onkeydown={(event) => {
+                  if (event.key === 'Enter') void createDocument();
+                }}
+              />
+              <!-- Decided by the template, so it is shown rather than typed. -->
+              <span class="create-extension">.{picked.entry.split('.').pop()}</span>
+            </span>
+          </label>
+
+          <label class="create-field folder">
+            Folder
+            <button class="create-folder" onclick={chooseFolder} title={newFolder ?? ''}>
+              <FolderOpen size={14} strokeWidth={1.75} aria-hidden="true" />
+              <span>{newFolder ?? 'Choose…'}</span>
+            </button>
+          </label>
+        </div>
+      {/if}
+    {/if}
+
+    <div class="dialog-actions">
+      <button onclick={closeGallery} disabled={busy}>Cancel</button>
+      <button
+        onclick={createDocument}
+        disabled={busy || !picked || !newFolder || !newName.trim()}
+      >
+        {busy ? 'Creating…' : 'Create'}
+      </button>
+    </div>
+  </dialog>
+{/if}
+
+{#if savingFor}
+  <dialog use:modal={() => (savingFor = null)} aria-labelledby="template-title">
+    <h2 id="template-title">Save as template</h2>
+    <p class="quiet">
+      A copy of {savingFor.fileName} as it stands now. The project is untouched, and editing it
+      later does not change the template.
+    </p>
+    <label>
+      Name
+      <input
+        bind:value={templateName}
+        maxlength="60"
+        onkeydown={(event) => {
+          if (event.key === 'Enter') void saveTemplate();
+        }}
+      />
+    </label>
+
+    <!-- Two answers rather than a list of files to tick. There are two intents
+         here — a house style, and a project you want to begin from again — and
+         ticking files serves neither. -->
+    <div class="scopes" role="radiogroup" aria-label="What the template keeps">
+      <button
+        class="scope"
+        role="radio"
+        aria-checked={templateScope === 'document'}
+        onclick={() => chooseScope('document')}
+      >
+        <strong>The document alone</strong>
+        <span class="quiet">One file, whatever else is in the folder with it.</span>
+      </button>
+      <button
+        class="scope"
+        role="radio"
+        aria-checked={templateScope === 'project'}
+        onclick={() => chooseScope('project')}
+        disabled={listingFiles}
+      >
+        <strong>Select files</strong>
+        <span class="quiet">
+          {#if listingFiles}
+            Reading the folder…
+          {:else}
+            Everything it compiles with, minus whatever you strike out.
+          {/if}
+        </span>
+      </button>
+    </div>
+
+    {#if templateScope === 'project'}
+      <!-- Only what a version would hold: build output, editor scratch, `.git`
+           and a neighbour's document are not in the listing at all, so they
+           cannot be ticked back in. The document's own row is ticked and
+           locked — a template without it is not a template. -->
+      <div class="tree" role="group" aria-label="Files to keep">
+        {#each fileRows as row (row.path)}
+          {@const state = tickState(row.files)}
+          {@const fixed = row.kind === 'file' && locked(row.path)}
+          <button
+            class="tree-row"
+            class:folder={row.kind === 'folder'}
+            class:fixed
+            style="padding-left: calc({row.depth} * 1.1rem + 0.4rem)"
+            aria-pressed={state !== 'none'}
+            disabled={fixed}
+            title={fixed ? 'The document itself is always kept' : row.path}
+            onclick={() => toggleFiles(row.files)}
+          >
+            <span class="tick" class:on={state !== 'none'}>
+              {#if state === 'all'}
+                <Check size={11} strokeWidth={3} aria-hidden="true" />
+              {:else if state === 'some'}
+                <Minus size={11} strokeWidth={3} aria-hidden="true" />
+              {/if}
+            </span>
+            {#if row.kind === 'folder'}
+              <Folder size={13} strokeWidth={1.75} aria-hidden="true" />
+            {/if}
+            <span class="tree-name">{row.name}</span>
+            <span class="tree-size">{readableSize(row.byteSize)}</span>
+          </button>
+        {/each}
+      </div>
+
+      <p class="quiet tree-total">
+        {chosenFiles.size}
+        {chosenFiles.size === 1 ? 'file' : 'files'}, {readableSize(chosenBytes)}
+      </p>
+    {/if}
+
+    <div class="dialog-actions">
+      <button onclick={() => (savingFor = null)} disabled={busy}>Cancel</button>
+      <button
+        onclick={saveTemplate}
+        disabled={busy || !templateName.trim() || chosenFiles.size === 0}
+      >
+        {busy ? 'Saving…' : 'Save'}
+      </button>
     </div>
   </dialog>
 {/if}
@@ -2430,9 +2704,27 @@
     transition: background var(--duration), color var(--duration);
   }
 
-  .library-actions .quiet-action:hover {
+  .library-actions .quiet-action:hover:not(:disabled) {
     background: var(--paper-2);
     color: var(--ink);
+  }
+
+  /* The same quiet ink with a word beside the mark, or in place of it. Starting
+     a document is not a lesser act than opening one, but there is one filled
+     control in this header and it belongs to the commoner of the two. */
+  .library-actions .quiet-action.wide {
+    display: flex;
+    gap: 0.4rem;
+    padding: 0.45rem 0.7rem;
+    border: var(--bw) solid var(--line-2);
+    font-family: var(--font-sans);
+    font-size: var(--fs-menu);
+    line-height: 1.2;
+  }
+
+  .library-actions .quiet-action:disabled {
+    color: var(--line-3);
+    cursor: default;
   }
 
   /* The band, which holds its own name as well as the documents on it.
@@ -2731,6 +3023,348 @@
     text-align: center;
   }
 
+  /* The shelf's card, at the shelf's size: choosing a template is choosing off
+     a shelf of covers, so it is drawn the same way. A grid rather than a
+     scrolling row, because comparison is the whole task here and a carousel
+     hides half of what is being compared. */
+  .template-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, var(--shelf-thumb-w));
+    justify-content: start;
+    gap: var(--grid-gap-y) var(--grid-gap-x);
+  }
+
+  /* Room for the ring, which is drawn outside the page so that it never covers
+     a millimetre of what is being chosen. */
+  .template-card {
+    border: 0;
+    border-radius: 0;
+    overflow: visible;
+    width: var(--shelf-thumb-w);
+  }
+
+  .template-open {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-md);
+    width: 100%;
+    padding: 0;
+    border: 0;
+    background: none;
+    text-align: left;
+    cursor: pointer;
+  }
+
+  .template-page {
+    display: grid;
+    place-items: center;
+    width: var(--shelf-thumb-w);
+    height: var(--shelf-thumb-h);
+    border-radius: var(--radius-sm);
+    transition: box-shadow var(--duration);
+  }
+
+  /* The chosen one wears a ring around its page, held off the paper by a hair
+     so the page keeps its own edge. Nothing is written on the card to say it is
+     chosen: there is one ring on the screen and it is unmistakable. */
+  .template-card.chosen .template-page {
+    box-shadow: 0 0 0 2px var(--accent);
+  }
+
+  .template-open:hover .template-page {
+    box-shadow: 0 0 0 2px var(--line-3);
+  }
+
+  .template-card.chosen .template-open:hover .template-page {
+    box-shadow: 0 0 0 2px var(--accent);
+  }
+
+  /* Never compiled when it was kept. Set in the page's own shape so the shelf
+     keeps its rhythm, and quiet, because it is the absence of a picture rather
+     than a warning about one. */
+  .template-blank {
+    display: grid;
+    place-items: center;
+    width: 100%;
+    height: 100%;
+    border: var(--bw) dashed var(--line-2);
+    border-radius: var(--radius-sm);
+    color: var(--ink-3);
+    font-size: var(--fs-meta);
+  }
+
+  .template-lines {
+    display: grid;
+    gap: var(--space-xs);
+    min-width: 0;
+  }
+
+  /* Wide enough for three pages across, which is as many as can be compared
+     without the eye having to travel. The shelf scrolls inside; the questions
+     under it do not, so they are in the same place whatever is above them. */
+  dialog.gallery {
+    width: min(38rem, calc(100% - 2rem));
+  }
+
+  .gallery-shelf {
+    max-height: min(26rem, 45vh);
+    overflow-y: auto;
+    /* Room for the selection ring, which is drawn outside the page and would
+       otherwise be clipped by the scroller's edge. */
+    padding: 3px;
+    margin-bottom: var(--space-lg);
+  }
+
+  .gallery-group + .gallery-group {
+    margin-top: var(--space-xl);
+  }
+
+  /* The same eyebrow the settings sections wear. Two of them here, and they are
+     the one thing separating a markdown template from a LaTeX one. */
+  dialog.gallery h3 {
+    margin-bottom: var(--space-md);
+    color: var(--ink-3);
+    font-size: var(--fs-label);
+    font-weight: var(--fw-label);
+    letter-spacing: var(--tracking-label);
+    text-transform: uppercase;
+  }
+
+  /* The name takes the room, the folder takes what it needs, and they sit on
+     one line because they are one sentence: call it this, put it there. */
+  .create-row {
+    display: flex;
+    align-items: flex-end;
+    gap: var(--space-md);
+    margin-bottom: var(--space-lg);
+  }
+
+  .create-field {
+    display: grid;
+    gap: var(--space-xs);
+    margin: 0;
+    color: var(--ink-3);
+    font-size: var(--fs-meta);
+  }
+
+  /* -- the file tree ----------------------------------------------------- */
+
+  /* A listing rather than a control panel: no rules between rows, no boxes
+     around names, and the indent alone saying what is inside what. The frame is
+     the field's own, because that is what this is — one field holding a set. */
+  .tree {
+    max-height: 15rem;
+    overflow-y: auto;
+    padding: 0.25rem 0;
+    margin-bottom: var(--space-sm);
+    border: var(--bw) solid var(--line-2);
+    border-radius: var(--radius-sm);
+    background: var(--paper);
+  }
+
+  .tree-row {
+    display: flex;
+    align-items: center;
+    gap: 0.45rem;
+    width: 100%;
+    padding-block: 0.22rem;
+    padding-right: 0.6rem;
+    border: 0;
+    background: none;
+    color: var(--ink-2);
+    font-family: var(--font-mono);
+    font-size: var(--fs-meta);
+    line-height: 1.5;
+    text-align: left;
+    cursor: pointer;
+    transition: background var(--duration);
+  }
+
+  .tree-row:hover:not(:disabled) {
+    background: var(--paper-2);
+  }
+
+  /* A folder is the thing its contents are named after, so it is set in the
+     interface's own face rather than the face the paths are in. */
+  .tree-row.folder {
+    color: var(--ink-3);
+    font-family: var(--font-sans);
+  }
+
+  /* The document itself, which cannot be struck out. Dimmed rather than
+     disabled-looking: it is not unavailable, it is settled. */
+  .tree-row.fixed {
+    cursor: default;
+    opacity: 0.75;
+  }
+
+  .tree-name {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  /* Right-aligned and quiet: a column to be scanned when the question is what
+     is making this template large, and ignorable the rest of the time. */
+  .tree-size {
+    flex: none;
+    color: var(--ink-3);
+    font-family: var(--font-mono);
+    font-size: var(--fs-meta);
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* The square a radio's dot would be if this were a choice of one. Same size,
+     same ring, same accent when it is on — square because these are not
+     alternatives and the shape is the only thing that says so. */
+  .tick {
+    flex: none;
+    display: grid;
+    place-items: center;
+    width: 0.85rem;
+    height: 0.85rem;
+    border: var(--bw) solid var(--line-3);
+    border-radius: var(--radius-xs);
+    background: transparent;
+    color: var(--on-accent);
+    transition:
+      border-color var(--duration),
+      background var(--duration);
+  }
+
+  .tick.on {
+    border-color: var(--accent);
+    background: var(--accent);
+  }
+
+  .tree-total {
+    margin-bottom: var(--space-lg);
+    font-size: var(--fs-meta);
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* The name takes what is left; the folder takes what it needs. A folder path
+     is long and a document name is short, and giving them equal room would
+     leave the name in a field it could never fill. */
+  .create-field:not(.folder) {
+    flex: 1;
+    min-width: 0;
+  }
+
+  .create-field.folder {
+    min-width: 0;
+    max-width: 40%;
+  }
+
+  /* The extension sits inside the field, in the field's own colours, because it
+     is part of the name — just not the part anyone types. */
+  .create-name {
+    display: flex;
+    align-items: center;
+    gap: 0.15rem;
+    padding-right: 0.6rem;
+    border: var(--bw) solid var(--line-2);
+    border-radius: var(--radius-sm);
+    background: var(--paper);
+  }
+
+  .create-name input {
+    flex: 1;
+    min-width: 0;
+    margin: 0;
+    border: 0;
+    background: none;
+  }
+
+  .create-name input:focus {
+    outline: none;
+  }
+
+  .create-extension {
+    flex: none;
+    color: var(--ink-3);
+    font-family: var(--font-mono);
+    font-size: var(--fs-meta);
+  }
+
+  .create-folder {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    min-width: 0;
+    padding: 0.5rem 0.6rem;
+    border: var(--bw) solid var(--line-2);
+    border-radius: var(--radius-sm);
+    background: var(--paper);
+    color: var(--ink-2);
+    font-family: var(--font-sans);
+    font-size: var(--fs-menu);
+    line-height: 1;
+    cursor: pointer;
+    transition:
+      border-color var(--duration),
+      color var(--duration);
+  }
+
+  .create-folder:hover {
+    border-color: var(--line-3);
+    color: var(--ink);
+  }
+
+  /* A path is read from its end — the folder you are putting this in is the last
+     component, not the first — so it is the front that is dropped. */
+  .create-folder span {
+    overflow: hidden;
+    direction: rtl;
+    text-align: left;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  /* Stacked, because each carries a sentence. Side by side they would be two
+     columns of prose in a dialog that is one question wide. */
+  .scopes {
+    display: grid;
+    gap: var(--space-sm);
+    margin-bottom: var(--space-lg);
+  }
+
+  .scope {
+    display: grid;
+    gap: 0.2rem;
+    padding: 0.6rem 0.7rem;
+    border: var(--bw) solid var(--line-2);
+    border-radius: var(--radius-sm);
+    background: transparent;
+    color: var(--ink-2);
+    font-family: var(--font-sans);
+    font-size: var(--fs-menu);
+    text-align: left;
+    cursor: pointer;
+    transition:
+      border-color var(--duration),
+      color var(--duration);
+  }
+
+  .scope:hover {
+    border-color: var(--line-3);
+    color: var(--ink);
+  }
+
+  .scope[aria-checked='true'] {
+    border-color: var(--accent);
+    box-shadow: inset 0 0 0 var(--bw) var(--accent);
+    color: var(--ink);
+  }
+
+  .scope .quiet {
+    margin: 0;
+    font-size: var(--fs-meta);
+    line-height: 1.4;
+  }
+
   /* The window while a document is being held over it. An accent edge and the
      faintest wash of the same colour — enough to say the drop will land, and
      little enough that the library is still readable underneath it. */
@@ -2931,16 +3565,6 @@
     background: var(--backdrop);
   }
 
-  /* Wider than the rest, and only this one: every other dialog is a question
-     with a field under it, while this holds a YAML editor with a compiled page
-     beside it. Widening `dialog` itself would give a rename box the same
-     measure and make it look like a form. */
-  dialog.settings {
-    /* Two columns wide: a page beside the field that changes it, with enough
-       left over that a line of YAML is read rather than scrolled. */
-    width: min(54rem, calc(100% - 2rem));
-  }
-
   /* Settings is the one dialog with more than one subject in it, so the
      subjects are ruled off from each other rather than left to run together.
      The last one is not, because a line above the Done button would read as a
@@ -2975,8 +3599,7 @@
      one wearing the same treatment made EDITOR and COMMAND look like siblings
      when the first contains the second. Scoped to Settings, because a dialog
      that is one question and one field has no hierarchy to show. */
-  dialog.settings label,
-  .preset-disclosure {
+  dialog.settings label {
     color: var(--ink-3);
     font-size: var(--fs-meta);
     font-weight: 500;
@@ -2984,12 +3607,13 @@
     text-transform: none;
   }
 
-  /* Centred: three of anything sitting left in a dialog this wide reads as the
-     start of a longer list rather than as the whole of a choice. */
+  /* Left, on the margin the headings and fields already keep. These were
+     centred when the dialog was wide enough for two columns; at one column,
+     centring them would set three buttons adrift above a field that starts at
+     the edge. */
   .choices {
     display: flex;
     flex-wrap: wrap;
-    justify-content: center;
     gap: 0.5rem;
     margin-bottom: 0.75rem;
   }
@@ -3058,8 +3682,7 @@
     opacity: 1;
   }
 
-  /* One radio mark, wherever a radio is drawn: under an icon tile, or beside a
-     preset's name. */
+  /* One radio mark, wherever a radio is drawn. */
   .dot {
     flex: none;
     width: 0.75rem;
@@ -3083,165 +3706,6 @@
     border-color: var(--accent);
     background: var(--accent);
     box-shadow: inset 0 0 0 2px var(--card);
-  }
-
-  /* Chosen on the left, produced on the right. No border on either: the gap
-     between the columns is wider than any gap inside one, which is the whole of
-     what says they are two groups. */
-  .preset-layout {
-    display: grid;
-    grid-template-columns: minmax(0, 1fr) auto;
-    gap: 1.5rem;
-    align-items: start;
-    margin-bottom: 0.75rem;
-  }
-
-  /* One rhythm inside the column, wider than the space between a label and its
-     field and narrower than the space between sections — so the fields read as
-     a group without anything being drawn around them. */
-  .preset-controls {
-    display: flex;
-    flex-direction: column;
-    gap: 1rem;
-    min-width: 0;
-  }
-
-  .preset-controls .preset-field {
-    margin-bottom: 0;
-  }
-
-  /* Tight under the field they act on, because they act on it. */
-  .preset-buttons {
-    display: flex;
-    gap: 0.4rem;
-    margin-top: -0.5rem;
-  }
-
-  .preset-action {
-    display: flex;
-    align-items: center;
-    gap: 0.3rem;
-    padding: 0.35rem 0.55rem;
-    border: var(--bw) solid var(--line-2);
-    border-radius: var(--radius-sm);
-    background: transparent;
-    color: var(--ink-2);
-    font-family: var(--font-sans);
-    font-size: var(--fs-menu);
-    line-height: 1;
-    cursor: pointer;
-    transition:
-      border-color var(--duration),
-      color var(--duration);
-  }
-
-  .preset-action:hover {
-    border-color: var(--accent);
-    color: var(--accent);
-  }
-
-  /* The disclosure and what it opens are one thing, so they sit closer to each
-     other than to the field above. */
-  .preset-frontmatter {
-    display: flex;
-    flex-direction: column;
-    gap: 0.4rem;
-  }
-
-  .preset-stage {
-    display: grid;
-    place-items: center;
-  }
-
-  /* A native menu wearing the app's own field: `appearance: none` takes the
-     platform chrome off, and the chevron is drawn beside it in ink that follows
-     the theme — which a background image could not do. The element underneath
-     is still a `select`, so the keyboard and the screen reader get the control
-     they know. */
-  .select-shell {
-    position: relative;
-    display: block;
-  }
-
-  .select-shell :global(svg) {
-    position: absolute;
-    top: 50%;
-    right: 0.5rem;
-    transform: translateY(-50%);
-    color: var(--ink-3);
-    pointer-events: none;
-  }
-
-  /* Scoped to the shell, because the chevron above only exists here: stripping
-     the platform's own from every `select` in the application would leave the
-     project dialog's engine menu with nothing to say it opens. */
-  .select-shell select {
-    appearance: none;
-    padding-right: 1.75rem;
-    background: var(--paper);
-    cursor: pointer;
-  }
-
-  /* The frontmatter's own heading, and the control that opens it — one target,
-     so the word is as clickable as the arrow. */
-  .preset-disclosure {
-    display: flex;
-    align-items: center;
-    gap: 0.35rem;
-    padding: 0.2rem 0;
-    border: 0;
-    background: transparent;
-    font-family: var(--font-sans);
-    cursor: pointer;
-    transition: color var(--duration);
-  }
-
-  .preset-disclosure:hover {
-    color: var(--ink);
-  }
-
-  /* Named, because an unlabelled wastebasket beside a text field reads as
-     emptying the field. */
-  .preset-delete {
-    display: flex;
-    align-items: center;
-    gap: 0.35rem;
-    padding: 0.45rem 0.6rem;
-    border: var(--bw) solid transparent;
-    border-radius: var(--radius-sm);
-    background: transparent;
-    color: var(--ink-3);
-    font-family: var(--font-sans);
-    font-size: var(--fs-menu);
-    line-height: 1;
-    cursor: pointer;
-    transition:
-      background var(--duration),
-      color var(--duration);
-  }
-
-  .preset-delete:hover {
-    border-color: var(--danger-line);
-    background: var(--danger-tint);
-    color: var(--danger);
-  }
-
-  .preset-controls textarea {
-    font-family: var(--font-mono);
-    font-size: var(--fs-meta);
-    line-height: 1.5;
-    resize: vertical;
-    white-space: pre;
-  }
-
-  /* pandoc's or TeX's own words, so they are set as the machine said them. */
-  .preset-error {
-    margin: 0.4rem 0 0;
-    color: var(--danger);
-    font-family: var(--font-mono);
-    font-size: var(--fs-meta);
-    line-height: 1.45;
-    overflow-wrap: anywhere;
   }
 
   /* One step above the dialog's own text, and well below the library's

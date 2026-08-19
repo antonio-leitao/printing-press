@@ -9,6 +9,10 @@
 //! Files are named by the hash of their contents, so a hundred snapshots of a
 //! thesis whose figures never change store those figures once.
 //!
+//! Templates keep their files here too. A template is a snapshot that belongs
+//! to Press rather than to a project, and giving it a store of its own would
+//! mean the same class file held twice for no reason anyone could name.
+//!
 //! Nothing here writes to the project folder. It only ever reads.
 
 use std::{
@@ -25,6 +29,7 @@ use walkdir::WalkDir;
 use crate::{
     error::{AppError, AppResult},
     files,
+    model::ProjectFile,
 };
 
 /// Guards against snapshotting something that is not a paper. Each limit reports
@@ -53,14 +58,19 @@ pub struct Capture {
     pub byte_size: i64,
 }
 
-/// Reads every source file in the document's directory into the object store and
-/// returns the manifest.
+/// Every source file in the document's directory, with nothing stored.
 ///
 /// Generated files, editor scratch, other tools' history and the documents of
-/// other projects are all skipped, so a snapshot holds what this document needs
-/// to compile and nothing else. `foreign` names those other documents, relative
-/// to `root`.
-pub fn capture(root: &Path, objects: &Path, foreign: &HashSet<String>) -> AppResult<Capture> {
+/// other projects are all skipped, so this is what the document needs to
+/// compile and nothing else. `foreign` names those other documents, relative to
+/// `root`.
+///
+/// Separate from [`capture`] because two callers want the same answer for
+/// different reasons: a snapshot is about to store all of it, and a template's
+/// file tree is about to show it and let the reader strike some out. Walking
+/// twice with two sets of rules is how the tree and the store would come to
+/// disagree about what a project is.
+pub fn list(root: &Path, foreign: &HashSet<String>) -> AppResult<Vec<ProjectFile>> {
     if !root.is_dir() {
         return Err(AppError::NotFound(format!(
             "{} is no longer a directory",
@@ -95,7 +105,7 @@ pub fn capture(root: &Path, objects: &Path, foreign: &HashSet<String>) -> AppRes
         let size = entry.metadata().map(|data| data.len()).unwrap_or(0);
         if size > MAX_FILE_BYTES {
             return Err(AppError::InvalidInput(format!(
-                "{} is larger than the {} MB limit for a snapshot",
+                "{} is larger than the {} MB limit for one file",
                 relative.display(),
                 MAX_FILE_BYTES / (1024 * 1024)
             )));
@@ -103,7 +113,7 @@ pub fn capture(root: &Path, objects: &Path, foreign: &HashSet<String>) -> AppRes
         total += size;
         if total > MAX_TOTAL_BYTES {
             return Err(AppError::InvalidInput(format!(
-                "this project holds more than {} MB of source; Press will not snapshot it",
+                "this project holds more than {} MB of source; Press will not keep it",
                 MAX_TOTAL_BYTES / (1024 * 1024)
             )));
         }
@@ -113,25 +123,48 @@ pub fn capture(root: &Path, objects: &Path, foreign: &HashSet<String>) -> AppRes
             )));
         }
 
-        let object = store(entry.path(), objects)?;
-        files_seen.push(StoredFile {
+        files_seen.push(ProjectFile {
             path: files::portable(relative),
-            object,
             byte_size: size as i64,
         });
     }
 
     if files_seen.is_empty() {
         return Err(AppError::InvalidInput(
-            "there are no source files here to snapshot".into(),
+            "there are no source files here".into(),
         ));
     }
 
     files_seen.sort_by(|left, right| left.path.cmp(&right.path));
+    Ok(files_seen)
+}
+
+/// Reads every source file in the document's directory into the object store
+/// and returns the manifest.
+pub fn capture(root: &Path, objects: &Path, foreign: &HashSet<String>) -> AppResult<Capture> {
+    store_all(root, objects, &list(root, foreign)?)
+}
+
+/// Puts a listing in the store, in the order it arrived.
+///
+/// What a template uses, having shown the listing to the reader and been told
+/// which of it to keep.
+pub fn store_all(root: &Path, objects: &Path, files: &[ProjectFile]) -> AppResult<Capture> {
+    let mut stored = Vec::with_capacity(files.len());
+    for file in files {
+        stored.push(StoredFile {
+            path: file.path.clone(),
+            object: store(&root.join(&file.path), objects)?,
+            byte_size: file.byte_size,
+        });
+    }
+    if stored.is_empty() {
+        return Err(AppError::InvalidInput("there is nothing here to keep".into()));
+    }
     Ok(Capture {
-        revision: manifest_revision(&files_seen),
-        byte_size: total as i64,
-        files: files_seen,
+        byte_size: stored.iter().map(|file| file.byte_size).sum(),
+        revision: manifest_revision(&stored),
+        files: stored,
     })
 }
 
@@ -172,7 +205,7 @@ pub fn object_path(objects: &Path, hash: &str) -> PathBuf {
 
 /// Copies a file into the store under its content hash. A hash that is already
 /// present is left alone: identical content is stored once.
-fn store(source: &Path, objects: &Path) -> AppResult<String> {
+pub fn store(source: &Path, objects: &Path) -> AppResult<String> {
     let hash = hash_file(source)?;
     let destination = object_path(objects, &hash);
     if destination.exists() {

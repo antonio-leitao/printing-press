@@ -4,9 +4,6 @@ import type {
   Engine,
   IconChoice,
   LooseDocument,
-  Preset,
-  PresetList,
-  PresetPreview,
   LinkBox,
   OpenRequest,
   PageSize,
@@ -14,7 +11,9 @@ import type {
   SearchHit,
   SnapshotOutcome,
   SourcePeek,
+  ProjectFile,
   SourceRef,
+  TemplateSummary,
   TextBox,
   VersionSummary
 } from '$lib/types';
@@ -126,30 +125,36 @@ export const api = {
    */
   setIconChoice: (name: IconChoice) => invoke<boolean>('set_icon_choice', { name }),
 
-  /** The frontmatter presets, and which is chosen. */
-  listPresets: () => invoke<PresetList>('list_presets'),
-
-  /** Creates one when `id` is null, otherwise replaces the one named. */
-  savePreset: (id: number | null, name: string, body: string) =>
-    invoke<Preset>('save_preset', { id, name, body }),
-
-  deletePreset: (id: number) => invoke<void>('delete_preset', { id }),
+  /** Every template, newest first. The gallery starts empty. */
+  listTemplates: () => invoke<TemplateSummary[]>('list_templates'),
 
   /**
-   * Chooses a preset, or `null` for none.
+   * Every file this project would compile with, for the tree to show.
    *
-   * Nothing is rebuilt: a document keeps the PDF it was compiled with until it
-   * is built again, by a save or by the Build button.
+   * The same walk a snapshot makes, so what can be ticked is exactly what a
+   * version would hold.
    */
-  selectPreset: (id: number | null) => invoke<void>('select_preset', { id }),
+  projectFiles: (projectId: number) => invoke<ProjectFile[]>('project_files', { projectId }),
 
   /**
-   * Compiles the sample document under a preset.
+   * Keeps a project as stationery: the files named, as they are now.
    *
-   * Also how a preset is checked: a rejection carries pandoc's or TeX's own
-   * complaint about it.
+   * A copy taken once: the project carries on untouched and editing it later
+   * does not edit the template. Paths are intersected with Press's own walk on
+   * the way in, so one that is not the project's is simply not kept.
    */
-  previewPreset: (body: string) => invoke<PresetPreview>('preview_preset', { body }),
+  saveAsTemplate: (projectId: number, name: string, files: string[]) =>
+    invoke<TemplateSummary>('save_as_template', { projectId, name, files }),
+
+  deleteTemplate: (templateId: number) => invoke<void>('delete_template', { templateId }),
+
+  /**
+   * Writes a template into a folder and keeps what it wrote as a project.
+   *
+   * Nothing is written over: a name already taken is refused by name.
+   */
+  createFromTemplate: (templateId: number, folder: string, name: string) =>
+    invoke<ProjectSummary>('create_from_template', { templateId, folder, name }),
 
   /** Collects a path Press was launched with. Taking it clears it. */
   takePendingOpen: () => invoke<OpenRequest | null>('take_pending_open'),

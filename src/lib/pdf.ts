@@ -60,15 +60,14 @@ export function pageUrl(
 }
 
 /**
- * A compiled preset's sample page.
+ * A template's cover page.
  *
- * The digest is the hash of the preset body, which is both the address and the
- * file it names — so an edited preset is a different URL and nothing has to be
- * invalidated.
+ * Always the first page: a card shows a cover, and a template holding twelve
+ * files still has one.
  */
-export function previewUrl(digest: string, page: number, scale: number, invert = false): string {
+export function coverUrl(templateId: number, scale: number, invert = false): string {
   const ink = invert ? '&invert=1' : '';
-  return `${ORIGIN}/preview/${digest}/${page}?scale=${scale.toFixed(4)}${ink}`;
+  return `${ORIGIN}/cover/${templateId}?scale=${scale.toFixed(4)}${ink}`;
 }
 
 /**

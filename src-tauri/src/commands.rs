@@ -11,13 +11,12 @@ use crate::{
     database::{NewProject, ProjectEdit},
     documents, editor,
     error::{AppError, AppResult},
-    frontmatter,
     model::{
-        DocumentKind, EditorCommand, Engine, OpenRequest, PageSize, Preset, PresetList,
-        PresetPreview, ProjectSummary, SearchHit, SnapshotOutcome, SourceRef, TextBox,
+        DocumentKind, EditorCommand, Engine, OpenRequest, PageSize, ProjectSummary, SearchHit,
+        ProjectFile, SnapshotOutcome, SourceRef, TemplateCover, TemplateSummary, TextBox,
         VersionSummary,
     },
-    preview,
+    templates,
 };
 
 /// Every database and filesystem call goes through here, off the async runtime.
@@ -685,106 +684,203 @@ pub async fn set_icon_choice(name: String, state: State<'_, AppState>) -> AppRes
     .await
 }
 
-/// The frontmatter presets, and which of them is selected. `None` for the
-/// selection means markdown is compiled exactly as it was before presets.
+/// Every template, newest first. There is no built-in set: the gallery starts
+/// empty and fills with documents the reader has saved.
 #[tauri::command]
-pub async fn list_presets(state: State<'_, AppState>) -> AppResult<PresetList> {
+pub async fn list_templates(state: State<'_, AppState>) -> AppResult<Vec<TemplateSummary>> {
+    let repository = Arc::clone(&state.repository);
+    blocking(move || repository.list_templates()).await
+}
+
+/// Every file this project would compile with, for the tree to show.
+///
+/// The same walk a snapshot makes, so what can be kept in a template is exactly
+/// what is kept in a version: build output, editor scratch, `.git` and the
+/// documents of neighbouring projects are not offered, because they are not
+/// this project's to offer.
+#[tauri::command]
+pub async fn project_files(
+    project_id: i64,
+    state: State<'_, AppState>,
+) -> AppResult<Vec<ProjectFile>> {
     let repository = Arc::clone(&state.repository);
     blocking(move || {
-        let presets = repository.list_presets()?;
-        // Read against the presets that exist rather than trusted: a selection
-        // naming one that was deleted is no selection.
-        let selected = repository
-            .setting(frontmatter::SETTING)?
-            .and_then(|id| id.parse::<i64>().ok())
-            .filter(|id| presets.iter().any(|preset| preset.id == *id));
-        Ok(PresetList { presets, selected })
+        let project = repository.get_project(project_id)?;
+        let directory = project.directory();
+        let foreign = repository
+            .foreign_documents(project_id, &directory)?
+            .into_iter()
+            .collect::<HashSet<_>>();
+        templates::listing(&directory, &foreign)
     })
     .await
 }
 
-/// Creates a preset, or replaces the one identified. Answers with what was
-/// stored, so the interface holds an id it can select and edit.
+/// Keeps a project as stationery: the files named, under a name.
+///
+/// A copy, taken once. The project carries on untouched and nothing links the
+/// two afterwards — editing the document later does not edit the template, and
+/// there is no version of this that would make it do so.
+///
+/// The card's page is the PDF the document had already compiled. Nothing is
+/// built here: a template of a document that has never been built simply has no
+/// page to show, which is worth less than a card and much less than a TeX run
+/// the reader did not ask for.
 #[tauri::command]
-pub async fn save_preset(
-    id: Option<i64>,
+pub async fn save_as_template(
+    project_id: i64,
     name: String,
-    body: String,
+    files: Vec<String>,
     state: State<'_, AppState>,
-) -> AppResult<Preset> {
+) -> AppResult<TemplateSummary> {
     let name = name.trim().to_owned();
     if name.is_empty() {
         return Err(AppError::InvalidInput(
-            "a preset needs a name to be chosen by".to_owned(),
+            "a template needs a name to be chosen by".to_owned(),
         ));
     }
-    let repository = Arc::clone(&state.repository);
-    blocking(move || repository.save_preset(id, &name, &body)).await
-}
 
-/// Removes a preset. Selecting it is undone with it: a selection pointing at
-/// nothing already reads as none, but leaving it there means the next preset to
-/// take that id would be selected by an accident of numbering.
-#[tauri::command]
-pub async fn delete_preset(id: i64, state: State<'_, AppState>) -> AppResult<()> {
     let repository = Arc::clone(&state.repository);
+    let objects = state.objects_root.clone();
+    let (project, stored, cover_pdf) = blocking(move || {
+        let project = repository.get_project(project_id)?;
+        let directory = project.directory();
+        // The same "not mine" the history uses: a neighbour's document sharing
+        // the folder is another project, not part of this one.
+        let foreign = repository
+            .foreign_documents(project_id, &directory)?
+            .into_iter()
+            .collect::<HashSet<_>>();
+        let files = templates::capture(
+            &directory,
+            &project.file_name(),
+            &objects,
+            &foreign,
+            &files,
+        )?;
+        let cover = repository
+            .artifact_for(project_id, &SourceRef::Worktree, project.engine)?
+            .map(|artifact| artifact.pdf_path)
+            .filter(|path| path.is_file());
+        Ok((project, files, cover))
+    })
+    .await?;
+
+    // Measured before it is stored, so a PDF that cannot be read leaves a
+    // template with no cover rather than one pointing at a page nothing can
+    // draw.
+    let cover = match cover_pdf {
+        Some(path) => {
+            let geometry = Arc::clone(&state.renderer).geometry(path.clone()).await.ok();
+            geometry
+                .as_ref()
+                .and_then(|pages| pages.first())
+                .map(|first| {
+                    (
+                        path,
+                        TemplateCover {
+                            width: first.width,
+                            height: first.height,
+                        },
+                    )
+                })
+        }
+        None => None,
+    };
+
+    let repository = Arc::clone(&state.repository);
+    let objects = state.objects_root.clone();
     blocking(move || {
-        repository.delete_preset(id)?;
-        if repository.setting(frontmatter::SETTING)? == Some(id.to_string()) {
-            repository.clear_setting(frontmatter::SETTING)?;
-        }
-        Ok(())
+        let cover = cover
+            .map(|(path, page)| {
+                crate::snapshot::store(&path, &objects).map(|object| (object, page))
+            })
+            .transpose()?;
+        repository.create_template(
+            &name,
+            DocumentKind::of(&project.document()),
+            project.engine,
+            &project.file_name(),
+            &stored,
+            cover,
+        )
     })
     .await
 }
 
-/// Chooses a preset, or none of them.
-///
-/// Nothing is rebuilt here. A document already compiled keeps the PDF it was
-/// compiled with until it is built again — by a save, or by the Build button —
-/// which is the same rule as every other reason a document might be out of
-/// date, and one less thing that happens without being asked for.
+/// Removes a template. Every template can be removed: none of them are Press's.
 #[tauri::command]
-pub async fn select_preset(id: Option<i64>, state: State<'_, AppState>) -> AppResult<()> {
+pub async fn delete_template(template_id: i64, state: State<'_, AppState>) -> AppResult<()> {
     let repository = Arc::clone(&state.repository);
-    blocking(move || match id {
-        Some(id) => {
-            if repository.preset(id)?.is_none() {
-                return Err(AppError::NotFound(format!("no preset with id {id}")));
-            }
-            repository.set_setting(frontmatter::SETTING, &id.to_string())
-        }
-        None => repository.clear_setting(frontmatter::SETTING),
-    })
-    .await
+    blocking(move || repository.delete_template(template_id)).await
 }
 
-/// Compiles the sample document under a preset and answers where to draw it.
+/// Writes a template into a folder and keeps what it wrote as a project.
 ///
-/// This is also how a preset is checked. `Err` carries pandoc's or TeX's own
-/// complaint, which is the reader's answer to "why does this not work" — and
-/// far better received here, while they are looking at the field, than at the
-/// next build of a real document. A preset applies to every markdown document
-/// Press compiles, so a broken one is not a small problem.
+/// The one place Press creates a file in a folder of the reader's. It happens
+/// because they asked for a document to exist, it happens once, and nothing is
+/// ever written over: a name already taken is refused by name.
+///
+/// The toolchain is checked before anything is written. A document Press has
+/// just made and cannot open is worse than a refusal.
 #[tauri::command]
-pub async fn preview_preset(body: String, state: State<'_, AppState>) -> AppResult<PresetPreview> {
-    let root = state.preview_root.clone();
-    let renderer = Arc::clone(&state.renderer);
-    let pdf = preview::compile(&root, &body)
-        .await
-        .map_err(AppError::Build)?;
-    // The page size is part of what the preview shows — a preset that changes
-    // the paper changes this — and the interface needs it to ask for the page
-    // at a scale that fits.
-    let geometry = renderer.geometry(pdf).await?;
-    let first = geometry
-        .first()
-        .ok_or_else(|| AppError::Build("this preset produced no pages".to_owned()))?;
-    Ok(PresetPreview {
-        digest: preview::digest(&body),
-        width: first.width,
-        height: first.height,
+pub async fn create_from_template(
+    template_id: i64,
+    folder: String,
+    name: String,
+    state: State<'_, AppState>,
+) -> AppResult<ProjectSummary> {
+    let repository = Arc::clone(&state.repository);
+    let objects = state.objects_root.clone();
+    let id = blocking(move || {
+        let template = repository.template(template_id)?;
+        require_toolchain(template.kind)?;
+        let files = repository.template_manifest(template_id)?;
+        if files.is_empty() {
+            return Err(AppError::NotFound(
+                "this template has no files left in it".into(),
+            ));
+        }
+        let document = templates::create(
+            &files,
+            &template.entry,
+            &objects,
+            Path::new(&folder),
+            &name,
+        )?;
+        let document = documents::validate(&document)?;
+        let path = document
+            .to_str()
+            .ok_or_else(|| AppError::InvalidInput("that path is not valid UTF-8".into()))?;
+        Ok(repository
+            .upsert_project(NewProject {
+                name: &documents::suggested_name(&document),
+                document_path: path,
+                engine: template.engine,
+            })?
+            .id)
     })
+    .await?;
+
+    let repository = Arc::clone(&state.repository);
+    blocking(move || repository.project_summary(id)).await
+}
+
+/// What a document of this kind needs before Press can promise to compile it.
+/// The same two checks adding a project makes, in the one other place a project
+/// comes into being.
+fn require_toolchain(kind: DocumentKind) -> AppResult<()> {
+    if crate::toolchain::resolve_executable("latexmk").is_none() {
+        return Err(AppError::ToolUnavailable(
+            "latexmk was not found. Install a TeX distribution or add latexmk to PATH.".into(),
+        ));
+    }
+    if kind == DocumentKind::Markdown && crate::toolchain::resolve_executable("pandoc").is_none() {
+        return Err(AppError::ToolUnavailable(
+            "pandoc was not found. Install pandoc to compile markdown.".into(),
+        ));
+    }
+    Ok(())
 }
 
 /// Whether a path is on its way to becoming an open request. Asked once at

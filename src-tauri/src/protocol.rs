@@ -80,28 +80,34 @@ async fn serve<R: Runtime>(
             let invert = query_value(uri.query(), "invert").is_some_and(|value| value == "1");
             render(app, artifact_id, page, scale, invert).await
         }
-        // /preview/{digest}/{index}?scale=2.6&invert=1
-        // A preset's compiled sample. The digest is the address and the file
-        // name both, so there is no registry to consult — but it arrives from
-        // the webview, so its shape is checked before it is put in a path.
-        ["preview", digest, index] => {
-            if !crate::preview::is_digest(digest) {
-                return Err(AppError::InvalidInput("malformed preview id".into()));
-            }
-            let page = index
-                .parse::<usize>()
-                .map_err(|_| AppError::InvalidInput("malformed page number".into()))?;
+        // /cover/{template}?scale=2.6&invert=1
+        // The page a template shows on its card: the first page of the PDF its
+        // document had compiled when it was saved. Always page one — a card
+        // shows a cover, and a template that brings twelve files still has one.
+        ["cover", template] => {
+            let template_id = template
+                .parse::<i64>()
+                .map_err(|_| AppError::InvalidInput("malformed template id".into()))?;
             let scale = query_value(uri.query(), "scale")
                 .and_then(|value| value.parse::<f32>().ok())
                 .filter(|scale| scale.is_finite() && *scale > 0.0 && *scale <= 12.0)
                 .ok_or_else(|| AppError::InvalidInput("missing or unusable scale".into()))?;
             let invert = query_value(uri.query(), "invert").is_some_and(|value| value == "1");
             let state = app.state::<AppState>();
-            let path = crate::preview::pdf_path(&state.preview_root, digest);
+            let repository = std::sync::Arc::clone(&state.repository);
+            // The hash comes from the database rather than from the webview, so
+            // unlike an id in the path it is not something to be checked before
+            // it is put in a path — Press wrote it there itself.
+            let object =
+                tauri::async_runtime::spawn_blocking(move || repository.template_cover(template_id))
+                    .await
+                    .map_err(|error| AppError::Task(error.to_string()))??
+                    .ok_or_else(|| AppError::NotFound("this template has no page".into()))?;
+            let path = crate::snapshot::object_path(&state.objects_root, &object);
             if !path.is_file() {
-                return Err(AppError::NotFound("that preview is not compiled".into()));
+                return Err(AppError::NotFound("that page is no longer stored".into()));
             }
-            let rendered = state.renderer.render(path, page, scale, invert).await?;
+            let rendered = state.renderer.render(path, 0, scale, invert).await?;
             ok(frame(rendered))
         }
         _ => Err(AppError::NotFound(format!("no route for {}", uri.path()))),

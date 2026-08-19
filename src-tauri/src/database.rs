@@ -10,8 +10,9 @@ use rusqlite::{Connection, OptionalExtension, Row, Transaction, params};
 use crate::{
     error::{AppError, AppResult},
     model::{
-        ArtifactSummary, BuildState, Diagnostic, Engine, Preset, Project, ProjectSummary,
-        SnapshotOutcome, SnapshotSummary, SourceRef, VersionSummary,
+        ArtifactSummary, BuildState, Diagnostic, DocumentKind, Engine, Project, ProjectSummary,
+        SnapshotOutcome, SnapshotSummary, SourceRef, TemplateCover, TemplateSummary,
+        VersionSummary,
     },
 };
 
@@ -116,82 +117,139 @@ impl Repository {
         Ok(())
     }
 
-    pub fn clear_setting(&self, key: &str) -> AppResult<()> {
+    // -- templates --------------------------------------------------------
+
+    /// Newest first. There is no built-in set and no order of Press's own, so
+    /// the only order a template has is the one it was made in.
+    pub fn list_templates(&self) -> AppResult<Vec<TemplateSummary>> {
         let connection = self.lock()?;
-        connection.execute("DELETE FROM settings WHERE key = ?1", [key])?;
-        Ok(())
+        let mut statement = connection.prepare(
+            "SELECT id, name, kind, engine, entry, cover_width, cover_height,
+                    created_at, file_count, byte_size
+             FROM templates ORDER BY created_at DESC, id DESC",
+        )?;
+        let rows = statement.query_map([], map_template)?;
+        rows.collect::<Result<Vec<_>, rusqlite::Error>>()?
+            .into_iter()
+            .collect()
     }
 
-    // -- frontmatter presets ----------------------------------------------
-
-    /// By name, because a set with no order of its own should at least be
-    /// shown in the same order twice running.
-    pub fn list_presets(&self) -> AppResult<Vec<Preset>> {
+    pub fn template(&self, id: i64) -> AppResult<TemplateSummary> {
         let connection = self.lock()?;
-        let mut statement = connection
-            .prepare("SELECT id, name, body FROM presets ORDER BY name COLLATE NOCASE, id")?;
-        let rows = statement
-            .query_map([], |row| {
-                Ok(Preset {
-                    id: row.get(0)?,
-                    name: row.get(1)?,
-                    body: row.get(2)?,
-                })
-            })?
-            .collect::<Result<Vec<_>, _>>()?;
-        Ok(rows)
+        connection
+            .query_row(
+                "SELECT id, name, kind, engine, entry, cover_width, cover_height,
+                        created_at, file_count, byte_size
+                 FROM templates WHERE id = ?1",
+                [id],
+                map_template,
+            )
+            .optional()?
+            .ok_or_else(|| AppError::NotFound(format!("template {id} does not exist")))?
     }
 
-    pub fn preset(&self, id: i64) -> AppResult<Option<Preset>> {
+    /// The files a template holds, in the order they are written.
+    pub fn template_manifest(&self, id: i64) -> AppResult<Vec<crate::snapshot::StoredFile>> {
+        let connection = self.lock()?;
+        let mut statement = connection.prepare(
+            "SELECT path, object, byte_size FROM template_files
+             WHERE template_id = ?1 ORDER BY path",
+        )?;
+        let rows = statement.query_map([id], |row| {
+            Ok(crate::snapshot::StoredFile {
+                path: row.get(0)?,
+                object: row.get(1)?,
+                byte_size: row.get(2)?,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, rusqlite::Error>>()
+            .map_err(AppError::from)
+    }
+
+    /// Where a template's cover page is in the object store, if it has one.
+    pub fn template_cover(&self, id: i64) -> AppResult<Option<String>> {
         let connection = self.lock()?;
         let found = connection
             .query_row(
-                "SELECT id, name, body FROM presets WHERE id = ?1",
+                "SELECT cover_object FROM templates WHERE id = ?1",
                 [id],
-                |row| {
-                    Ok(Preset {
-                        id: row.get(0)?,
-                        name: row.get(1)?,
-                        body: row.get(2)?,
-                    })
-                },
+                |row| row.get::<_, Option<String>>(0),
             )
             .optional()?;
-        Ok(found)
+        Ok(found.flatten())
     }
 
-    /// Creates one, or replaces the body and name of the one identified.
-    pub fn save_preset(&self, id: Option<i64>, name: &str, body: &str) -> AppResult<Preset> {
-        let connection = self.lock()?;
-        let id = match id {
-            Some(id) => {
-                let changed = connection.execute(
-                    "UPDATE presets SET name = ?2, body = ?3 WHERE id = ?1",
-                    params![id, name, body],
-                )?;
-                if changed == 0 {
-                    return Err(AppError::NotFound(format!("no preset with id {id}")));
-                }
-                id
+    /// Stores a template. Names are not unique: two documents can reasonably be
+    /// saved under one name, and refusing the second would be Press deciding
+    /// which of them the reader meant.
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_template(
+        &self,
+        name: &str,
+        kind: DocumentKind,
+        engine: Engine,
+        entry: &str,
+        files: &[crate::snapshot::StoredFile],
+        cover: Option<(String, TemplateCover)>,
+    ) -> AppResult<TemplateSummary> {
+        let now = unix_timestamp();
+        let byte_size = files.iter().map(|file| file.byte_size).sum::<i64>();
+        let mut connection = self.lock()?;
+        let transaction = connection.transaction()?;
+        transaction.execute(
+            "INSERT INTO templates (
+                name, kind, engine, entry, cover_object, cover_width, cover_height,
+                created_at, file_count, byte_size
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            params![
+                name,
+                kind.as_token(),
+                engine.as_token(),
+                entry,
+                cover.as_ref().map(|(object, _)| object.as_str()),
+                cover.as_ref().map(|(_, page)| page.width),
+                cover.as_ref().map(|(_, page)| page.height),
+                now,
+                files.len() as i64,
+                byte_size,
+            ],
+        )?;
+        let id = transaction.last_insert_rowid();
+        {
+            let mut statement = transaction.prepare(
+                "INSERT INTO template_files (template_id, path, object, byte_size)
+                 VALUES (?1, ?2, ?3, ?4)",
+            )?;
+            for file in files {
+                statement.execute(params![id, file.path, file.object, file.byte_size])?;
             }
-            None => {
-                connection.execute(
-                    "INSERT INTO presets (name, body) VALUES (?1, ?2)",
-                    params![name, body],
-                )?;
-                connection.last_insert_rowid()
-            }
-        };
-        Ok(Preset {
+        }
+        transaction.commit()?;
+
+        Ok(TemplateSummary {
             id,
             name: name.to_owned(),
-            body: body.to_owned(),
+            kind,
+            engine,
+            entry: entry.to_owned(),
+            file_count: files.len() as i64,
+            byte_size,
+            created_at: now,
+            cover: cover.map(|(_, page)| page),
         })
     }
 
-    pub fn delete_preset(&self, id: i64) -> AppResult<()> {
-        let connection = self.lock()?;
-        connection.execute("DELETE FROM presets WHERE id = ?1", [id])?;
+    /// Removes a template. Its files stay in the object store until the next
+    /// sweep, which is where every other shared object is let go of too.
+    pub fn delete_template(&self, id: i64) -> AppResult<()> {
+        let mut connection = self.lock()?;
+        let transaction = connection.transaction()?;
+        transaction.execute("DELETE FROM template_files WHERE template_id = ?1", [id])?;
+        let removed = transaction.execute("DELETE FROM templates WHERE id = ?1", [id])?;
+        transaction.commit()?;
+        if removed == 0 {
+            return Err(AppError::NotFound(format!("template {id} does not exist")));
+        }
         Ok(())
     }
 
@@ -795,11 +853,18 @@ impl Repository {
         Ok(paths)
     }
 
-    /// Every content hash still referenced by some snapshot, for sweeping the
-    /// object store.
+    /// Every content hash still referenced, for sweeping the object store.
+    ///
+    /// Three sources, because three things keep files there: a snapshot's
+    /// manifest, a template's, and the page a template shows on its card. A
+    /// query that forgot one would sweep away what it holds.
     pub fn referenced_objects(&self) -> AppResult<Vec<String>> {
         let connection = self.lock()?;
-        let mut statement = connection.prepare("SELECT DISTINCT object FROM snapshot_files")?;
+        let mut statement = connection.prepare(
+            "SELECT object FROM snapshot_files
+             UNION SELECT object FROM template_files
+             UNION SELECT cover_object FROM templates WHERE cover_object IS NOT NULL",
+        )?;
         let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
         rows.collect::<Result<Vec<_>, rusqlite::Error>>()
             .map_err(AppError::from)
@@ -864,6 +929,34 @@ impl Repository {
             .lock()
             .map_err(|_| AppError::Task("database lock was poisoned".into()))
     }
+}
+
+fn map_template(row: &rusqlite::Row<'_>) -> rusqlite::Result<AppResult<TemplateSummary>> {
+    let kind = match row.get::<_, String>(2)?.as_str() {
+        "markdown" => DocumentKind::Markdown,
+        _ => DocumentKind::Latex,
+    };
+    let engine = match row.get::<_, String>(3)?.parse::<Engine>() {
+        Ok(engine) => engine,
+        Err(error) => return Ok(Err(error)),
+    };
+    // Both or neither: a width without a height is not a page, and a cover
+    // without a page to draw is a card that would ask for one and get nothing.
+    let cover = row
+        .get::<_, Option<f32>>(5)?
+        .zip(row.get::<_, Option<f32>>(6)?)
+        .map(|(width, height)| TemplateCover { width, height });
+    Ok(Ok(TemplateSummary {
+        id: row.get(0)?,
+        name: row.get(1)?,
+        kind,
+        engine,
+        entry: row.get(4)?,
+        created_at: row.get(7)?,
+        file_count: row.get(8)?,
+        byte_size: row.get(9)?,
+        cover,
+    }))
 }
 
 const SUMMARY_QUERY_BASE: &str = "
@@ -1137,14 +1230,40 @@ const SCHEMA: &str = "
         value TEXT NOT NULL
     );
 
-    -- YAML frontmatter Press hands pandoc for a markdown document that carries
-    -- none of its own. A table rather than more settings rows: these have a
-    -- name and a body and there are several of them, which is a record.
-    CREATE TABLE IF NOT EXISTS presets (
+    -- A document kept so another can begin as a copy of it. The files are in
+    -- the object store with the snapshots', because a template is a snapshot
+    -- that belongs to Press rather than to a project.
+    CREATE TABLE IF NOT EXISTS templates (
         id INTEGER PRIMARY KEY,
         name TEXT NOT NULL,
-        body TEXT NOT NULL
+        kind TEXT NOT NULL,
+        engine TEXT NOT NULL,
+        -- The document among the files. Everything else is named by it.
+        entry TEXT NOT NULL,
+        -- The PDF the document had compiled when this was saved, by content
+        -- hash, with the size of its first page. Null when it had never built.
+        cover_object TEXT,
+        cover_width REAL,
+        cover_height REAL,
+        created_at INTEGER NOT NULL,
+        file_count INTEGER NOT NULL,
+        byte_size INTEGER NOT NULL
     );
+
+    CREATE TABLE IF NOT EXISTS template_files (
+        template_id INTEGER NOT NULL REFERENCES templates(id) ON DELETE CASCADE,
+        path TEXT NOT NULL,
+        object TEXT NOT NULL,
+        byte_size INTEGER NOT NULL,
+        PRIMARY KEY (template_id, path)
+    );
+    CREATE INDEX IF NOT EXISTS template_files_object_idx ON template_files(object);
+
+    -- Frontmatter presets, which applied one block of YAML to every markdown
+    -- document Press compiled. Removed rather than versioned: dropping a table
+    -- nothing reads is compatible in the direction that matters, and bumping
+    -- the schema would set aside a library over a feature that is gone.
+    DROP TABLE IF EXISTS presets;
 
     CREATE TABLE IF NOT EXISTS build_states (
         project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
@@ -1334,6 +1453,67 @@ mod tests {
                 engine: Engine::PdfLatex,
             })
             .unwrap()
+    }
+
+    /// A template goes in and comes back out the same, and the object sweep can
+    /// see everything it holds. That last part is the one worth a test: the
+    /// files are in the store the snapshots use, and a `referenced_objects` that
+    /// only knew about snapshots would sweep a template's files away underneath
+    /// it at the next start.
+    #[test]
+    fn a_template_round_trips_and_holds_on_to_its_objects() {
+        let directory = tempfile::tempdir().unwrap();
+        let repository = Repository::open(&directory.path().join("press.db")).unwrap();
+        let files = vec![
+            crate::snapshot::StoredFile {
+                path: "paper.tex".into(),
+                object: "aa".repeat(32),
+                byte_size: 40,
+            },
+            crate::snapshot::StoredFile {
+                path: "refs.bib".into(),
+                object: "bb".repeat(32),
+                byte_size: 2,
+            },
+        ];
+        let cover = ("cc".repeat(32), TemplateCover { width: 396.0, height: 576.0 });
+
+        let saved = repository
+            .create_template(
+                "Pocket book",
+                DocumentKind::Latex,
+                Engine::XeLatex,
+                "paper.tex",
+                &files,
+                Some(cover.clone()),
+            )
+            .unwrap();
+        assert_eq!(saved.file_count, 2);
+        assert_eq!(saved.byte_size, 42);
+        assert_eq!(saved.cover, Some(cover.1));
+
+        let listed = repository.list_templates().unwrap();
+        assert_eq!(listed, vec![saved.clone()]);
+        // The engine came from the project it was saved from and has to survive
+        // the trip, or a template of a xelatex paper builds under pdflatex.
+        assert_eq!(listed[0].engine, Engine::XeLatex);
+        assert_eq!(repository.template_manifest(saved.id).unwrap(), files);
+        assert_eq!(repository.template_cover(saved.id).unwrap(), Some(cover.0.clone()));
+
+        let referenced = repository
+            .referenced_objects()
+            .unwrap()
+            .into_iter()
+            .collect::<HashSet<_>>();
+        for object in [&files[0].object, &files[1].object, &cover.0] {
+            assert!(referenced.contains(object), "{object} must survive a sweep");
+        }
+
+        repository.delete_template(saved.id).unwrap();
+        assert!(repository.list_templates().unwrap().is_empty());
+        assert!(repository.template_manifest(saved.id).unwrap().is_empty());
+        // And now nothing holds them, so the sweep is free to let them go.
+        assert!(repository.referenced_objects().unwrap().is_empty());
     }
 
     #[test]

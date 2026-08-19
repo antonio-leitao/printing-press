@@ -419,41 +419,54 @@ pub struct EditorCommand {
     pub suggested: String,
 }
 
-/// A block of YAML frontmatter kept under a name, to be handed to pandoc for
-/// markdown documents that carry none of their own.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+/// One file in a project's directory, as the tree shows it.
+///
+/// Project-relative with forward slashes, which is how a manifest names a file
+/// and therefore how the tree can hand a selection straight back.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct Preset {
-    pub id: i64,
-    pub name: String,
-    /// The frontmatter itself, without the `---` fences: this is handed to
-    /// pandoc as a metadata file, and a metadata file is bare YAML.
-    pub body: String,
+pub struct ProjectFile {
+    pub path: String,
+    pub byte_size: i64,
 }
 
-/// A compiled example of what a preset does.
+/// The page drawn on a template's card.
 ///
-/// The digest addresses the drawn page over the `press:` scheme; the size is
-/// what the interface needs to ask for it at the right scale, and is itself
-/// part of what the preview shows — a preset that changes the paper changes
-/// this.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+/// It is the PDF the document had already compiled when the template was saved,
+/// kept in the object store beside the template's own files. Nothing is
+/// compiled to produce it, and nothing needs to be: what a template looks like
+/// is what the document it came from looked like.
+///
+/// The size is the first page in points, stored rather than measured on demand,
+/// so a gallery of cards asks for its pages at the right scale without a round
+/// trip each.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct PresetPreview {
-    pub digest: String,
+pub struct TemplateCover {
     pub width: f32,
     pub height: f32,
 }
 
-/// The presets and which one is chosen, answered together because the
-/// interface never wants one without the other.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+/// A template as the gallery shows it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct PresetList {
-    pub presets: Vec<Preset>,
-    /// `None` is "no default frontmatter", which is a choice rather than an
-    /// absence of one.
-    pub selected: Option<i64>,
+pub struct TemplateSummary {
+    pub id: i64,
+    pub name: String,
+    pub kind: DocumentKind,
+    /// Carried from the project it was saved from, so a template made from a
+    /// xelatex paper produces a xelatex project rather than a failed build.
+    pub engine: Engine,
+    /// The document's file name inside the template. Everything else the
+    /// template holds is named by the document, so only this one is renamed
+    /// when a new one is made.
+    pub entry: String,
+    pub file_count: i64,
+    pub byte_size: i64,
+    pub created_at: i64,
+    /// Absent when the document had never compiled. The card shows its name and
+    /// no page, which is honest: Press has never seen what this one looks like.
+    pub cover: Option<TemplateCover>,
 }
 
 /// One document a path resolved to.

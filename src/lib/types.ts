@@ -234,35 +234,52 @@ export type IconChoice = 'green' | 'ink' | 'sheet';
 export const ICON_CHOICES: readonly IconChoice[] = ['green', 'ink', 'sheet'];
 
 /**
- * YAML frontmatter kept under a name, handed to pandoc for markdown documents
- * that carry none of their own.
+ * Which files of a project a template keeps, as the dialog puts the question.
  *
- * `body` is bare YAML without the `---` fences — pandoc reads it as a metadata
- * file, and a metadata file has none.
+ * `document` is the entry file alone. `project` opens the tree, where the
+ * choice stops being one of two answers and becomes a set of paths — so this
+ * is interface state, and never crosses to the backend, which is told the
+ * paths themselves.
  */
-export type Preset = {
-  id: number;
-  name: string;
-  body: string;
+export type TemplateScope = 'document' | 'project';
+
+/**
+ * One file in a project's directory, as the tree shows it.
+ *
+ * Project-relative with forward slashes, which is how a manifest names a file
+ * and therefore how a selection is handed straight back.
+ */
+export type ProjectFile = {
+  path: string;
+  byteSize: number;
 };
 
 /**
- * A compiled example of what a preset does.
+ * The page drawn on a template's card, in points.
  *
- * `width` and `height` are the first page in points. They are needed to ask for
- * the page at a scale that fits, and are themselves part of what the preview
- * shows: a preset that changes the paper changes these.
+ * It is the first page of the PDF the document had already compiled when the
+ * template was saved. Stored rather than measured, so a gallery of cards asks
+ * for its pages at the right scale without a round trip each.
  */
-export type PresetPreview = {
-  digest: string;
+export type TemplateCover = {
   width: number;
   height: number;
 };
 
-/** The presets and the chosen one; `null` is the deliberate choice of none. */
-export type PresetList = {
-  presets: Preset[];
-  selected: number | null;
+/** A document kept so another can begin as a copy of it. */
+export type TemplateSummary = {
+  id: number;
+  name: string;
+  kind: DocumentKind;
+  /** Carried from the project it was saved from. */
+  engine: Engine;
+  /** The document's file name inside the template; the only one that is renamed. */
+  entry: string;
+  fileCount: number;
+  byteSize: number;
+  createdAt: number;
+  /** Absent when the document had never compiled. */
+  cover: TemplateCover | null;
 };
 
 /** Parsed from latexmk's own output, not from a timer. */
