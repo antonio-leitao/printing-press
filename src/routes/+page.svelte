@@ -5,7 +5,6 @@
     Check,
     Download,
     FilePlus,
-    Files,
     Folder,
     FolderOpen,
     Minus,
@@ -17,7 +16,8 @@
     Settings,
     Stamp,
     Sun,
-    Trash2
+    Trash2,
+    ZoomIn
   } from '@lucide/svelte';
   import { listen } from '@tauri-apps/api/event';
   import { getCurrentWebview } from '@tauri-apps/api/webview';
@@ -25,6 +25,7 @@
   import PdfThumbnail from '$lib/PdfThumbnail.svelte';
   import TemplateCover from '$lib/TemplateCover.svelte';
   import PdfViewer, { type PeekRequest } from '$lib/PdfViewer.svelte';
+  import { PageVisibilityTracker } from '$lib/pdf-visibility';
   import { api, errorMessage } from '$lib/api';
   import { fail, notify } from '$lib/messages.svelte';
   import { modal } from '$lib/modal';
@@ -42,6 +43,7 @@
     type EditorCommand,
     type IconChoice,
     type LooseDocument,
+    type PageSize,
     type ProjectSummary,
     type ProjectFile,
     type SourcePeek,
@@ -58,11 +60,46 @@
     { value: 'system', label: 'System', icon: Monitor }
   ];
 
-  /** The box a template's page is fitted into. The shelf's card, because
-      choosing a template is the same act as choosing off the shelf: you are
-      looking at a page and deciding whether it is the one. */
+  /** The cell a template's page stands in. The shelf's card, because choosing a
+      template is the same act as choosing off the shelf: you are looking at a
+      page and deciding whether it is the one. */
   const TEMPLATE_PAGE_WIDTH = 150;
   const TEMPLATE_PAGE_HEIGHT = 194;
+
+  /** What a closer look leaves around the pages, and the room the name under
+      the last of them takes. The rest of the window is the page: the whole
+      point of opening one is that the card was too small to read.
+
+      `.look-column`'s padding is this number — a page is sized to leave the
+      margin, and the column has to actually leave it. */
+  const LOOK_MARGIN = 56;
+  const LOOK_CAPTION = 40;
+
+  /** One scale for every page of a template, the largest at which none of them
+      overflows the window.
+
+      One rather than a fit per page, because these are the pages of a document
+      and a document is read at one size — the reader does the same. Taking the
+      smallest fit is what keeps a landscape page in an upright document from
+      running off the sides. */
+  function lookScale(pages: PageSize[], box: number, tall: number) {
+    return pages.reduce(
+      (smallest, page) => Math.min(smallest, box / page.width, tall / page.height),
+      Number.POSITIVE_INFINITY
+    );
+  }
+
+  /** A page's size once fitted into a cell.
+
+      The card draws its cover into a fixed cell and has to know where the
+      paper's edges landed: the ring goes round them, and the magnifier sits on
+      a corner. Fitted rather than stretched — a template changes the paper, and
+      a beamer slide is not the shape of a pocket book. A closer look fits a
+      whole document rather than one page, which is `lookScale`. */
+  function fitPage(cover: { width: number; height: number }, box: number, tall: number) {
+    const scale = Math.min(box / cover.width, tall / cover.height);
+    return { width: cover.width * scale, height: cover.height * scale };
+  }
 
   /** Matches the `.pinned-card` track width below, so nothing larger is drawn. */
   const PINNED_THUMB_WIDTH = 150
@@ -126,6 +163,23 @@
   let creating = $state(false);
   let templates = $state<TemplateSummary[]>([]);
   let templatePick = $state<number | null>(null);
+  /// Whether the chosen template's pages are being looked at closely. The
+  /// gallery stays open underneath: this is a closer look at the thing being
+  /// chosen, not a place of its own, and it is dismissed the way it was asked
+  /// for.
+  let looking = $state(false);
+  /// The pages of the template being looked at. Starts as the one page the card
+  /// already knew about, so the look opens on a page rather than on nothing,
+  /// and grows into the whole document when the layout arrives.
+  let lookPages = $state<PageSize[]>([]);
+  /// Shared observers for that column, so a template of two hundred pages draws
+  /// the two on screen rather than all of them. Made when the look opens and
+  /// disconnected when it closes: it belongs to one column, not to the page.
+  let lookTracker = $state<PageVisibilityTracker | null>(null);
+  /// The window, so a closer look can be as large as the window allows and
+  /// stay that way when the window changes.
+  let windowWidth = $state(1280);
+  let windowHeight = $state(800);
   let newName = $state('');
   /// Remembered between documents. Nobody keeps their papers somewhere new each
   /// time, and the folder is the one part of this that is usually the same.
@@ -1060,6 +1114,7 @@
     try {
       templates = await api.listTemplates();
       templatePick = null;
+      closeLook();
       newName = '';
       creating = true;
     } catch (reason) {
@@ -1072,6 +1127,57 @@
   function closeGallery() {
     creating = false;
     templatePick = null;
+    closeLook();
+  }
+
+  /// Space on a card is the closer look — Quick Look's key, for the same act.
+  /// On the card rather than on the dialog, because everywhere else in here
+  /// Space is what it always is: the name field takes a space, and Create takes
+  /// a press.
+  function cardKeys(event: KeyboardEvent, template: TemplateSummary) {
+    if (event.key !== ' ' && event.code !== 'Space') return;
+    if (!template.cover) return;
+    // Or the card would be pressed as well, this being a button.
+    event.preventDefault();
+    look(template);
+  }
+
+  /// The chosen template, opened large. Choosing it is part of asking: what is
+  /// being looked at closely is what Create would make, and there is no second
+  /// kind of chosen.
+  function look(template: TemplateSummary) {
+    if (!template.cover) return;
+    templatePick = template.id;
+    lookPages = [template.cover];
+    lookTracker?.disconnect();
+    lookTracker = new PageVisibilityTracker(null);
+    looking = true;
+    void loadLookPages(template);
+  }
+
+  function closeLook() {
+    looking = false;
+    lookPages = [];
+    lookTracker?.disconnect();
+    lookTracker = null;
+  }
+
+  /// The rest of the document behind the cover.
+  ///
+  /// Asked for once a look is open rather than with the gallery: it is a read
+  /// of a PDF per template, and a shelf of them would pay for every template to
+  /// answer a question about one.
+  async function loadLookPages(template: TemplateSummary) {
+    try {
+      const pages = await api.templateLayout(template.id);
+      // Only if this is still what is being looked at — the layout is a round
+      // trip, and a second one can have been opened in the meantime.
+      if (looking && templatePick === template.id && pages.length > 0) lookPages = pages;
+    } catch {
+      // The cover is already up and is what the card showed. A template whose
+      // kept PDF cannot be read past its first page is not worth interrupting
+      // the choice for.
+    }
   }
 
   async function chooseFolder() {
@@ -1100,6 +1206,7 @@
       const project = await api.createFromTemplate(picked.id, newFolder, newName.trim());
       creating = false;
       templatePick = null;
+      closeLook();
       projects = [project, ...projects.filter((item) => item.id !== project.id)];
       await openProject(project);
       // Not worth failing the creation over: the document exists and is open,
@@ -1134,7 +1241,10 @@
     try {
       await api.deleteTemplate(template.id);
       templates = templates.filter((one) => one.id !== template.id);
-      if (templatePick === template.id) templatePick = null;
+      if (templatePick === template.id) {
+        templatePick = null;
+        closeLook();
+      }
     } catch (reason) {
       fail(reason);
     }
@@ -1529,6 +1639,8 @@
     if (viewerError) notify(viewerError, 'error');
   });
 </script>
+
+<svelte:window bind:innerWidth={windowWidth} bind:innerHeight={windowHeight} />
 
 {#if reading}
   <main class="reader">
@@ -2090,6 +2202,14 @@
               <h3>{group.title}</h3>
               <div class="template-grid">
                 {#each group.items as template (template.id)}
+                  <!-- Where the page's edges land inside the cell. The card is
+                       drawn against the paper rather than against the cell: the
+                       ring, the magnifier and the name all belong to the page,
+                       and a landscape template's page is not the cell. -->
+                  {@const paper =
+                    template.cover
+                      ? fitPage(template.cover, TEMPLATE_PAGE_WIDTH, TEMPLATE_PAGE_HEIGHT)
+                      : null}
                   <article class="template-card" class:chosen={templatePick === template.id}>
                     <!-- Right-click to remove, the same place every other card
                          in Press keeps what can be done to it. -->
@@ -2097,16 +2217,17 @@
                       class="template-open"
                       onclick={() => (templatePick = template.id)}
                       ondblclick={() => void createDocument()}
+                      onkeydown={(event) => cardKeys(event, template)}
                       oncontextmenu={(event) => openMenu(event, templateMenu(template))}
                       aria-pressed={templatePick === template.id}
                     >
                       <span class="template-page">
-                        {#if template.cover}
+                        {#if template.cover && paper}
                           <TemplateCover
                             id={template.id}
                             cover={template.cover}
-                            width={TEMPLATE_PAGE_WIDTH}
-                            height={TEMPLATE_PAGE_HEIGHT}
+                            width={paper.width}
+                            height={paper.height}
                             invert={dark}
                           />
                         {:else}
@@ -2122,13 +2243,33 @@
                           <!-- This one brings a folder rather than a file, which
                                changes what appears on disk and is worth knowing
                                before rather than after. -->
-                          <span class="where">
-                            <Files size={12} strokeWidth={1.75} aria-hidden="true" />
-                            {template.fileCount} files
-                          </span>
+                          <span class="template-files">{template.fileCount} files</span>
                         {/if}
                       </span>
                     </button>
+
+                    {#if paper}
+                      <!-- Beside the card's button rather than inside it, which
+                           is the whole reason the two are separate elements: a
+                           button cannot hold another one. Placed by hand on the
+                           page's own top corner, since where that corner is
+                           depends on the paper.
+
+                           Out of the tab order on purpose. The keyboard has
+                           Space for this, and one card is one choice — a second
+                           stop on every template to reach a shortcut is a worse
+                           bargain than the shortcut. -->
+                      <button
+                        class="template-look"
+                        style="top: {TEMPLATE_PAGE_HEIGHT - paper.height + 6}px; right: {(TEMPLATE_PAGE_WIDTH - paper.width) / 2 + 6}px"
+                        tabindex="-1"
+                        onclick={() => look(template)}
+                        title="Look closer"
+                        aria-label="Look closer at {template.name}"
+                      >
+                        <ZoomIn size={13} strokeWidth={2} aria-hidden="true" />
+                      </button>
+                    {/if}
                   </article>
                 {/each}
               </div>
@@ -2180,6 +2321,57 @@
         {busy ? 'Creating…' : 'Create'}
       </button>
     </div>
+  </dialog>
+{/if}
+
+{#if creating && looking && picked && lookPages.length > 0}
+  <!-- A closer look at the chosen template: its pages, at the size the window
+       allows, in a column that scrolls — the same document the reader would
+       show, read the same way.
+
+       Its own modal dialog rather than a layer inside the gallery, and for one
+       reason: only the top layer can cover a dialog, and what is wanted here is
+       a page larger than the dialog the choice is being made in. The gallery
+       stays open and untouched underneath, so this adds a step to the act
+       rather than a place to be — Escape, Space or a click puts it back.
+
+       A sibling of the gallery in the markup and not a child of it, so that the
+       Escape closing this one never reaches the one behind. -->
+  {@const zoom = lookScale(
+    lookPages,
+    windowWidth - LOOK_MARGIN * 2,
+    windowHeight - LOOK_MARGIN * 2 - LOOK_CAPTION
+  )}
+  <dialog class="look" use:modal={closeLook} aria-label={picked.name}>
+    <!-- The window is the button: anywhere off the pages dismisses, and so do
+         the pages, because there is nothing else to do here. One control, so
+         Enter and Space land on it without being asked to — and Space is what
+         closes a Quick Look, not what pages it. The column inside is a span
+         rather than a div because a button may only hold phrasing content;
+         scrolling it works the same. -->
+    <button class="look-away" onclick={closeLook} aria-label="Close">
+      <span class="look-scroll">
+        <span class="look-column">
+          {#each lookPages as size, index (index)}
+            <TemplateCover
+              id={picked.id}
+              page={index}
+              cover={size}
+              width={size.width * zoom}
+              height={size.height * zoom}
+              invert={dark}
+              tracker={lookTracker}
+            />
+          {/each}
+          <!-- After the last page, the way a colophon is. Which template this
+               is, and how much of it there was — the count is only worth saying
+               once there is more than the one page everybody sees. -->
+          <span class="look-name">
+            {picked.name}{lookPages.length > 1 ? ` · ${lookPages.length} pages` : ''}
+          </span>
+        </span>
+      </span>
+    </button>
   </dialog>
 {/if}
 
@@ -2856,6 +3048,21 @@
     box-shadow: var(--shadow-sm);
   }
 
+  /* The keyboard's ring goes round the page, not round the page and its name
+     together — the card is the picture, and the name under it is a caption. The
+     same rule the gallery's own cards follow. */
+  .pinned-open:focus-visible,
+  .project-open:focus-visible {
+    outline: none;
+  }
+
+  .pinned-open:focus-visible .pinned-thumb,
+  .project-open:focus-visible .project-thumb {
+    box-shadow:
+      0 0 0 2px var(--accent-strong),
+      var(--shadow-sm);
+  }
+
   /* A thumbnail is a page, so it takes the same sheet the viewer would give it
      — the drawn one, once the drawing is inverted. Without this the paper the
      renderer produces would sit on a white card for as long as it took to
@@ -3035,14 +3242,19 @@
   }
 
   /* Room for the ring, which is drawn outside the page so that it never covers
-     a millimetre of what is being chosen. */
+     a millimetre of what is being chosen. Positioned because the magnifier is
+     placed against it — see .template-look. */
   .template-card {
+    position: relative;
     border: 0;
     border-radius: 0;
     overflow: visible;
     width: var(--shelf-thumb-w);
   }
 
+  /* Centred, because the page above is: a template's paper is whatever shape it
+     was saved at, and a name set flush to the left of the box would hang off
+     the edge of a page narrower than the box every time. */
   .template-open {
     display: flex;
     flex-direction: column;
@@ -3051,32 +3263,87 @@
     padding: 0;
     border: 0;
     background: none;
-    text-align: left;
+    text-align: center;
     cursor: pointer;
   }
 
   .template-page {
     display: grid;
-    place-items: center;
+    place-items: end center;
     width: var(--shelf-thumb-w);
     height: var(--shelf-thumb-h);
-    border-radius: var(--radius-sm);
-    transition: box-shadow var(--duration);
   }
 
-  /* The chosen one wears a ring around its page, held off the paper by a hair
-     so the page keeps its own edge. Nothing is written on the card to say it is
-     chosen: there is one ring on the screen and it is unmistakable. */
+  /* The ring, in the three states that wear one. It is not drawn here: it is
+     handed down as --cover-ring and lands on the page inside — see
+     TemplateCover — so that a landscape template is ringed at its own edges and
+     not at the box's. The order is the precedence, all three being equally
+     specific: the pointer, then the keyboard, then the choice, which outranks
+     both because it is the only one that persists.
+
+     Nothing is written on the card to say it is chosen: there is one accent
+     ring on the screen and it is unmistakable. */
+  .template-card:hover .template-page {
+    --cover-ring: 0 0 0 2px var(--line-3);
+  }
+
+  .template-open:focus-visible .template-page {
+    --cover-ring: 0 0 0 2px var(--accent-line);
+  }
+
   .template-card.chosen .template-page {
-    box-shadow: 0 0 0 2px var(--accent);
+    --cover-ring: 0 0 0 2px var(--accent-strong);
   }
 
-  .template-open:hover .template-page {
-    box-shadow: 0 0 0 2px var(--line-3);
+  /* The card is the page, so the focus ring is the page's; a box drawn round
+     the caption as well would be a rectangle nothing on the card matches. */
+  .template-open:focus-visible {
+    outline: none;
   }
 
-  .template-card.chosen .template-open:hover .template-page {
-    box-shadow: 0 0 0 2px var(--accent);
+  /* The closer look, resting on the page's top corner — the corner of a page
+     with least on it — and only while the pointer is on the card. A card is
+     read by its picture, and a control parked on every one of them all the time
+     is nine small buttons on a shelf that is meant to be nine pages.
+
+     Its own square of the interface rather than a shape cut into the paper:
+     what is underneath is the thing being judged, and it should look like
+     something set down on the page rather than something missing from it. */
+  .template-look {
+    position: absolute;
+    z-index: 1;
+    display: grid;
+    place-items: center;
+    width: 1.375rem;
+    height: 1.375rem;
+    padding: 0;
+    border: var(--bw) solid var(--line-2);
+    border-radius: var(--radius-sm);
+    background: var(--card);
+    color: var(--ink-2);
+    box-shadow: var(--shadow-md);
+    opacity: 0;
+    cursor: zoom-in;
+    transition:
+      opacity var(--duration),
+      color var(--duration),
+      border-color var(--duration);
+  }
+
+  .template-card:hover .template-look {
+    opacity: 1;
+  }
+
+  .template-look:hover {
+    border-color: var(--line-3);
+    color: var(--ink);
+  }
+
+  /* Nothing hovers on a touch screen, so nothing would ever reveal it. */
+  @media (hover: none) {
+    .template-look {
+      opacity: 1;
+    }
   }
 
   /* Never compiled when it was kept. Set in the page's own shape so the shelf
@@ -3088,15 +3355,32 @@
     width: 100%;
     height: 100%;
     border: var(--bw) dashed var(--line-2);
-    border-radius: var(--radius-sm);
+    border-radius: var(--radius);
+    box-shadow: var(--cover-ring, 0 0 #0000);
     color: var(--ink-3);
     font-size: var(--fs-meta);
+    transition: box-shadow var(--duration);
   }
 
+  /* The caption, centred under the paper, which is how every page-shaped card
+     in Press is captioned — see .pinned-name. Centred on the cell and the page
+     both, the two having the same middle: the page is centred in the cell above
+     it. */
   .template-lines {
     display: grid;
+    justify-items: center;
     gap: var(--space-xs);
     min-width: 0;
+  }
+
+  /* The quiet tier, in the interface's own face. The library's .where is
+     monospace because it is a path and is read character by character; this is
+     a count, and setting it in the same face made a caption look like a
+     fragment of source. */
+  .template-files {
+    color: var(--ink-3);
+    font-size: var(--fs-meta);
+    line-height: 1.2;
   }
 
   /* Wide enough for three pages across, which is as many as can be compared
@@ -3117,6 +3401,81 @@
 
   .gallery-group + .gallery-group {
     margin-top: var(--space-xl);
+  }
+
+  /* The closer look is the window: no card, no border, no shadow of its own.
+     Everything a dialog is drawn with would be a frame around a page, and a
+     page has an edge already — the only thing wanted here is the paper, as
+     large as the window will hold it, on a room turned down. */
+  dialog.look {
+    width: 100vw;
+    height: 100vh;
+    max-width: none;
+    max-height: none;
+    padding: 0;
+    overflow: hidden;
+    border: 0;
+    border-radius: 0;
+    background: transparent;
+    box-shadow: none;
+  }
+
+  /* Deeper than a dialog's, because what is behind this one is a dialog: a
+     white page laid over a card of near-white keeps no edge, however good the
+     shadow under it. */
+  dialog.look::backdrop {
+    background: var(--backdrop-deep);
+  }
+
+  .look-away {
+    display: block;
+    width: 100%;
+    height: 100%;
+    padding: 0;
+    border: 0;
+    background: none;
+    cursor: zoom-out;
+  }
+
+  .look-away:focus-visible {
+    outline: none;
+  }
+
+  .look-scroll {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    overflow-y: auto;
+    /* The gallery is behind this and does not scroll with it. */
+    overscroll-behavior: contain;
+  }
+
+  /* `margin: auto` and not `justify-content`, which is the difference between a
+     single page sitting in the middle of the window and a long template having
+     its first page cut off above the top of the scroller. An auto margin gives
+     up when there is no room to give; centring does not.
+
+     The gutter between pages is the reader's own — see PdfPage — because this
+     is the same column of paper. The corners are square for the same reason.
+
+     The padding is LOOK_MARGIN, which is what the pages were sized to leave. */
+  .look-column {
+    --cover-radius: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: var(--space-lg);
+    margin: auto;
+    padding-block: 3.5rem;
+  }
+
+  /* After the last page: which template this was, and how long. The gallery
+     behind is covered, so the name has to be here; everything else about it was
+     on the card. */
+  .look-name {
+    color: var(--ink);
+    font-size: var(--fs-card);
+    font-weight: 600;
   }
 
   /* The same eyebrow the settings sections wear. Two of them here, and they are
@@ -3772,7 +4131,7 @@
   dialog select:focus,
   dialog textarea:focus {
     outline: none;
-    border-color: var(--accent);
+    border-color: var(--accent-strong);
     background: var(--card);
     box-shadow: 0 0 0 3px var(--accent-wash);
   }

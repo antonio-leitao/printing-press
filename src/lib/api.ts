@@ -129,6 +129,15 @@ export const api = {
   listTemplates: () => invoke<TemplateSummary[]>('list_templates'),
 
   /**
+   * Every page's size in the PDF a template kept.
+   *
+   * Only a closer look asks: a card draws one page, and the size of that page
+   * came with the template so that a shelf of cards costs no round trips.
+   */
+  templateLayout: (templateId: number) =>
+    invoke<PageSize[]>('template_layout', { templateId }),
+
+  /**
    * Every file this project would compile with, for the tree to show.
    *
    * The same walk a snapshot makes, so what can be ticked is exactly what a

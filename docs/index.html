@@ -1,0 +1,901 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Press | LaTeX and Markdown viewer for macOS</title>
+    <meta
+      name="description"
+      content="Press compiles and displays LaTeX and Markdown source files on macOS. It watches for changes and stores titled snapshots outside your project folder."
+    />
+    <link rel="icon" href="favicon-green.png" type="image/png" />
+
+    <meta property="og:type" content="website" />
+    <meta property="og:title" content="Press" />
+    <meta
+      property="og:description"
+      content="Open a LaTeX or Markdown source file. Press compiles and displays it."
+    />
+    <meta property="og:url" content="https://antonio-leitao.github.io/printing-press/" />
+    <meta property="og:image" content="https://antonio-leitao.github.io/printing-press/final_final.pdf.webp" />
+    <meta name="twitter:card" content="summary_large_image" />
+
+    <style>
+      @font-face {
+        font-family: "Public Sans";
+        font-style: normal;
+        font-weight: 400;
+        font-display: swap;
+        src: url("fonts/public-sans-latin-400-normal.woff2") format("woff2");
+      }
+      @font-face {
+        font-family: "Public Sans";
+        font-style: normal;
+        font-weight: 500;
+        font-display: swap;
+        src: url("fonts/public-sans-latin-500-normal.woff2") format("woff2");
+      }
+      @font-face {
+        font-family: "Public Sans";
+        font-style: normal;
+        font-weight: 600;
+        font-display: swap;
+        src: url("fonts/public-sans-latin-600-normal.woff2") format("woff2");
+      }
+      @font-face {
+        font-family: "Public Sans";
+        font-style: normal;
+        font-weight: 700;
+        font-display: swap;
+        src: url("fonts/public-sans-latin-700-normal.woff2") format("woff2");
+      }
+
+      :root {
+        --desk: #efeee9;
+        --paper: #f8f8f6;
+        --paper-2: #f1f1ee;
+        --paper-3: #e8e8e4;
+        --card: #ffffff;
+        --card-2: #f7f7f5;
+
+        --ink: #20201e;
+        --ink-2: #4b4a47;
+        --ink-3: #797873;
+
+        --line: #ebeae6;
+        --line-2: #d5d3cd;
+        --line-3: #b3b1a9;
+
+        --accent: #137e63;
+        --accent-strong: #1e6e57;
+        --accent-tint: #e7eee9;
+        --accent-line: #9bc0b1;
+
+        --brick: #a04a42;
+        --brick-strong: #88433c;
+        --brick-tint: #f2eae7;
+        --brick-line: #ddbcb6;
+
+        --radius: 5px;
+        --radius-sm: 3px;
+
+        --shadow-sm: 0 0.4px 2px rgb(0 0 0 / 25%);
+        --shadow-lg: 0 1px 2px rgb(28 28 26 / 10%), 0 8px 20px -6px rgb(28 28 26 / 17%);
+
+        --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+      }
+
+      *,
+      *::before,
+      *::after {
+        box-sizing: border-box;
+      }
+
+      html {
+        background: var(--desk);
+      }
+
+      body {
+        margin: 0;
+        background: var(--paper);
+        color: var(--ink);
+        font-family: "Public Sans", system-ui, -apple-system, sans-serif;
+        font-size: 15px;
+        line-height: 1.6;
+        -webkit-font-smoothing: antialiased;
+      }
+
+      .wrap {
+        max-width: 680px;
+        margin: 0 auto;
+        padding: 0 28px;
+      }
+
+      a {
+        color: var(--accent-strong);
+        text-decoration: none;
+      }
+      a:hover {
+        color: var(--accent);
+        text-decoration: underline;
+        text-underline-offset: 2px;
+      }
+
+      :focus-visible {
+        outline: 1.5px solid var(--accent-strong);
+        outline-offset: 2px;
+        border-radius: 2px;
+      }
+
+      code,
+      pre {
+        font-family: var(--mono);
+      }
+      p code {
+        font-size: 0.88em;
+      }
+
+      .band {
+        background: var(--desk);
+        border-top: 1px solid var(--paper-3);
+        border-bottom: 1px solid var(--paper-3);
+      }
+      .band--last {
+        border-bottom: 0;
+      }
+
+      .eyebrow {
+        margin: 0 0 14px;
+        font-size: 10.5px;
+        font-weight: 500;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        color: var(--ink-3);
+      }
+      .eyebrow--answer {
+        color: var(--accent-strong);
+      }
+      .hero {
+        padding: 72px 0 64px;
+      }
+      .hero .mark {
+        display: block;
+        height: 84px;
+        width: auto;
+        margin-bottom: 26px;
+        fill: var(--ink);
+      }
+      .hero h1 {
+        margin: 0 0 14px;
+        font-size: 54px;
+        font-weight: 700;
+        letter-spacing: -0.028em;
+        line-height: 1;
+      }
+      .tagline {
+        margin: 0 0 30px;
+        max-width: 440px;
+        font-size: 17.5px;
+        line-height: 1.55;
+        color: var(--ink-2);
+        text-wrap: pretty;
+      }
+      .btn {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        padding: 10px 18px;
+        border-radius: var(--radius);
+        background: var(--accent);
+        color: #fff;
+        font-size: 14.5px;
+        font-weight: 600;
+        box-shadow: var(--shadow-sm);
+      }
+      .btn:hover {
+        background: var(--accent-strong);
+        color: #fff;
+        text-decoration: none;
+      }
+      .meta {
+        margin: 20px 0 0;
+        font-size: 12.5px;
+        color: var(--ink-3);
+      }
+
+      .problem {
+        padding: 40px 0;
+      }
+
+      .chaos {
+        margin: 0;
+      }
+      .chaos img {
+        display: block;
+        width: min(100%, 360px);
+        height: auto;
+        margin: 0 auto;
+        border-radius: var(--radius);
+        box-shadow: var(--shadow-sm);
+      }
+
+      .answer {
+        padding: 64px 0 0;
+      }
+      .answer--two {
+        padding: 56px 0 64px;
+      }
+      .answer h2 {
+        margin: 0 0 12px;
+        font-size: 24px;
+        font-weight: 600;
+        letter-spacing: -0.02em;
+        line-height: 1.2;
+      }
+      .answer .intro {
+        margin: 0 0 30px;
+        font-size: 15px;
+        line-height: 1.65;
+        color: var(--ink-2);
+        text-wrap: pretty;
+      }
+
+      .rule {
+        height: 1px;
+        background: var(--line);
+        border: 0;
+        margin: 34px 0;
+      }
+      .rule--section {
+        margin: 0 0 56px;
+      }
+
+      .feature {
+        margin-top: 44px;
+      }
+      .feature h3 {
+        margin: 0 0 8px;
+        font-size: 17.5px;
+        font-weight: 600;
+        letter-spacing: -0.01em;
+      }
+      .feature p {
+        margin: 0 0 30px;
+        font-size: 14.5px;
+        line-height: 1.65;
+        color: var(--ink-2);
+        text-wrap: pretty;
+      }
+      .feature p:last-child {
+        margin-bottom: 0;
+      }
+
+      .flow {
+        display: flex;
+        align-items: center;
+        gap: 9px;
+        flex-wrap: wrap;
+      }
+      .arw {
+        flex: none;
+        color: var(--line-3);
+      }
+
+      .node {
+        padding: 11px 15px;
+        border: 1px solid var(--line-2);
+        border-radius: var(--radius);
+        background: var(--card);
+        box-shadow: var(--shadow-sm);
+        font-size: 13px;
+        white-space: nowrap;
+      }
+      .node--tool {
+        background: var(--paper-2);
+        border-style: dashed;
+        border-color: var(--line-3);
+        box-shadow: none;
+        font-family: var(--mono);
+        font-size: 12.5px;
+        color: var(--ink-2);
+      }
+      .node--file {
+        display: flex;
+        align-items: center;
+        gap: 7px;
+        padding: 11px 13px;
+        border-color: var(--brick-line);
+        background: var(--brick-tint);
+        box-shadow: none;
+        font-family: var(--mono);
+        font-size: 12.5px;
+        color: var(--brick-strong);
+      }
+      .node--file svg {
+        flex: none;
+        color: var(--brick);
+      }
+      .node--press {
+        display: flex;
+        flex-direction: column;
+        gap: 10px;
+        padding: 11px 15px 13px;
+        border-color: var(--accent-line);
+        white-space: normal;
+      }
+
+      .press-head {
+        display: flex;
+        align-items: center;
+        gap: 7px;
+        font-size: 13px;
+        font-weight: 600;
+      }
+      .press-head svg {
+        height: 15px;
+        width: auto;
+        fill: var(--accent);
+      }
+
+      .cycle {
+        width: 198px;
+      }
+      .cycle-row {
+        display: flex;
+        align-items: center;
+      }
+      .pill {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        height: 26px;
+        border-radius: var(--radius-sm);
+        background: var(--paper-2);
+        font-size: 11.5px;
+        color: var(--ink-2);
+      }
+      .pill--own {
+        background: var(--accent-tint);
+        color: var(--accent-strong);
+      }
+      .cycle-gap {
+        display: flex;
+        justify-content: center;
+        width: 20px;
+        color: var(--line-3);
+      }
+      .cycle-return {
+        display: block;
+      }
+
+      .flow-note {
+        margin: 13px 0 0;
+        font-size: 12px;
+        line-height: 1.5;
+        color: var(--ink-3);
+      }
+      .flow-note--press {
+        color: var(--accent-strong);
+      }
+
+      .window {
+        border: 1px solid var(--line-2);
+        border-radius: 8px;
+        overflow: hidden;
+        background: var(--paper);
+        box-shadow: var(--shadow-lg);
+      }
+      .window-body {
+        display: flex;
+        height: 268px;
+      }
+
+      .rail {
+        position: relative;
+        width: 178px;
+        flex: none;
+        background: var(--card-2);
+        border-right: 1px solid var(--line);
+      }
+      .lights {
+        display: flex;
+        gap: 7px;
+        padding: 12px 0 0 12px;
+      }
+      .lights span {
+        width: 9px;
+        height: 9px;
+        border-radius: 999px;
+        background: var(--line-2);
+      }
+      .rail-head {
+        padding: 14px 10px 7px;
+        border-bottom: 1px solid var(--line);
+        font-size: 13px;
+        color: var(--ink-3);
+      }
+      .ver {
+        display: grid;
+        gap: 2px;
+        padding: 7px 10px;
+        border-bottom: 1px solid var(--line);
+      }
+      .ver.is-current {
+        background: var(--paper-2);
+      }
+      .ver-head {
+        display: flex;
+        align-items: baseline;
+        justify-content: space-between;
+        gap: 8px;
+      }
+      .ver-head strong {
+        font-size: 13px;
+        font-weight: 600;
+      }
+      .stamp {
+        flex: none;
+        font-size: 11px;
+        color: var(--ink-3);
+        font-variant-numeric: tabular-nums;
+      }
+      .stamp--built {
+        color: var(--accent);
+      }
+      .ver-note {
+        font-size: 11px;
+        line-height: 1.4;
+        color: var(--ink-3);
+      }
+
+      .stage {
+        flex: 1;
+        min-width: 0;
+        display: flex;
+        justify-content: center;
+        overflow: hidden;
+        padding-top: 16px;
+        background: var(--paper);
+      }
+      .sheet {
+        width: 196px;
+        flex: none;
+        padding: 20px 18px;
+        background: #fff;
+        box-shadow: 0 1px 2px rgb(0 0 0 / 25%);
+      }
+      .ln {
+        height: 4px;
+        border-radius: 1px;
+        background: var(--paper-3);
+        margin-bottom: 6px;
+      }
+      .ln--title {
+        height: 7px;
+        background: var(--line-3);
+        margin-bottom: 9px;
+      }
+      .ln--gap {
+        margin-bottom: 14px;
+      }
+      .fig {
+        height: 44px;
+        margin-bottom: 14px;
+        background: var(--paper-2);
+        border: 1px solid var(--line);
+      }
+
+      .bar {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        padding: 6px 9px;
+        background: var(--card-2);
+        border-top: 1px solid var(--line);
+        font-size: 12px;
+        color: var(--ink-3);
+      }
+      .bar svg {
+        flex: none;
+        color: var(--ink-2);
+      }
+      .bar .spacer {
+        flex: 1;
+      }
+      .bar .act {
+        color: var(--ink-2);
+      }
+      .bar .count {
+        font-variant-numeric: tabular-nums;
+      }
+
+      .install {
+        padding: 56px 0;
+        border-bottom: 0;
+      }
+      .install h2 {
+        margin: 0 0 12px;
+        font-size: 22px;
+        font-weight: 600;
+        letter-spacing: -0.018em;
+      }
+      .install p {
+        margin: 0 0 14px;
+        font-size: 13.5px;
+        line-height: 1.65;
+        color: var(--ink-2);
+        text-wrap: pretty;
+      }
+      .install p.first {
+        margin-bottom: 18px;
+        font-size: 14.5px;
+      }
+      .install pre {
+        margin: 0 0 16px;
+        padding: 14px 16px;
+        border: 1px solid var(--paper-3);
+        border-radius: var(--radius);
+        background: var(--paper);
+        overflow-x: auto;
+        font-size: 12.5px;
+        line-height: 1.8;
+      }
+      .install .needs {
+        margin-bottom: 22px;
+        color: var(--ink-3);
+      }
+      footer {
+        padding: 26px 0 34px;
+      }
+      .foot {
+        display: flex;
+        align-items: baseline;
+        justify-content: space-between;
+        gap: 16px;
+        flex-wrap: wrap;
+        font-size: 12.5px;
+        color: var(--ink-3);
+      }
+      .foot nav {
+        display: flex;
+        gap: 16px;
+      }
+
+      @media (max-width: 560px) {
+        .hero h1 {
+          font-size: 44px;
+        }
+        .window-body {
+          flex-direction: column;
+          height: auto;
+        }
+        .rail {
+          width: 100%;
+          border-right: 0;
+          border-bottom: 1px solid var(--line);
+        }
+        .stage {
+          height: 190px;
+        }
+      }
+    </style>
+  </head>
+
+  <body>
+    <svg width="0" height="0" style="position: absolute" aria-hidden="true">
+      <symbol id="i-arrow" viewBox="0 0 26 10">
+        <path
+          d="M0 5h23M19 1l4 4-4 4"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="1.3"
+          stroke-linecap="round"
+          stroke-linejoin="round"
+        />
+      </symbol>
+      <symbol id="i-arrow-sm" viewBox="0 0 14 8">
+        <path
+          d="M0 4h11M8 1l3 3-3 3"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="1.2"
+          stroke-linecap="round"
+          stroke-linejoin="round"
+        />
+      </symbol>
+      <symbol id="i-doc" viewBox="0 0 14 16">
+        <path
+          d="M8.5 1H2.5a1 1 0 0 0-1 1v12a1 1 0 0 0 1 1h9a1 1 0 0 0 1-1V5z M8.5 1v4h4"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="1.3"
+          stroke-linejoin="round"
+        />
+      </symbol>
+      <symbol id="i-loop" viewBox="0.1 0 110.9 140.7">
+        <path
+          d="m38.602,124.575c13.676-6.086,27.141-12.646,40.732-18.926,14.12-6.525,23.49-17.648,28.404-31.927,6.629-19.262,3.622-37.823-9.345-53.575C85.295,4.238,67.757-2.422,47.161.784,23.908,4.404,4.484,23.288,1.229,44.885c-2.555,16.95.432,32.441,11.886,45.815,2.336,2.728,4.224,4.181,7.885,2.076,4.157-2.39,8.687-4.131,13.434-6.329-3.903-4.432-7.978-8.009-10.76-12.405-10.856-17.154-2.956-41.826,12.565-50.099,18.237-9.721,33.883-5.941,46.102,5.154,17.916,16.268,13.149,47.166-8.213,58.332-8.979,4.693-18.283,8.768-27.482,13.031-14.345,6.649-28.744,13.183-43.064,19.886-1.329.622-3.147,2.052-3.217,3.2-.341,5.535-.16,11.102-.165,17.208,13.381-5.615,25.998-10.662,38.403-16.182v.003Z"
+        />
+      </symbol>
+    </svg>
+
+    <header class="hero">
+      <div class="wrap">
+        <svg class="mark" viewBox="0 0 111.145 256.582" role="img" aria-label="Press">
+          <path
+            d="m38.602,124.575c13.676-6.086,27.141-12.646,40.732-18.926,14.12-6.525,23.49-17.648,28.404-31.927,6.629-19.262,3.622-37.823-9.345-53.575C85.295,4.238,67.757-2.422,47.161.784,23.908,4.404,4.484,23.288,1.229,44.885c-2.555,16.95.432,32.441,11.886,45.815,2.336,2.728,4.224,4.181,7.885,2.076,4.157-2.39,8.687-4.131,13.434-6.329-3.903-4.432-7.978-8.009-10.76-12.405-10.856-17.154-2.956-41.826,12.565-50.099,18.237-9.721,33.883-5.941,46.102,5.154,17.916,16.268,13.149,47.166-8.213,58.332-8.979,4.693-18.283,8.768-27.482,13.031-14.345,6.649-28.744,13.183-43.064,19.886-1.329.622-3.147,2.052-3.217,3.2-.341,5.535-.16,11.102-.165,17.208,13.381-5.615,25.998-10.662,38.403-16.182v.003Z"
+          />
+          <path
+            d="m25.867,174.859c14.734-6.599,29.324-13.519,43.972-20.31,11.921-5.526,23.866-11.003,35.732-16.646,1.827-.869,4.544-2.39,4.689-3.827.555-5.533.232-11.154.237-17.479-2.368.821-3.92,1.253-5.386,1.885-6.699,2.888-13.418,5.736-20.051,8.772-27.247,12.471-54.479,24.977-81.656,37.6-1.39.646-3.066,2.439-3.162,3.8-.372,5.279-.158,10.6-.163,16.7,9.26-3.746,17.645-6.848,25.787-10.495h.001Z"
+          />
+          <path
+            d="m15.218,224.585c13.046-5.844,25.985-11.927,38.959-17.933,17.518-8.111,35.046-16.203,52.514-24.42,1.477-.695,3.534-2.199,3.623-3.449.399-5.557.18-11.159.185-17.204-1.517.472-2.302.638-3.022.953-11.56,5.056-23.173,9.997-34.653,15.229-23.316,10.627-46.577,21.378-69.788,32.232-1.322.618-2.739,2.577-2.834,3.998-.345,5.125-.142,10.286-.147,16.198,5.608-2.05,10.52-3.525,15.163-5.604Z"
+          />
+          <path
+            d="m73.197,224.35c-23.316,10.627-46.577,21.378-69.788,32.232h42.808c17.518-8.111,43.378-19.544,60.846-27.761,1.477-.695,3.534-2.199,3.623-3.449.399-5.557.18-11.159.185-17.204-1.517.472-2.302.638-3.022.953-11.56,5.056-23.173,9.997-34.653,15.229h.001Z"
+          />
+        </svg>
+        <h1>Press</h1>
+        <p class="tagline">
+          Open a LaTeX or Markdown source file. Press compiles and displays it.
+        </p>
+        <a class="btn" href="https://github.com/antonio-leitao/printing-press">
+          Source on GitHub
+          <svg width="13" height="13" viewBox="0 0 24 24" aria-hidden="true">
+            <path
+              d="M7 17 17 7M8 7h9v9"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="2.4"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+            />
+          </svg>
+        </a>
+        <p class="meta">macOS · built with Rust · AGPL-3.0</p>
+      </div>
+    </header>
+
+    <section class="band problem" aria-label="A familiar PDF filename problem">
+      <div class="wrap">
+        <figure class="chaos">
+          <img
+            src="final_final.pdf.webp"
+            width="814"
+            height="900"
+            alt="A llama surrounded by potion bottles labelled with variations of final.pdf"
+            loading="lazy"
+            decoding="async"
+          />
+        </figure>
+      </div>
+    </section>
+
+    <section class="answer" aria-labelledby="answer-one-h">
+      <div class="wrap">
+        <p class="eyebrow eyebrow--answer">Compilation</p>
+        <h2 id="answer-one-h">Press handles the build</h2>
+        <p class="intro">
+          Open a source file and Press runs the compiler, stores the result in its cache, and updates
+          the view after each save. It does not add generated files to your project.
+        </p>
+
+        <p class="eyebrow">Before</p>
+        <div class="flow">
+          <div class="node">your editor</div>
+          <svg class="arw" width="26" height="10"><use href="#i-arrow" /></svg>
+          <div class="node node--tool">latexmk -pvc</div>
+          <svg class="arw" width="26" height="10"><use href="#i-arrow" /></svg>
+          <div class="node node--file">
+            <svg width="13" height="15"><use href="#i-doc" /></svg>
+            paper.pdf
+          </div>
+          <svg class="arw" width="26" height="10"><use href="#i-arrow" /></svg>
+          <div class="node">a PDF viewer</div>
+        </div>
+        <p class="flow-note">
+          The usual setup needs a compiler process and a generated PDF between the editor and
+          viewer.
+        </p>
+
+        <hr class="rule" />
+
+        <p class="eyebrow eyebrow--answer">With Press</p>
+        <div class="flow">
+          <div class="node">your editor</div>
+          <svg class="arw" width="26" height="10"><use href="#i-arrow" /></svg>
+          <div class="node node--press">
+            <span class="press-head">
+              <svg width="12" height="15" aria-hidden="true"><use href="#i-loop" /></svg>
+              Press
+            </span>
+            <div class="cycle">
+              <div class="cycle-row">
+                <span class="pill" style="width: 52px">watch</span>
+                <span class="cycle-gap">
+                  <svg width="14" height="8"><use href="#i-arrow-sm" /></svg>
+                </span>
+                <span class="pill pill--own" style="width: 62px">compile</span>
+                <span class="cycle-gap">
+                  <svg width="14" height="8"><use href="#i-arrow-sm" /></svg>
+                </span>
+                <span class="pill pill--own" style="width: 44px">view</span>
+              </div>
+              <svg class="cycle-return" width="198" height="34" viewBox="0 0 198 34" aria-hidden="true">
+                <defs>
+                  <marker
+                    id="m-loop"
+                    viewBox="0 0 10 10"
+                    refX="8.5"
+                    refY="5"
+                    markerWidth="5"
+                    markerHeight="5"
+                    orient="auto"
+                  >
+                    <path d="M0 1 L9 5 L0 9 z" fill="#9bc0b1" />
+                  </marker>
+                </defs>
+                <path
+                  d="M176 2 C 179 30, 23 30, 26 6"
+                  fill="none"
+                  stroke="#9bc0b1"
+                  stroke-width="1.3"
+                  marker-end="url(#m-loop)"
+                />
+              </svg>
+            </div>
+          </div>
+        </div>
+        <p class="flow-note flow-note--press">
+          Press watches the source, compiles it, and displays the result from its own cache.
+        </p>
+
+        <div class="feature">
+          <h3>Reload after every save</h3>
+          <p>
+            Press rebuilds and updates the page in place, with your scroll position intact. You do
+            not need a separate watcher or reload command.
+          </p>
+          <h3>Use any editor</h3>
+          <p>
+            Press watches files rather than editors, so Vim, VS Code, and Emacs need no integration.
+            Install <a href="https://github.com/antonio-leitao/press.nvim">press.nvim</a> if you want
+            a <code>:Press</code> command in Neovim.
+          </p>
+        </div>
+      </div>
+    </section>
+
+    <section class="answer answer--two" aria-labelledby="answer-two-h">
+      <div class="wrap">
+        <hr class="rule rule--section" />
+
+        <p class="eyebrow eyebrow--answer">Version history</p>
+        <h2 id="answer-two-h">Keep snapshots without renaming PDFs</h2>
+        <p class="intro">
+          Press stores titled snapshots of the source in its own data directory. Your project folder
+          stays unchanged.
+        </p>
+
+        <div class="window">
+          <div class="window-body">
+            <div class="rail">
+              <div class="lights"><span></span><span></span><span></span></div>
+              <div class="rail-head">thesis</div>
+
+              <div class="ver is-current">
+                <div class="ver-head">
+                  <strong>Working copy</strong>
+                  <span class="stamp stamp--built">built</span>
+                </div>
+              </div>
+              <div class="ver">
+                <div class="ver-head">
+                  <strong>Before cutting §3</strong>
+                  <span class="stamp">2d</span>
+                </div>
+                <span class="ver-note">survey still in, figures unchanged</span>
+              </div>
+              <div class="ver">
+                <div class="ver-head">
+                  <strong>Sent to Ana</strong>
+                  <span class="stamp">3w</span>
+                </div>
+              </div>
+              <div class="ver">
+                <div class="ver-head">
+                  <strong>First full draft</strong>
+                  <span class="stamp">2mo</span>
+                </div>
+              </div>
+            </div>
+
+            <div class="stage">
+              <div class="sheet" aria-hidden="true">
+                <div class="ln ln--title" style="width: 72%"></div>
+                <div class="ln ln--gap" style="width: 38%"></div>
+                <div class="ln" style="width: 100%"></div>
+                <div class="ln" style="width: 96%"></div>
+                <div class="ln" style="width: 100%"></div>
+                <div class="ln ln--gap" style="width: 61%"></div>
+                <div class="fig"></div>
+                <div class="ln" style="width: 100%"></div>
+                <div class="ln" style="width: 92%"></div>
+                <div class="ln" style="width: 100%"></div>
+                <div class="ln" style="width: 44%"></div>
+              </div>
+            </div>
+          </div>
+
+          <div class="bar">
+            <svg width="12" height="12" viewBox="0 0 16 16" aria-hidden="true">
+              <path
+                d="M2 4h12M2 8h12M2 12h12"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="1.5"
+                stroke-linecap="round"
+              />
+            </svg>
+            <span>Working copy</span>
+            <span class="spacer"></span>
+            <span class="count">3/24</span>
+            <span class="act">Snapshot</span>
+            <span class="act">Editor</span>
+            <span class="act">Projects</span>
+          </div>
+        </div>
+
+        <div class="feature">
+          <h3>Save a snapshot with ⌘K</h3>
+          <p>
+            Name the current source state, then open it later in the same viewer. Press compiles the
+            snapshot when needed.
+          </p>
+          <h3>Jump from the page to its source</h3>
+          <p>
+            <code>⌘click</code> a page to see the source file, line number, and text for that spot.
+            This also works when the snapshot's source is no longer on disk.
+          </p>
+          <h3>Git still handles version control</h3>
+          <p>
+            Press has no branches, merges, or remotes. It stores a flat list of snapshots and
+            deduplicates shared files, such as figures used by several versions.
+          </p>
+        </div>
+      </div>
+    </section>
+
+    <section class="band install" aria-labelledby="install-h">
+      <div class="wrap">
+        <h2 id="install-h">Install</h2>
+        <p class="first">Build and install Press from source:</p>
+        <pre>git clone https://github.com/antonio-leitao/printing-press
+cd printing-press
+npm install
+npm run install:app</pre>
+        <p>
+          That puts <code>Press.app</code> in <code>/Applications</code>. Run it again to upgrade.
+          Add <code>-- --link</code> once for a <code>press</code> command in your terminal.
+        </p>
+        <p class="needs">
+          Requires macOS, Node.js, Rust, and a TeX distribution with <code>latexmk</code>. Markdown
+          documents also require pandoc.
+        </p>
+      </div>
+    </section>
+
+    <footer class="band band--last">
+      <div class="wrap">
+        <div class="foot">
+          <span>© 2026 <a href="https://antonio-leitao.github.io/">Antonio Leitão</a> · AGPL-3.0</span>
+          <nav>
+            <a href="https://github.com/antonio-leitao/printing-press">Repository</a>
+            <a href="https://github.com/antonio-leitao/printing-press#readme">Documentation</a>
+            <a href="https://github.com/antonio-leitao/press.nvim">press.nvim</a>
+          </nav>
+        </div>
+      </div>
+    </footer>
+  </body>
+</html>

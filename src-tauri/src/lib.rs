@@ -178,6 +178,7 @@ pub fn run() {
             commands::icon_choice,
             commands::set_icon_choice,
             commands::list_templates,
+            commands::template_layout,
             commands::project_files,
             commands::save_as_template,
             commands::delete_template,

@@ -96,8 +96,12 @@
   --sheet: #ffffff;
   --sheet-inverted: #090a0d;
 
-  /* How much of what is behind a modal still shows. */
+  /* How much of what is behind a modal still shows. The deep one is for the
+     one layer that goes over a dialog rather than over the library: what is
+     behind it there is a card of near-white with a page laid on top, and at the
+     ordinary dim the page keeps no edge of its own. */
   --backdrop: rgb(32 32 30 / 22%);
+  --backdrop-deep: rgb(32 32 30 / 46%);
 
   /* Ink */
   --ink: #20201e;
@@ -125,8 +129,12 @@
   --on-accent: #ffffff;
 
   /* Blue is not one of the three: it never fills anything and it carries no
-     meaning about the document. It appears where the system says where you
-     are — the focus ring, and the selection. */
+     meaning about the document. It is the selection, and only the selection —
+     the one mark on screen that is the system's and not Press's. The focus ring
+     used to be blue too and is not any more: a blue rectangle sitting on a
+     shelf of near-whites reads as something the browser drew rather than
+     something the design chose, and inside a dialog it was the only blue on
+     screen. */
   --blue: #3b6fd4;
 
   /* Each hue, mixed down into the surfaces it has to sit on. -strong is dark
@@ -352,6 +360,7 @@
 
   /* Dimming a dark room needs more than dimming a lit one. */
   --backdrop: rgb(9 10 13 / 60%);
+  --backdrop-deep: rgb(9 10 13 / 82%);
 }
 
 *::-webkit-scrollbar {
@@ -424,9 +433,21 @@ textarea {
   color: inherit;
 }
 
-/* :focus-visible only, so a mouse click on a card never draws a ring. */
+/* :focus-visible only, so a mouse click on a card never draws a ring.
+
+   The accent's darker tier, which is the one every edge in Press that says
+   `chosen` or `here` is drawn in: the ring a chosen template wears, the ring a
+   card takes from the keyboard, the border of a focused field. One colour for
+   the whole of it, however you arrived at it. Not the plain accent, which is a
+   fill — a button's, a toast's — and reads too light as a hairline.
+
+   Held off the shape by 2px rather than drawn on it. Where the shape is a page
+   — a card on the shelf, a template in the gallery — the rule is overridden and
+   the ring is put round the paper instead: see .pinned-open, .project-open and
+   .template-open. A page has an edge of its own, and a rectangle drawn round it
+   and its caption together is the shape of nothing on the card. */
 :focus-visible {
-  outline: var(--bw-2) solid var(--blue);
+  outline: var(--bw-2) solid var(--accent-strong);
   outline-offset: 2px;
   border-radius: var(--radius-xs);
 }

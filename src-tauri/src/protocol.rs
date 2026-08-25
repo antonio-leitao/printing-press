@@ -80,34 +80,27 @@ async fn serve<R: Runtime>(
             let invert = query_value(uri.query(), "invert").is_some_and(|value| value == "1");
             render(app, artifact_id, page, scale, invert).await
         }
-        // /cover/{template}?scale=2.6&invert=1
-        // The page a template shows on its card: the first page of the PDF its
-        // document had compiled when it was saved. Always page one — a card
-        // shows a cover, and a template that brings twelve files still has one.
-        ["cover", template] => {
+        // /cover/{template}/{index}?scale=2.6&invert=1
+        // A page of the PDF a template's document had compiled when it was
+        // saved. Page one is the cover every card shows; the rest are there for
+        // a closer look, which reads the template the way the reader reads a
+        // document. No revision in the path, unlike a page above: what a
+        // template kept was copied once and cannot be rebuilt.
+        ["cover", template, index] => {
             let template_id = template
                 .parse::<i64>()
                 .map_err(|_| AppError::InvalidInput("malformed template id".into()))?;
+            let page = index
+                .parse::<usize>()
+                .map_err(|_| AppError::InvalidInput("malformed page number".into()))?;
             let scale = query_value(uri.query(), "scale")
                 .and_then(|value| value.parse::<f32>().ok())
                 .filter(|scale| scale.is_finite() && *scale > 0.0 && *scale <= 12.0)
                 .ok_or_else(|| AppError::InvalidInput("missing or unusable scale".into()))?;
             let invert = query_value(uri.query(), "invert").is_some_and(|value| value == "1");
+            let path = cover_path(app, template_id).await?;
             let state = app.state::<AppState>();
-            let repository = std::sync::Arc::clone(&state.repository);
-            // The hash comes from the database rather than from the webview, so
-            // unlike an id in the path it is not something to be checked before
-            // it is put in a path — Press wrote it there itself.
-            let object =
-                tauri::async_runtime::spawn_blocking(move || repository.template_cover(template_id))
-                    .await
-                    .map_err(|error| AppError::Task(error.to_string()))??
-                    .ok_or_else(|| AppError::NotFound("this template has no page".into()))?;
-            let path = crate::snapshot::object_path(&state.objects_root, &object);
-            if !path.is_file() {
-                return Err(AppError::NotFound("that page is no longer stored".into()));
-            }
-            let rendered = state.renderer.render(path, 0, scale, invert).await?;
+            let rendered = state.renderer.render(path, page, scale, invert).await?;
             ok(frame(rendered))
         }
         _ => Err(AppError::NotFound(format!("no route for {}", uri.path()))),
@@ -192,6 +185,30 @@ pub async fn resolve<R: Runtime>(
         ));
     }
     Ok(canonical)
+}
+
+/// The file a template kept as its cover: the whole PDF its document had built
+/// when it was saved, not one page of it.
+///
+/// No storage check to make, unlike `resolve`. The hash comes out of the
+/// database rather than off the webview, so the path is one Press wrote itself
+/// and there is nothing in it that could point somewhere else.
+pub async fn cover_path<R: Runtime>(
+    app: &tauri::AppHandle<R>,
+    template_id: i64,
+) -> AppResult<PathBuf> {
+    let state = app.state::<AppState>();
+    let repository = std::sync::Arc::clone(&state.repository);
+    let object =
+        tauri::async_runtime::spawn_blocking(move || repository.template_cover(template_id))
+            .await
+            .map_err(|error| AppError::Task(error.to_string()))??
+            .ok_or_else(|| AppError::NotFound("this template has no page".into()))?;
+    let path = crate::snapshot::object_path(&state.objects_root, &object);
+    if !path.is_file() {
+        return Err(AppError::NotFound("that page is no longer stored".into()));
+    }
+    Ok(path)
 }
 
 fn query_value<'a>(query: Option<&'a str>, key: &str) -> Option<&'a str> {

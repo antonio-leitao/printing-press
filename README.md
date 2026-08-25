@@ -1,12 +1,15 @@
 <p align="center">
-  <img src='static/press.svg' height='200px' align="center"></img>
+  <img src="static/final_final.pdf.png" width="420" alt="A llama surrounded by potion bottles labelled with variations of final.pdf" />
+</p>
+
+<p align="center">
+  <img src="static/press.svg" height="200" alt="Press" />
 </p>
 
 <div align="center">
-<h3 max-width='200px' align="center">Printing Press</h3>
-  <p><i>A PDF viewer that does not require a PDF<br/>
-  Give it LaTeX or Markdown source — the viewer handles compilation<br/>
-  Built with Rust</i><br/></p>
+  <h3>Press</h3>
+  <p><i>Open a LaTeX or Markdown source file. Press compiles and displays it.<br />
+  Built with Rust.</i></p>
   <p>
     <img alt="macOS" src="https://img.shields.io/badge/macOS-black?style=for-the-badge&logo=apple&logoColor=white">
     <img alt="Rust" src="https://img.shields.io/badge/rust-black?style=for-the-badge&logo=rust&logoColor=white">
@@ -32,31 +35,16 @@
 - [Not there yet](#not-there-yet)
 - [License](#license)
 
-Press is a PDF viewer for LaTeX and Markdown source files. Give it the source, and it compiles and
-displays the document for you.
+Press is a macOS viewer for LaTeX and Markdown source files. Open a source file and Press compiles
+it, displays the result, and rebuilds it whenever you save.
 
-Working on a document usually involves three tasks: writing the source, compiling it, and viewing
-the result. Press changes how those tasks are grouped:
-
-`(write + compile) + view` → `write + (compile + view)`
-
-Compilation becomes part of the viewer rather than a separate step in your workflow. You work on
-the source; Press turns it into a document, just as any other viewer renders text on a page.
-
-The rest of Press follows from this idea:
-
-- **Press watches the source.** When you save a file, Press rebuilds the document and updates the
-  view. You do not need `latexmk -pvc`, a watcher script, a reload command, or any other program to
-  connect the editor and viewer. Press manages the entire compile-and-view loop.
-- **The PDF is a view, not a product.** You do not need to name, store, or clean up a generated PDF.
-  Press keeps it in its own cache and writes nothing to your project folder. If you remove Press,
-  the folder still contains exactly the source files you created. The one exception is
-  [starting a document](#starting-a-document) from a template, which writes the document you asked
-  for, once, and nothing after that.
-- **Every saved state can have its own view.** Press uses this model to provide a simple document
-  history. Use `⌘K` to save a titled snapshot of the current source. You can view any snapshot
-  like the working copy, and Press compiles it when necessary. The source is the document; the PDF
-  is only a view of that source at a particular moment.
+- **Automatic rebuilds.** Press watches the source and updates the view after each save. You do not
+  need `latexmk -pvc`, a watcher script, or a reload command.
+- **No generated files in the project.** Press keeps compiled PDFs and auxiliary files in its own
+  cache. [Creating a document](#starting-a-document) from a template is the only operation that
+  writes to your project folder.
+- **Titled snapshots.** Press can store selected versions of the source and compile any of them for
+  viewing. Press history is separate from Git and your editor's undo history.
 
 ## Installation
 
@@ -68,9 +56,8 @@ npm install
 npm run install:app
 ```
 
-These commands install `Press.app` in `/Applications`. Run them again whenever you want to
-upgrade. The first build takes longer because it compiles the PDF renderer's C code; later builds
-are faster.
+These commands install `Press.app` in `/Applications`. Run them again to upgrade. The first build
+takes longer because it compiles the PDF renderer's C code.
 
 To add a `press` command to your terminal, run:
 
@@ -78,8 +65,8 @@ To add a `press` command to your terminal, run:
 npm run install:app -- --link
 ```
 
-This writes a small script to `~/.local/bin/press`, allowing you to run `press paper.tex` from any
-directory. You only need to use the flag once.
+This writes a small script to `~/.local/bin/press`, so you can run `press paper.tex` from any
+directory. Use the flag once.
 
 To remove Press:
 
@@ -88,9 +75,8 @@ npm run uninstall:app            # the app
 npm run uninstall:app -- --purge # the app and every version it stored
 ```
 
-Without `--purge`, Press keeps your document history. Snapshots live in Press's own storage, not in
-your project folders. That storage contains the only copy of your saved versions, so purge it only
-if you no longer need them.
+Without `--purge`, Press keeps your document history. Its storage contains the only copy of those
+snapshots, so purge it only when you no longer need them.
 
 ## Opening a document
 
@@ -101,41 +87,35 @@ You can open a document in any of three ways:
 - **`:Press`** from Neovim.
 
 Give Press a file and it opens the corresponding document. Give it a folder and it lists the
-documents it finds, placing documents you have used before at the top. You then choose which one
-to open.
+documents it finds, with recently used documents first.
 
 You can open a document from any file that belongs to it. For example, running `:Press` while
 editing `chapters/three.tex` opens the full thesis. Press follows `% !TEX root` directives and the
 `\input` graph to find the document root. If a folder contains two papers, Press treats them as
 separate projects, with separate builds and histories.
 
-You only need to add a document once. Press then keeps it in the library, ready to open without
-first building or locating a PDF.
+You only need to add a document once. Press keeps it in the library after that.
 
 ## Starting a document
 
-**New document** opens a gallery of your templates. Pick one, name the document, choose a folder,
-and Press writes it there and opens it.
+**New document** opens your template gallery. Choose a template, name the document, and select a
+folder. Press creates the files there and opens the document.
 
-A template is a document of yours, kept. Press ships with none: right-click a document in the
-library and choose **Save as template** to keep it as it stands. You are asked for a name and for
-which files to keep — the document alone, or a tree of everything it compiles with, where you can
-strike out what this template has no use for. The tree offers exactly what a version would hold, so
-build output, editor scratch, `.git` and a neighbouring project's document are never in it, and the
-document itself cannot be struck out. Templates are copies. The project carries on untouched, and
-editing it afterwards does not change the template.
+Press ships without templates. To create one, right-click a document in the library and choose
+**Save as template**. You can save only the main file or select files from the document tree. Press
+excludes build output, editor scratch files, `.git`, and unrelated documents. The main file is
+always included.
 
-Nothing is edited on the way in or out. A template holds what the document held when you saved it,
-preamble and body alike, so to keep an empty one, save it from an empty document. The card shows
-the page the document had last compiled, and the TeX engine travels with it.
+A template is a copy. Later changes to the original project do not affect it, and Press does not
+alter the source while saving or restoring it. Save an empty document if you want an empty
+template. Press also stores the last compiled page for the gallery card and remembers the TeX
+engine.
 
-A template of one file writes one file into the folder you chose. A template of several writes a
-folder named after your document, with the document inside it. Nothing is ever written over: a
-name that is taken is refused by name.
+A single-file template creates one file in the selected folder. A multi-file template creates a
+folder named after the new document. Press refuses to overwrite an existing file or folder.
 
-This is the only time Press writes into a folder of yours, and it happens because you asked for a
-document to exist. Everything after that — builds, versions, auxiliary files — stays in Press's
-own storage, as before.
+Template creation is the only feature that writes source files. Builds, snapshots, and auxiliary
+files stay in Press's storage.
 
 ## Editing
 
@@ -143,10 +123,9 @@ Press is a viewer, not an editor. The **Editor** button runs the command you cho
 Use `{file}` as a placeholder for the document and `{dir}` for its folder. If you leave the command
 unset, Press opens the file with the system's default application.
 
-Whenever a file changes, Press rebuilds the document. It does not matter whether the change came
-from Vim, VS Code, Emacs, TextEdit, or a background script. Because Press watches the files
-directly, your editor needs no plugin, save hook, reload command, or shared port. The PDF updates
-in place, preserves your scroll position, and remains visible while Press recompiles it.
+Press watches files directly, so it works with Vim, VS Code, Emacs, TextEdit, and background
+scripts without a plugin or save hook. After a change, it rebuilds the document and updates the
+page in place while preserving your scroll position.
 
 Click a reference, citation, or link in the PDF to follow it. `⌘click` anywhere in the PDF to see
 the source for that location, including the file, line number, and copyable text. This also works
@@ -154,31 +133,25 @@ for saved versions whose source is no longer on disk.
 
 ### Neovim
 
-[press.nvim](https://github.com/antonio-leitao/press.nvim) is a thin wrapper around Press for
-Neovim. Its `:Press` command sends the path of the current file to Press, which then finds the
-document it belongs to. The plugin locates an installed copy of Press automatically, so it does
-not require `--link` or any configuration.
+[press.nvim](https://github.com/antonio-leitao/press.nvim) adds a `:Press` command to Neovim. It
+sends the current file path to Press, which finds and opens the document root. The plugin locates
+the installed app automatically and does not require `--link` or configuration.
 
-The plugin only opens the document. Press itself handles compilation, file watching, and
-reloading. An integration for another editor would only need to send the current file's path to
-Press; without one, you can open the file through Press directly.
+The plugin only opens documents. Press handles compilation, file watching, and reloading.
 
 ## Versions
 
-Because Press treats a PDF as a view, it can create a view for any saved state of the source. Use
-`⌘K` to save and title a snapshot of the current document. Snapshots are always deliberate, never
-automatic. Your editor's undo history already records individual changes; Press keeps only the
-versions you decide are worth returning to.
+Use `⌘K` to save and title a snapshot of the current document. Press never creates snapshots
+automatically.
 
 The sidebar pins the working copy at the top, followed by each saved version, its age, and its
 build status. Select a version to read it just like the working copy. If Press has not compiled it
 before, it does so in the background. Press builds versions from temporary copies and writes
 nothing to your project folder.
 
-This history is **not** a replacement for git. It has no branches, merges, or remotes. It is simply
-a list of document versions stored outside the project, independent of any version control you
-already use. Press deduplicates identical content, so if one hundred versions of a thesis use the
-same figures, Press stores those figures only once.
+Git still handles branches, merges, and remotes. Press history is a flat list of document versions
+stored outside the project. Press deduplicates identical content, so snapshots that use the same
+figures store one copy of each figure.
 
 Press stores only the files that belong to the document: its source, figures, `.bib` files, and
 included chapters. It excludes build output, editor scratch files, `.git`, and unrelated documents
@@ -186,12 +159,11 @@ in the same folder.
 
 ## Markdown
 
-A Markdown file works like any other document in Press, with the same viewer, file watching, and
-history. Press runs the file through pandoc and then latexmk automatically.
+A Markdown file uses the same viewer, file watching, and history as a LaTeX file. Press runs it
+through pandoc and then latexmk.
 
-Markdown has nowhere to put a LaTeX preamble, so anything you want to say about typography goes in
-the document's own YAML frontmatter: `geometry`, `documentclass`, `fontsize`, `header-includes`.
-Press passes that to pandoc and adds nothing of its own.
+Set `geometry`, `documentclass`, `fontsize`, and `header-includes` in the document's YAML
+frontmatter. Press passes those values to pandoc without adding its own formatting.
 
 One limitation: Markdown build errors identify the file but not the source line. Line numbers in
 the build log refer to the LaTeX generated by pandoc, not to the original Markdown, so Press does
@@ -224,10 +196,10 @@ For example, `12G` goes to page 12, and `3j` scrolls down three steps.
 
 ## Settings
 
-- **Theme** — choose light mode, dark mode, or the system setting. Dark mode also inverts the page
+- **Theme.** Choose light mode, dark mode, or the system setting. Dark mode also inverts the page
   for nighttime reading.
-- **Icon** — choose from three Dock icons.
-- **Editor** — the command the Editor button runs.
+- **Icon.** Choose from three Dock icons.
+- **Editor.** Set the command that the Editor button runs.
 
 From a document's library entry, you can rename it, change its TeX engine, or remove it. There is
 no "change the main file" setting because Press treats each main document as a separate project.
@@ -245,7 +217,7 @@ Press does not enable `--shell-escape`. It does warn you when a document's folde
 
 ## Building from source
 
-For most users, `npm run install:app` is all that is needed. To run individual build steps, use:
+To run individual build steps, use:
 
 ```sh
 npm run tauri build            # build without installing
@@ -268,8 +240,8 @@ at a time. While developing Press, set `press.nvim`'s `app_command` to
 
 ## License
 
-Copyright (C) 2025 Antonio Leitao. GNU Affero General Public License, version 3 — the full text is
-in [LICENSE](LICENSE).
+Copyright (C) 2025 Antonio Leitao. GNU Affero General Public License, version 3. The full text is in
+[LICENSE](LICENSE).
 
 Press uses MuPDF, which is licensed under AGPL-3.0, and compiles its C code into the application.
 As a result, Press must be distributed under the same license.

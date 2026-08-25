@@ -60,14 +60,21 @@ export function pageUrl(
 }
 
 /**
- * A template's cover page.
+ * A page of the PDF a template kept.
  *
- * Always the first page: a card shows a cover, and a template holding twelve
- * files still has one.
+ * Page zero is the cover every card shows. The rest exist for a closer look,
+ * which reads a template the way the reader reads a document. No revision here,
+ * unlike `pageUrl`: what a template kept was copied once and cannot be rebuilt,
+ * so there is nothing for a stale cache to be stale against.
  */
-export function coverUrl(templateId: number, scale: number, invert = false): string {
+export function coverUrl(
+  templateId: number,
+  page: number,
+  scale: number,
+  invert = false
+): string {
   const ink = invert ? '&invert=1' : '';
-  return `${ORIGIN}/cover/${templateId}?scale=${scale.toFixed(4)}${ink}`;
+  return `${ORIGIN}/cover/${templateId}/${page}?scale=${scale.toFixed(4)}${ink}`;
 }
 
 /**

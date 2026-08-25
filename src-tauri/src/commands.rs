@@ -371,6 +371,31 @@ pub async fn page_layout(
         .collect())
 }
 
+/// Every page's size in the PDF a template kept, so a closer look at one can
+/// lay the whole document out before drawing any of it.
+///
+/// The card needs none of this — it draws one page, and the size of that page
+/// was stored with the template precisely so a shelf of cards costs no round
+/// trips. This is asked for once, when a template is opened to be read.
+#[tauri::command]
+pub async fn template_layout(
+    template_id: i64,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> AppResult<Vec<PageSize>> {
+    let path = crate::protocol::cover_path(&app, template_id).await?;
+    Ok(state
+        .renderer
+        .geometry(path)
+        .await?
+        .into_iter()
+        .map(|page| PageSize {
+            width: page.width,
+            height: page.height,
+        })
+        .collect())
+}
+
 /// Word boxes for one page, in PDF points, for the selection overlay.
 #[tauri::command]
 pub async fn page_words(
