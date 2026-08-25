@@ -1,8 +1,4 @@
 <p align="center">
-  <img src="static/final_final.pdf.png" width="420" alt="A llama surrounded by potion bottles labelled with variations of final.pdf" />
-</p>
-
-<p align="center">
   <img src="static/press.svg" height="200" alt="Press" />
 </p>
 
@@ -16,6 +12,10 @@
     <img alt="AGPL-3.0" src="https://img.shields.io/badge/AGPL--3.0-black?style=for-the-badge">
   </p>
 </div>
+
+<p align="center">
+  <img src="static/final_final.pdf.png" width="420" alt="A llama surrounded by potion bottles labelled with variations of final.pdf" />
+</p>
 
 #
 
@@ -31,8 +31,6 @@
 - [Keys](#keys)
 - [Settings](#settings)
 - [Requirements](#requirements)
-- [Building from source](#building-from-source)
-- [Not there yet](#not-there-yet)
 - [License](#license)
 
 Press is a macOS viewer for LaTeX and Markdown source files. Open a source file and Press compiles
@@ -174,36 +172,25 @@ not display a potentially misleading line number.
 The viewer uses [zathura](https://pwmt.org/projects/zathura/)'s keymap and supports numeric counts.
 For example, `12G` goes to page 12, and `3j` scrolls down three steps.
 
-| Key                 | Action                                          |
-| ------------------- | ----------------------------------------------- |
-| `j` / `k`           | scroll down / up                                |
-| `h` / `l`           | scroll left / right                             |
-| `d` / `u`           | scroll half a page down / up                    |
-| `f` / `b` / `space` | move one page down / up                         |
-| `J` / `K`           | go to the next / previous page                  |
-| `gg` / `G`          | go to the first / last page                     |
-| `12G`               | go to page 12                                   |
-| `⌃o` / `⌃i`         | go back / forward after a jump                  |
-| `+` / `-`           | zoom in / out                                   |
-| `0`                 | use the actual page size                        |
-| `a` / `s`           | fit the page / page width                       |
-| `⌃r`                | toggle dark mode for the page and interface     |
-| click               | follow a reference, citation, or link           |
-| `⌘click`            | show the source for that location in the PDF    |
-| `R`                 | rebuild the selected version                    |
-| `⌘K`                | save a snapshot of the working copy             |
-| `?`                 | show this key list in the app                    |
-
-## Settings
-
-- **Theme.** Choose light mode, dark mode, or the system setting. Dark mode also inverts the page
-  for nighttime reading.
-- **Icon.** Choose from three Dock icons.
-- **Editor.** Set the command that the Editor button runs.
-
-From a document's library entry, you can rename it, change its TeX engine, or remove it. There is
-no "change the main file" setting because Press treats each main document as a separate project.
-This allows several projects to share one folder.
+| Key                 | Action                                       |
+| ------------------- | -------------------------------------------- |
+| `j` / `k`           | scroll down / up                             |
+| `h` / `l`           | scroll left / right                          |
+| `d` / `u`           | scroll half a page down / up                 |
+| `f` / `b` / `space` | move one page down / up                      |
+| `J` / `K`           | go to the next / previous page               |
+| `gg` / `G`          | go to the first / last page                  |
+| `12G`               | go to page 12                                |
+| `⌃o` / `⌃i`         | go back / forward after a jump               |
+| `+` / `-`           | zoom in / out                                |
+| `0`                 | use the actual page size                     |
+| `a` / `s`           | fit the page / page width                    |
+| `⌃r`                | toggle dark mode for the page and interface  |
+| click               | follow a reference, citation, or link        |
+| `⌘click`            | show the source for that location in the PDF |
+| `R`                 | rebuild the selected version                 |
+| `⌘K`                | save a snapshot of the working copy          |
+| `?`                 | show this key list in the app                |
 
 ## Requirements
 
@@ -215,32 +202,10 @@ This allows several projects to share one folder.
 Press does not enable `--shell-escape`. It does warn you when a document's folder contains a
 `.latexmkrc`, which latexmk executes as Perl. Only open documents from folders you trust.
 
-## Building from source
-
-To run individual build steps, use:
-
-```sh
-npm run tauri build            # build without installing
-sh scripts/install-app.sh      # install without building
-npm run tauri dev              # run it, rebuilt as you edit
-npm run test                   # svelte-check, frontend tests, clippy, cargo test
-```
-
-The installed application and the development build are both named `press`, and only one can run
-at a time. While developing Press, set `press.nvim`'s `app_command` to
-`src-tauri/target/debug/press`.
-
-## Not there yet
-
-- Text selection and in-document search
-- Side-by-side version comparison
-- Configurable compiler arguments
-- Export and print
-- Linux and Windows
-
 ## License
 
-Copyright (C) 2025 Antonio Leitao. GNU Affero General Public License, version 3. The full text is in
+Copyright (C) 2026 Antonio Leitao. GNU Affero General Public License, version 3.
+The full text is in
 [LICENSE](LICENSE).
 
 Press uses MuPDF, which is licensed under AGPL-3.0, and compiles its C code into the application.
