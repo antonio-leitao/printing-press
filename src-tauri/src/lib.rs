@@ -183,6 +183,7 @@ pub fn run() {
             commands::save_as_template,
             commands::delete_template,
             commands::create_from_template,
+            commands::create_blank_document,
             commands::take_pending_open,
             commands::expecting_open,
             commands::take_startup_notice,

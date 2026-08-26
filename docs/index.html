@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Press | LaTeX and Markdown viewer for macOS</title>
+    <title>Printing Press | LaTeX and Markdown viewer for macOS</title>
     <meta
       name="description"
       content="Press compiles and displays LaTeX and Markdown source files on macOS. It watches for changes and stores titled snapshots outside your project folder."
@@ -16,8 +16,14 @@
       property="og:description"
       content="Open a LaTeX or Markdown source file. Press compiles and displays it."
     />
-    <meta property="og:url" content="https://antonio-leitao.github.io/printing-press/" />
-    <meta property="og:image" content="https://antonio-leitao.github.io/printing-press/final_final.pdf.webp" />
+    <meta
+      property="og:url"
+      content="https://antonio-leitao.github.io/printing-press/"
+    />
+    <meta
+      property="og:image"
+      content="https://antonio-leitao.github.io/printing-press/final_final.pdf.webp"
+    />
     <meta name="twitter:card" content="summary_large_image" />
 
     <style>
@@ -80,7 +86,8 @@
         --radius-sm: 3px;
 
         --shadow-sm: 0 0.4px 2px rgb(0 0 0 / 25%);
-        --shadow-lg: 0 1px 2px rgb(28 28 26 / 10%), 0 8px 20px -6px rgb(28 28 26 / 17%);
+        --shadow-lg:
+          0 1px 2px rgb(28 28 26 / 10%), 0 8px 20px -6px rgb(28 28 26 / 17%);
 
         --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
       }
@@ -99,7 +106,11 @@
         margin: 0;
         background: var(--paper);
         color: var(--ink);
-        font-family: "Public Sans", system-ui, -apple-system, sans-serif;
+        font-family:
+          "Public Sans",
+          system-ui,
+          -apple-system,
+          sans-serif;
         font-size: 15px;
         line-height: 1.6;
         -webkit-font-smoothing: antialiased;
@@ -621,7 +632,12 @@
 
     <header class="hero">
       <div class="wrap">
-        <svg class="mark" viewBox="0 0 111.145 256.582" role="img" aria-label="Press">
+        <svg
+          class="mark"
+          viewBox="0 0 111.145 256.582"
+          role="img"
+          aria-label="Press"
+        >
           <path
             d="m38.602,124.575c13.676-6.086,27.141-12.646,40.732-18.926,14.12-6.525,23.49-17.648,28.404-31.927,6.629-19.262,3.622-37.823-9.345-53.575C85.295,4.238,67.757-2.422,47.161.784,23.908,4.404,4.484,23.288,1.229,44.885c-2.555,16.95.432,32.441,11.886,45.815,2.336,2.728,4.224,4.181,7.885,2.076,4.157-2.39,8.687-4.131,13.434-6.329-3.903-4.432-7.978-8.009-10.76-12.405-10.856-17.154-2.956-41.826,12.565-50.099,18.237-9.721,33.883-5.941,46.102,5.154,17.916,16.268,13.149,47.166-8.213,58.332-8.979,4.693-18.283,8.768-27.482,13.031-14.345,6.649-28.744,13.183-43.064,19.886-1.329.622-3.147,2.052-3.217,3.2-.341,5.535-.16,11.102-.165,17.208,13.381-5.615,25.998-10.662,38.403-16.182v.003Z"
           />
@@ -635,7 +651,7 @@
             d="m73.197,224.35c-23.316,10.627-46.577,21.378-69.788,32.232h42.808c17.518-8.111,43.378-19.544,60.846-27.761,1.477-.695,3.534-2.199,3.623-3.449.399-5.557.18-11.159.185-17.204-1.517.472-2.302.638-3.022.953-11.56,5.056-23.173,9.997-34.653,15.229h.001Z"
           />
         </svg>
-        <h1>Press</h1>
+        <h1>Printing Press</h1>
         <p class="tagline">
           Open a LaTeX or Markdown source file. Press compiles and displays it.
         </p>
@@ -676,8 +692,9 @@
         <p class="eyebrow eyebrow--answer">Compilation</p>
         <h2 id="answer-one-h">Press handles the build</h2>
         <p class="intro">
-          Open a source file and Press runs the compiler, stores the result in its cache, and updates
-          the view after each save. It does not add generated files to your project.
+          Open a source file and Press runs the compiler, stores the result in
+          its cache, and updates the view after each save. It does not add
+          generated files to your project.
         </p>
 
         <p class="eyebrow">Before</p>
@@ -694,8 +711,8 @@
           <div class="node">a PDF viewer</div>
         </div>
         <p class="flow-note">
-          The usual setup needs a compiler process and a generated PDF between the editor and
-          viewer.
+          The usual setup needs a compiler process and a generated PDF between
+          the editor and viewer.
         </p>
 
         <hr class="rule" />
@@ -706,7 +723,9 @@
           <svg class="arw" width="26" height="10"><use href="#i-arrow" /></svg>
           <div class="node node--press">
             <span class="press-head">
-              <svg width="12" height="15" aria-hidden="true"><use href="#i-loop" /></svg>
+              <svg width="12" height="15" aria-hidden="true">
+                <use href="#i-loop" />
+              </svg>
               Press
             </span>
             <div class="cycle">
@@ -721,7 +740,13 @@
                 </span>
                 <span class="pill pill--own" style="width: 44px">view</span>
               </div>
-              <svg class="cycle-return" width="198" height="34" viewBox="0 0 198 34" aria-hidden="true">
+              <svg
+                class="cycle-return"
+                width="198"
+                height="34"
+                viewBox="0 0 198 34"
+                aria-hidden="true"
+              >
                 <defs>
                   <marker
                     id="m-loop"
@@ -747,20 +772,25 @@
           </div>
         </div>
         <p class="flow-note flow-note--press">
-          Press watches the source, compiles it, and displays the result from its own cache.
+          Press watches the source, compiles it, and displays the result from
+          its own cache.
         </p>
 
         <div class="feature">
           <h3>Reload after every save</h3>
           <p>
-            Press rebuilds and updates the page in place, with your scroll position intact. You do
-            not need a separate watcher or reload command.
+            Press rebuilds and updates the page in place, with your scroll
+            position intact. You do not need a separate watcher or reload
+            command.
           </p>
           <h3>Use any editor</h3>
           <p>
-            Press watches files rather than editors, so Vim, VS Code, and Emacs need no integration.
-            Install <a href="https://github.com/antonio-leitao/press.nvim">press.nvim</a> if you want
-            a <code>:Press</code> command in Neovim.
+            Press watches files rather than editors, so Vim, VS Code, and Emacs
+            need no integration. Install
+            <a href="https://github.com/antonio-leitao/press.nvim"
+              >press.nvim</a
+            >
+            if you want a <code>:Press</code> command in Neovim.
           </p>
         </div>
       </div>
@@ -773,8 +803,8 @@
         <p class="eyebrow eyebrow--answer">Version history</p>
         <h2 id="answer-two-h">Keep snapshots without renaming PDFs</h2>
         <p class="intro">
-          Press stores titled snapshots of the source in its own data directory. Your project folder
-          stays unchanged.
+          Press stores titled snapshots of the source in its own data directory.
+          Your project folder stays unchanged.
         </p>
 
         <div class="window">
@@ -849,18 +879,20 @@
         <div class="feature">
           <h3>Save a snapshot with ⌘K</h3>
           <p>
-            Name the current source state, then open it later in the same viewer. Press compiles the
-            snapshot when needed.
+            Name the current source state, then open it later in the same
+            viewer. Press compiles the snapshot when needed.
           </p>
           <h3>Jump from the page to its source</h3>
           <p>
-            <code>⌘click</code> a page to see the source file, line number, and text for that spot.
-            This also works when the snapshot's source is no longer on disk.
+            <code>⌘click</code> a page to see the source file, line number, and
+            text for that spot. This also works when the snapshot's source is no
+            longer on disk.
           </p>
           <h3>Git still handles version control</h3>
           <p>
-            Press has no branches, merges, or remotes. It stores a flat list of snapshots and
-            deduplicates shared files, such as figures used by several versions.
+            Press has no branches, merges, or remotes. It stores a flat list of
+            snapshots and deduplicates shared files, such as figures used by
+            several versions.
           </p>
         </div>
       </div>
@@ -870,17 +902,20 @@
       <div class="wrap">
         <h2 id="install-h">Install</h2>
         <p class="first">Build and install Press from source:</p>
-        <pre>git clone https://github.com/antonio-leitao/printing-press
+        <pre>
+git clone https://github.com/antonio-leitao/printing-press
 cd printing-press
 npm install
-npm run install:app</pre>
+npm run install:app</pre
+        >
         <p>
-          That puts <code>Press.app</code> in <code>/Applications</code>. Run it again to upgrade.
-          Add <code>-- --link</code> once for a <code>press</code> command in your terminal.
+          That puts <code>Press.app</code> in <code>/Applications</code>. Run it
+          again to upgrade. Add <code>-- --link</code> once for a
+          <code>press</code> command in your terminal.
         </p>
         <p class="needs">
-          Requires macOS, Node.js, Rust, and a TeX distribution with <code>latexmk</code>. Markdown
-          documents also require pandoc.
+          Requires macOS, Node.js, Rust, and a TeX distribution with
+          <code>latexmk</code>. Markdown documents also require pandoc.
         </p>
       </div>
     </section>
@@ -888,11 +923,21 @@ npm run install:app</pre>
     <footer class="band band--last">
       <div class="wrap">
         <div class="foot">
-          <span>© 2026 <a href="https://antonio-leitao.github.io/">Antonio Leitão</a> · AGPL-3.0</span>
+          <span
+            >© 2026
+            <a href="https://antonio-leitao.github.io/">Antonio Leitão</a> ·
+            AGPL-3.0</span
+          >
           <nav>
-            <a href="https://github.com/antonio-leitao/printing-press">Repository</a>
-            <a href="https://github.com/antonio-leitao/printing-press#readme">Documentation</a>
-            <a href="https://github.com/antonio-leitao/press.nvim">press.nvim</a>
+            <a href="https://github.com/antonio-leitao/printing-press"
+              >Repository</a
+            >
+            <a href="https://github.com/antonio-leitao/printing-press#readme"
+              >Documentation</a
+            >
+            <a href="https://github.com/antonio-leitao/press.nvim"
+              >press.nvim</a
+            >
           </nav>
         </div>
       </div>

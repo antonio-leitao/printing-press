@@ -16,17 +16,19 @@
 //! What a template does *not* do is edit what it holds. It is what the project
 //! was at the moment it was saved — preamble, body and all. Blanking the body
 //! of the entry document would mean parsing it and guessing, and a template
-//! made from a finished paper is a legitimate thing to want. To keep a template
-//! with nothing in it, save one from a document with nothing in it.
+//! made from a finished paper is a legitimate thing to want. Starting blank is
+//! a separate creation choice and does not put a synthetic template in here.
 
 use std::{
     collections::HashSet,
+    fs::OpenOptions,
+    io::Write,
     path::{Path, PathBuf},
 };
 
 use crate::{
     error::{AppError, AppResult},
-    model::ProjectFile,
+    model::{DocumentKind, ProjectFile},
     snapshot::{self, StoredFile},
 };
 
@@ -71,6 +73,57 @@ pub fn capture(
 /// What the tree offers: every file this document would compile with.
 pub fn listing(directory: &Path, foreign: &HashSet<String>) -> AppResult<Vec<ProjectFile>> {
     snapshot::list(directory, foreign)
+}
+
+/// Starts one document without stationery.
+///
+/// A blank document follows the same placement rule as a one-file template:
+/// the name is the file name and the chosen folder is its parent. Markdown is
+/// genuinely empty. LaTeX needs a document environment, and `\null` gives the
+/// viewer one blank page until there is something of the reader's to show.
+pub fn create_blank(kind: DocumentKind, folder: &Path, name: &str) -> AppResult<PathBuf> {
+    if !folder.is_dir() {
+        return Err(AppError::NotFound(format!(
+            "{} is not a folder",
+            folder.display()
+        )));
+    }
+    let name = validate_name(name)?;
+    let (extension, contents): (&str, &[u8]) = match kind {
+        DocumentKind::Latex => (
+            "tex",
+            b"\\documentclass{article}\n\n\\begin{document}\n\n\\null\n\n\\end{document}\n",
+        ),
+        DocumentKind::Markdown => ("md", b""),
+    };
+    let document = folder.join(format!("{name}.{extension}"));
+
+    // `create_new` is the no-overwrite promise made atomically. Checking first
+    // and then writing would leave a race in which a file arriving between the
+    // two could be replaced.
+    let mut file = match OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&document)
+    {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            return Err(AppError::InvalidInput(format!(
+                "{} already exists",
+                document
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| document.display().to_string())
+            )));
+        }
+        Err(error) => return Err(error.into()),
+    };
+    if let Err(error) = file.write_all(contents) {
+        drop(file);
+        let _ = std::fs::remove_file(&document);
+        return Err(error.into());
+    }
+    Ok(document)
 }
 
 /// Where a template's files will land, and under what name.
@@ -238,6 +291,27 @@ mod tests {
     fn keep(root: &Path, objects: &Path, chosen: &[&str]) -> Vec<StoredFile> {
         let chosen = chosen.iter().map(|path| (*path).to_owned()).collect::<Vec<_>>();
         capture(root, "main.tex", objects, &HashSet::new(), &chosen).unwrap()
+    }
+
+    #[test]
+    fn blank_documents_use_their_kind_and_never_overwrite() {
+        let directory = tempfile::tempdir().unwrap();
+        let markdown = create_blank(DocumentKind::Markdown, directory.path(), "notes").unwrap();
+        assert_eq!(markdown, directory.path().join("notes.md"));
+        assert_eq!(std::fs::read(&markdown).unwrap(), b"");
+
+        let latex = create_blank(DocumentKind::Latex, directory.path(), "paper").unwrap();
+        assert_eq!(latex, directory.path().join("paper.tex"));
+        let source = std::fs::read_to_string(&latex).unwrap();
+        assert!(source.contains("\\documentclass{article}"));
+        assert!(
+            source.contains("\\null"),
+            "the blank document still makes a page"
+        );
+
+        std::fs::write(&markdown, "mine").unwrap();
+        assert!(create_blank(DocumentKind::Markdown, directory.path(), "notes").is_err());
+        assert_eq!(std::fs::read_to_string(&markdown).unwrap(), "mine");
     }
 
     /// What the tree is built from. Build output is not offered, so it cannot

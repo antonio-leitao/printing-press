@@ -3,7 +3,7 @@
 </p>
 
 <div align="center">
-  <h3>Press</h3>
+  <h3>Printing Press</h3>
   <p><i>Open a LaTeX or Markdown source file. Press compiles and displays it.<br />
   Built with Rust.</i></p>
   <p>
@@ -39,8 +39,8 @@ it, displays the result, and rebuilds it whenever you save.
 - **Automatic rebuilds.** Press watches the source and updates the view after each save. You do not
   need `latexmk -pvc`, a watcher script, or a reload command.
 - **No generated files in the project.** Press keeps compiled PDFs and auxiliary files in its own
-  cache. [Creating a document](#starting-a-document) from a template is the only operation that
-  writes to your project folder.
+  cache. [Creating a document](#starting-a-document) is the only operation that writes source
+  files to your project folder.
 - **Titled snapshots.** Press can store selected versions of the source and compile any of them for
   viewing. Press history is separate from Git and your editor's undo history.
 
@@ -96,8 +96,11 @@ You only need to add a document once. Press keeps it in the library after that.
 
 ## Starting a document
 
-**New document** opens your template gallery. Choose a template, name the document, and select a
-folder. Press creates the files there and opens the document.
+**New document** can start with a blank Markdown or LaTeX file, or with one of your templates. Name
+the document, select a folder, and Press creates the files there and opens it.
+
+A blank Markdown document is an empty `.md` file. A blank LaTeX document is a minimal `article`
+with one blank page. Both create one named file directly in the selected folder.
 
 Press ships without templates. To create one, right-click a document in the library and choose
 **Save as template**. You can save only the main file or select files from the document tree. Press
@@ -105,14 +108,13 @@ excludes build output, editor scratch files, `.git`, and unrelated documents. Th
 always included.
 
 A template is a copy. Later changes to the original project do not affect it, and Press does not
-alter the source while saving or restoring it. Save an empty document if you want an empty
-template. Press also stores the last compiled page for the gallery card and remembers the TeX
-engine.
+alter the source while saving or restoring it. Press also stores the last compiled page for the
+gallery card and remembers the TeX engine.
 
 A single-file template creates one file in the selected folder. A multi-file template creates a
 folder named after the new document. Press refuses to overwrite an existing file or folder.
 
-Template creation is the only feature that writes source files. Builds, snapshots, and auxiliary
+Document creation is the only feature that writes source files. Builds, snapshots, and auxiliary
 files stay in Press's storage.
 
 ## Editing

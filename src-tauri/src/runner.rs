@@ -390,15 +390,17 @@ async fn convert_markdown(inputs: &BuildInputs<'_>, job_name: &str) -> Result<Pa
     // file, and comparing before replacing is what preserves its cache.
     let staging = inputs.work_directory.join(format!("{job_name}.tex.next"));
 
-    // pandoc reads a marked copy rather than the document itself, so that the
-    // LaTeX it writes says which line of the markdown each block came from.
-    // The copy sits in the work directory; pandoc still runs in the source
-    // directory, so images and includes resolve where the author put them.
+    // Pandoc reads a working copy rather than the document itself. Its blocks
+    // are marked with their source lines, and an otherwise empty document gets
+    // one invisible TeX box so it produces the blank page Press has to show.
+    // The source stays genuinely empty. The copy sits in the work directory;
+    // pandoc still runs in the source directory, so images and includes resolve
+    // where the author put them.
     let marked = inputs.work_directory.join(format!("{job_name}.marked.md"));
     let read = tokio::fs::read_to_string(&source)
         .await
         .map_err(|error| format!("could not read {}: {error}", inputs.source.file_name))?;
-    let input = match tokio::fs::write(&marked, crate::anchors::mark(&read)).await {
+    let input = match tokio::fs::write(&marked, markdown_build_input(&read)).await {
         Ok(()) => marked.clone(),
         // Marking is an aid, not a requirement. A document that cannot be
         // marked is still a document that should compile.
@@ -462,6 +464,20 @@ async fn convert_markdown(inputs: &BuildInputs<'_>, job_name: &str) -> Result<Pa
             .map_err(|error| format!("could not store pandoc's output: {error}"))?;
     }
     Ok(generated)
+}
+
+/// What Pandoc receives for one Markdown build.
+///
+/// TeX emits no PDF for a document with no boxes. That is normally reported as
+/// a failed build, but an empty Markdown source is a valid blank document. Raw
+/// LaTeX is part of Pandoc's Markdown reader, so `\null` makes one blank page
+/// without putting scaffolding into the file the reader edits.
+fn markdown_build_input(source: &str) -> String {
+    if source.trim().is_empty() {
+        "\\null\n".to_owned()
+    } else {
+        crate::anchors::mark(source)
+    }
 }
 
 /// Copies the PDF into Press-managed storage under a fresh name, staged and then
@@ -707,6 +723,16 @@ mod tests {
         assert!(verify_pdf(&good).is_ok());
         assert!(verify_pdf(&truncated).is_err());
         assert!(verify_pdf(&wrong).is_err());
+    }
+
+    #[test]
+    fn empty_markdown_builds_as_one_invisible_box() {
+        assert_eq!(markdown_build_input(""), "\\null\n");
+        assert_eq!(markdown_build_input(" \n\t"), "\\null\n");
+
+        let marked = markdown_build_input("A paragraph.\n");
+        assert_ne!(marked, "\\null\n");
+        assert!(marked.contains("A paragraph."));
     }
 
     #[test]

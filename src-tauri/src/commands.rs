@@ -842,9 +842,9 @@ pub async fn delete_template(template_id: i64, state: State<'_, AppState>) -> Ap
 
 /// Writes a template into a folder and keeps what it wrote as a project.
 ///
-/// The one place Press creates a file in a folder of the reader's. It happens
-/// because they asked for a document to exist, it happens once, and nothing is
-/// ever written over: a name already taken is refused by name.
+/// One of the two ways Press creates files in a folder of the reader's. It
+/// happens because they asked for a document to exist, it happens once, and
+/// nothing is ever written over: a name already taken is refused by name.
 ///
 /// The toolchain is checked before anything is written. A document Press has
 /// just made and cannot open is worse than a refusal.
@@ -891,9 +891,44 @@ pub async fn create_from_template(
     blocking(move || repository.project_summary(id)).await
 }
 
+/// Writes a new document without copying stationery, keeps it as a project,
+/// and leaves it ready for the same open-and-build path as every other one.
+///
+/// The toolchain is checked before the file is created, and the write itself
+/// refuses an occupied name atomically.
+#[tauri::command]
+pub async fn create_blank_document(
+    kind: DocumentKind,
+    folder: String,
+    name: String,
+    state: State<'_, AppState>,
+) -> AppResult<ProjectSummary> {
+    let repository = Arc::clone(&state.repository);
+    let id = blocking(move || {
+        require_toolchain(kind)?;
+        let document = templates::create_blank(kind, Path::new(&folder), &name)?;
+        let document = documents::validate(&document)?;
+        let path = document
+            .to_str()
+            .ok_or_else(|| AppError::InvalidInput("that path is not valid UTF-8".into()))?;
+        Ok(repository
+            .upsert_project(NewProject {
+                name: &documents::suggested_name(&document),
+                document_path: path,
+                // Markdown has no engine of its own. A minimal LaTeX document
+                // has no directive either, so both begin with Press's default.
+                engine: Engine::PdfLatex,
+            })?
+            .id)
+    })
+    .await?;
+
+    let repository = Arc::clone(&state.repository);
+    blocking(move || repository.project_summary(id)).await
+}
+
 /// What a document of this kind needs before Press can promise to compile it.
-/// The same two checks adding a project makes, in the one other place a project
-/// comes into being.
+/// The same two checks adding a project makes, wherever Press creates one.
 fn require_toolchain(kind: DocumentKind) -> AppResult<()> {
     if crate::toolchain::resolve_executable("latexmk").is_none() {
         return Err(AppError::ToolUnavailable(

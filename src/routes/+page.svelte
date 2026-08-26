@@ -40,6 +40,7 @@
     type OpenCandidate,
     type OpenRequest,
     type ArtifactSummary,
+    type DocumentKind,
     type EditorCommand,
     type IconChoice,
     type LooseDocument,
@@ -59,6 +60,8 @@
     { value: 'dark', label: 'Dark', icon: Moon },
     { value: 'system', label: 'System', icon: Monitor }
   ];
+
+  type CreationSource = 'blank' | 'template';
 
   /** The cell a template's page stands in. The shelf's card, because choosing a
       template is the same act as choosing off the shelf: you are looking at a
@@ -157,10 +160,12 @@
   let projectName = $state('');
   let projectEngine = $state<Engine>('pdflatex');
 
-  /// Starting a document, which is the one thing Press does that writes into a
-  /// folder of the reader's. A place rather than a dialog: what is being chosen
-  /// is a page, and pages want the room the library gives them.
+  /// Starting a document, which is the one thing Press does that writes source
+  /// into a folder of the reader's. It may begin blank or as a copy of one of
+  /// the reader's templates.
   let creating = $state(false);
+  let creationSource = $state<CreationSource>('blank');
+  let blankKind = $state<DocumentKind>('latex');
   let templates = $state<TemplateSummary[]>([]);
   let templatePick = $state<number | null>(null);
   /// Whether the chosen template's pages are being looked at closely. The
@@ -393,13 +398,14 @@
   /// sentence still exists, on the empty screen, where it is the answer to a
   /// question somebody actually has.
   ///
-  /// A kind with none of it says nothing rather than saying zero.
-  /// Split by kind, because that is how the reader thinks about starting: a
-  /// markdown note and a LaTeX paper are different decisions, not two rows of
-  /// one list.
-  const markdownTemplates = $derived(templates.filter((one) => one.kind === 'markdown'));
-  const latexTemplates = $derived(templates.filter((one) => one.kind === 'latex'));
   const picked = $derived(templates.find((one) => one.id === templatePick) ?? null);
+  const newExtension = $derived(
+    creationSource === 'blank'
+      ? blankKind === 'markdown'
+        ? 'md'
+        : 'tex'
+      : (picked?.entry.split('.').pop() ?? '')
+  );
 
   /// The listing as a tree, flattened to rows.
   ///
@@ -1113,6 +1119,7 @@
     busy = true;
     try {
       templates = await api.listTemplates();
+      creationSource = 'blank';
       templatePick = null;
       closeLook();
       newName = '';
@@ -1128,6 +1135,11 @@
     creating = false;
     templatePick = null;
     closeLook();
+  }
+
+  function chooseCreationSource(source: CreationSource) {
+    creationSource = source;
+    if (source === 'blank') closeLook();
   }
 
   /// Space on a card is the closer look — Quick Look's key, for the same act.
@@ -1194,16 +1206,19 @@
     }
   }
 
-  /// Writes the template out, keeps what it wrote, and opens it.
+  /// Writes the blank source or template, keeps what it wrote, and opens it.
   ///
   /// A document that has just been made is one that is about to be written, so
   /// the editor is started with it. Press has done its half of `write + (compile
   /// + view)`; this is the other half being handed over.
   async function createDocument() {
-    if (!picked || !newFolder || !newName.trim()) return;
+    if (!newFolder || !newName.trim() || (creationSource === 'template' && !picked)) return;
     busy = true;
     try {
-      const project = await api.createFromTemplate(picked.id, newFolder, newName.trim());
+      const project =
+        creationSource === 'blank'
+          ? await api.createBlankDocument(blankKind, newFolder, newName.trim())
+          : await api.createFromTemplate(picked!.id, newFolder, newName.trim());
       creating = false;
       templatePick = null;
       closeLook();
@@ -2178,145 +2193,158 @@
 {/if}
 
 {#if creating}
-  <!-- Wider than the rest, and for the same reason Settings no longer is: what
-       is being chosen here is a page, and pages have to be looked at. Still a
-       dialog — starting a document is one act with three questions in it, not a
-       place to be. -->
+  <!-- Wider than the rest so the template branch has room to compare pages.
+       Still a dialog: starting a document is one act with a few questions in
+       it, not a place of its own. -->
   <dialog class="gallery" use:modal={closeGallery} aria-labelledby="gallery-title">
     <h2 id="gallery-title">New document</h2>
 
-    {#if templates.length === 0}
-      <p class="quiet">
-        Press ships with no templates — a template is a document of yours, kept. Right-click a
-        document in the library and choose <strong>Save as template</strong>. It is copied as it
-        stands: the project carries on untouched, and editing it later does not change the
-        template.
-      </p>
-    {:else}
-      <p class="quiet">Start from one of your templates.</p>
+    <div class="scopes creation-options" role="radiogroup" aria-label="How to begin">
+      <button
+        class="scope"
+        role="radio"
+        aria-checked={creationSource === 'blank'}
+        onclick={() => chooseCreationSource('blank')}
+      >
+        <strong>Blank document</strong>
+        <span class="quiet">Start with a new Markdown or LaTeX file.</span>
+      </button>
+      <button
+        class="scope"
+        role="radio"
+        aria-checked={creationSource === 'template'}
+        onclick={() => chooseCreationSource('template')}
+      >
+        <strong>From a template</strong>
+        <span class="quiet">
+          {templates.length === 0
+            ? 'No saved templates yet.'
+            : `${templates.length} saved ${templates.length === 1 ? 'template' : 'templates'}.`}
+        </span>
+      </button>
+    </div>
 
-      <div class="gallery-shelf">
-        {#each [{ title: 'Markdown', items: markdownTemplates }, { title: 'LaTeX', items: latexTemplates }] as group (group.title)}
-          {#if group.items.length > 0}
-            <section class="gallery-group">
-              <h3>{group.title}</h3>
-              <div class="template-grid">
-                {#each group.items as template (template.id)}
-                  <!-- Where the page's edges land inside the cell. The card is
-                       drawn against the paper rather than against the cell: the
-                       ring, the magnifier and the name all belong to the page,
-                       and a landscape template's page is not the cell. -->
-                  {@const paper =
-                    template.cover
-                      ? fitPage(template.cover, TEMPLATE_PAGE_WIDTH, TEMPLATE_PAGE_HEIGHT)
-                      : null}
-                  <article class="template-card" class:chosen={templatePick === template.id}>
-                    <!-- Right-click to remove, the same place every other card
-                         in Press keeps what can be done to it. -->
-                    <button
-                      class="template-open"
-                      onclick={() => (templatePick = template.id)}
-                      ondblclick={() => void createDocument()}
-                      onkeydown={(event) => cardKeys(event, template)}
-                      oncontextmenu={(event) => openMenu(event, templateMenu(template))}
-                      aria-pressed={templatePick === template.id}
-                    >
-                      <span class="template-page">
-                        {#if template.cover && paper}
-                          <TemplateCover
-                            id={template.id}
-                            cover={template.cover}
-                            width={paper.width}
-                            height={paper.height}
-                            invert={dark}
-                          />
-                        {:else}
-                          <!-- Never compiled when it was saved, so Press has
-                               never seen what it looks like. Saying so is better
-                               than drawing a page that is not this one's. -->
-                          <span class="template-blank">No page yet</span>
-                        {/if}
-                      </span>
-                      <span class="template-lines">
-                        <strong class="name">{template.name}</strong>
-                        {#if template.fileCount > 1}
-                          <!-- This one brings a folder rather than a file, which
-                               changes what appears on disk and is worth knowing
-                               before rather than after. -->
-                          <span class="template-files">{template.fileCount} files</span>
-                        {/if}
-                      </span>
-                    </button>
-
-                    {#if paper}
-                      <!-- Beside the card's button rather than inside it, which
-                           is the whole reason the two are separate elements: a
-                           button cannot hold another one. Placed by hand on the
-                           page's own top corner, since where that corner is
-                           depends on the paper.
-
-                           Out of the tab order on purpose. The keyboard has
-                           Space for this, and one card is one choice — a second
-                           stop on every template to reach a shortcut is a worse
-                           bargain than the shortcut. -->
-                      <button
-                        class="template-look"
-                        style="top: {TEMPLATE_PAGE_HEIGHT - paper.height + 6}px; right: {(TEMPLATE_PAGE_WIDTH - paper.width) / 2 + 6}px"
-                        tabindex="-1"
-                        onclick={() => look(template)}
-                        title="Look closer"
-                        aria-label="Look closer at {template.name}"
-                      >
-                        <ZoomIn size={13} strokeWidth={2} aria-hidden="true" />
-                      </button>
-                    {/if}
-                  </article>
-                {/each}
-              </div>
-            </section>
-          {/if}
-        {/each}
+    {#if creationSource === 'blank'}
+      <h3>Format</h3>
+      <div class="scopes creation-options" role="radiogroup" aria-label="Document format">
+        <button
+          class="scope"
+          role="radio"
+          aria-checked={blankKind === 'markdown'}
+          onclick={() => (blankKind = 'markdown')}
+        >
+          <strong>Markdown</strong>
+          <span class="quiet">An empty <code>.md</code> file.</span>
+        </button>
+        <button
+          class="scope"
+          role="radio"
+          aria-checked={blankKind === 'latex'}
+          onclick={() => (blankKind = 'latex')}
+        >
+          <strong>LaTeX</strong>
+          <span class="quiet">A minimal article with a blank page.</span>
+        </button>
       </div>
+    {:else}
+      <h3>Templates</h3>
+      {#if templates.length === 0}
+        <p class="quiet gallery-empty">
+          Right-click a document in the library and choose <strong>Save as template</strong>. Press
+          keeps a copy without changing the original.
+        </p>
+      {:else}
+        <div class="gallery-shelf">
+          <div class="template-grid">
+            {#each templates as template (template.id)}
+              {@const paper =
+                template.cover
+                  ? fitPage(template.cover, TEMPLATE_PAGE_WIDTH, TEMPLATE_PAGE_HEIGHT)
+                  : null}
+              <article class="template-card" class:chosen={templatePick === template.id}>
+                <button
+                  class="template-open"
+                  onclick={() => (templatePick = template.id)}
+                  ondblclick={() => void createDocument()}
+                  onkeydown={(event) => cardKeys(event, template)}
+                  oncontextmenu={(event) => openMenu(event, templateMenu(template))}
+                  aria-pressed={templatePick === template.id}
+                >
+                  <span class="template-page">
+                    {#if template.cover && paper}
+                      <TemplateCover
+                        id={template.id}
+                        cover={template.cover}
+                        width={paper.width}
+                        height={paper.height}
+                        invert={dark}
+                      />
+                    {:else}
+                      <span class="template-blank">No page yet</span>
+                    {/if}
+                  </span>
+                  <span class="template-lines">
+                    <strong class="name">{template.name}</strong>
+                    <span class="template-files">
+                      {template.kind === 'markdown' ? 'Markdown' : 'LaTeX'}{template.fileCount > 1
+                        ? ` · ${template.fileCount} files`
+                        : ''}
+                    </span>
+                  </span>
+                </button>
 
-      <!-- Only once a template is chosen. Before that there is nothing to name
-           and nowhere to put it, and a row of empty fields would be two
-           questions asked ahead of the one that decides them. -->
-      {#if picked}
-        <div class="create-row">
-          <label class="create-field">
-            Name
-            <span class="create-name">
-              <input
-                bind:value={newName}
-                placeholder="untitled"
-                spellcheck="false"
-                autocapitalize="off"
-                autocorrect="off"
-                onkeydown={(event) => {
-                  if (event.key === 'Enter') void createDocument();
-                }}
-              />
-              <!-- Decided by the template, so it is shown rather than typed. -->
-              <span class="create-extension">.{picked.entry.split('.').pop()}</span>
-            </span>
-          </label>
-
-          <label class="create-field folder">
-            Folder
-            <button class="create-folder" onclick={chooseFolder} title={newFolder ?? ''}>
-              <FolderOpen size={14} strokeWidth={1.75} aria-hidden="true" />
-              <span>{newFolder ?? 'Choose…'}</span>
-            </button>
-          </label>
+                {#if paper}
+                  <button
+                    class="template-look"
+                    style="top: {TEMPLATE_PAGE_HEIGHT - paper.height + 6}px; right: {(TEMPLATE_PAGE_WIDTH - paper.width) / 2 + 6}px"
+                    tabindex="-1"
+                    onclick={() => look(template)}
+                    title="Look closer"
+                    aria-label="Look closer at {template.name}"
+                  >
+                    <ZoomIn size={13} strokeWidth={2} aria-hidden="true" />
+                  </button>
+                {/if}
+              </article>
+            {/each}
+          </div>
         </div>
       {/if}
     {/if}
+
+    <div class="create-row">
+      <label class="create-field">
+        Name
+        <span class="create-name">
+          <input
+            bind:value={newName}
+            placeholder="untitled"
+            spellcheck="false"
+            autocapitalize="off"
+            autocorrect="off"
+            onkeydown={(event) => {
+              if (event.key === 'Enter') void createDocument();
+            }}
+          />
+          {#if newExtension}<span class="create-extension">.{newExtension}</span>{/if}
+        </span>
+      </label>
+
+      <label class="create-field folder">
+        Folder
+        <button class="create-folder" onclick={chooseFolder} title={newFolder ?? ''}>
+          <FolderOpen size={14} strokeWidth={1.75} aria-hidden="true" />
+          <span>{newFolder ?? 'Choose…'}</span>
+        </button>
+      </label>
+    </div>
 
     <div class="dialog-actions">
       <button onclick={closeGallery} disabled={busy}>Cancel</button>
       <button
         onclick={createDocument}
-        disabled={busy || !picked || !newFolder || !newName.trim()}
+        disabled={busy || !newFolder || !newName.trim() ||
+          (creationSource === 'template' && !picked)}
       >
         {busy ? 'Creating…' : 'Create'}
       </button>
@@ -3370,7 +3398,9 @@
     display: grid;
     justify-items: center;
     gap: var(--space-xs);
+    width: 100%;
     min-width: 0;
+    text-align: center;
   }
 
   /* The quiet tier, in the interface's own face. The library's .where is
@@ -3378,9 +3408,12 @@
      a count, and setting it in the same face made a caption look like a
      fragment of source. */
   .template-files {
+    display: block;
+    width: 100%;
     color: var(--ink-3);
     font-size: var(--fs-meta);
     line-height: 1.2;
+    text-align: center;
   }
 
   /* Wide enough for three pages across, which is as many as can be compared
@@ -3399,8 +3432,12 @@
     margin-bottom: var(--space-lg);
   }
 
-  .gallery-group + .gallery-group {
-    margin-top: var(--space-xl);
+  .creation-options {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .gallery-empty {
+    margin-bottom: var(--space-lg);
   }
 
   /* The closer look is the window: no card, no border, no shadow of its own.
@@ -3478,8 +3515,7 @@
     font-weight: 600;
   }
 
-  /* The same eyebrow the settings sections wear. Two of them here, and they are
-     the one thing separating a markdown template from a LaTeX one. */
+  /* The same eyebrow the settings sections wear. */
   dialog.gallery h3 {
     margin-bottom: var(--space-md);
     color: var(--ink-3);
@@ -3487,6 +3523,12 @@
     font-weight: var(--fw-label);
     letter-spacing: var(--tracking-label);
     text-transform: uppercase;
+  }
+
+  @media (max-width: 34rem) {
+    .creation-options {
+      grid-template-columns: 1fr;
+    }
   }
 
   /* The name takes the room, the folder takes what it needs, and they sit on

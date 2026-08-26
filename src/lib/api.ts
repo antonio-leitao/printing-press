@@ -1,5 +1,6 @@
 import { invoke } from '@tauri-apps/api/core';
 import type {
+  DocumentKind,
   EditorCommand,
   Engine,
   IconChoice,
@@ -164,6 +165,10 @@ export const api = {
    */
   createFromTemplate: (templateId: number, folder: string, name: string) =>
     invoke<ProjectSummary>('create_from_template', { templateId, folder, name }),
+
+  /** Creates one new source file without copying a template. */
+  createBlankDocument: (kind: DocumentKind, folder: string, name: string) =>
+    invoke<ProjectSummary>('create_blank_document', { kind, folder, name }),
 
   /** Collects a path Press was launched with. Taking it clears it. */
   takePendingOpen: () => invoke<OpenRequest | null>('take_pending_open'),
