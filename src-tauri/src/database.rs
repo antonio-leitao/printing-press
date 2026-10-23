@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     path::{Path, PathBuf},
     sync::Mutex,
     time::{SystemTime, UNIX_EPOCH},
@@ -1339,6 +1339,70 @@ fn companion_path(path: &Path, suffix: &str) -> PathBuf {
     PathBuf::from(name)
 }
 
+/// Every file content named by a database that was set aside beside `database`.
+///
+/// A retired database keeps a version's title and the hashes of its files, but
+/// the files themselves are in the object store the live database shares. A
+/// sweep that only asks the live database — empty, the first time Press starts
+/// on a new schema — keeps the titles and throws away everything they refer to,
+/// which is exactly what the notice promises is still there.
+///
+/// `None` when any of them cannot be read. Then nothing can be said about what
+/// it still needs, and the only safe sweep is none at all.
+pub fn retired_references(database: &Path) -> Option<HashSet<String>> {
+    let directory = database.parent()?;
+    let stem = database.file_stem()?.to_str()?;
+    // The names `retire_incompatible` composes: `press.schema4.old`, and
+    // `press.schema4.2.old` for a second one. Sidecars end in `-wal` or `-shm`.
+    let prefix = format!("{stem}.schema");
+    let mut referenced = HashSet::new();
+    for entry in std::fs::read_dir(directory).ok()? {
+        let path = entry.ok()?.path();
+        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        if !(name.starts_with(&prefix) && name.ends_with(".old")) {
+            continue;
+        }
+        referenced.extend(references_in(&path).ok()?);
+    }
+    Some(referenced)
+}
+
+/// The objects one database names, whatever schema wrote it. Read-only: a
+/// retired database is someone's history, not Press's to change.
+fn references_in(path: &Path) -> rusqlite::Result<Vec<String>> {
+    let connection =
+        Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    let mut objects = Vec::new();
+    // Every column that has ever held an object hash. A schema that predates
+    // one of them simply has nothing there to keep.
+    for (table, column) in [
+        ("snapshot_files", "object"),
+        ("template_files", "object"),
+        ("templates", "cover_object"),
+    ] {
+        let present = connection
+            .query_row(
+                "SELECT 1 FROM pragma_table_info(?1) WHERE name = ?2",
+                params![table, column],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some();
+        if !present {
+            continue;
+        }
+        let mut statement = connection
+            .prepare(&format!("SELECT {column} FROM {table} WHERE {column} IS NOT NULL"))?;
+        let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
+        for row in rows {
+            objects.push(row?);
+        }
+    }
+    Ok(objects)
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashSet;
@@ -1436,6 +1500,55 @@ mod tests {
                 .join(format!("press.schema{stale_version}.2.old"))
                 .is_file()
         );
+    }
+
+    /// What a retired database still needs is read off it, and only off it: the
+    /// live database answers for itself.
+    #[test]
+    fn a_retired_database_still_names_the_files_its_versions_hold() {
+        let directory = tempfile::tempdir().unwrap();
+        let database_path = directory.path().join("press.sqlite3");
+        let objects = directory.path().join("objects");
+        let root = project_fixture(directory.path(), "thesis");
+
+        let held = {
+            let stale = Repository::open(&database_path).unwrap();
+            let project = add(&stale, &root.join("main.tex"));
+            let capture = crate::snapshot::capture(&root, &objects, &HashSet::new()).unwrap();
+            stale
+                .create_snapshot(project.id, &capture, "Before the schema changed", None)
+                .unwrap();
+            Connection::open(&database_path)
+                .unwrap()
+                .pragma_update(None, "user_version", SCHEMA_VERSION + 1)
+                .unwrap();
+            capture
+                .files
+                .iter()
+                .map(|file| file.object.clone())
+                .collect::<HashSet<_>>()
+        };
+        assert!(!held.is_empty());
+
+        let fresh = Repository::open(&database_path).unwrap();
+        assert!(fresh.referenced_objects().unwrap().is_empty(), "started fresh");
+        assert_eq!(
+            retired_references(&database_path),
+            Some(held),
+            "the set-aside database still answers for its versions"
+        );
+    }
+
+    /// A file that looks retired but cannot be read means nothing is known
+    /// about what it needs, which is not the same as needing nothing.
+    #[test]
+    fn an_unreadable_retired_database_stops_the_sweep() {
+        let directory = tempfile::tempdir().unwrap();
+        let database_path = directory.path().join("press.sqlite3");
+        assert_eq!(retired_references(&database_path), Some(HashSet::new()));
+
+        std::fs::write(directory.path().join("press.schema3.old"), b"not a database").unwrap();
+        assert_eq!(retired_references(&database_path), None);
     }
 
     fn project_fixture(directory: &Path, name: &str) -> PathBuf {

@@ -127,6 +127,10 @@ Press watches files directly, so it works with Vim, VS Code, Emacs, TextEdit, an
 scripts without a plugin or save hook. After a change, it rebuilds the document and updates the
 page in place while preserving your scroll position.
 
+A save during a build lets that build finish, then builds again. `R` restarts a build that is
+already running. Press stops a build that prints nothing for 2 minutes, which is what TeX does
+when a macro expands forever, and any build that runs for 30 minutes.
+
 Click a reference, citation, or link in the PDF to follow it. `⌘click` anywhere in the PDF to see
 the source for that location, including the file, line number, and copyable text. This also works
 for saved versions whose source is no longer on disk.
@@ -187,10 +191,12 @@ For example, `12G` goes to page 12, and `3j` scrolls down three steps.
 | `+` / `-`           | zoom in / out                                |
 | `0`                 | use the actual page size                     |
 | `a` / `s`           | fit the page / page width                    |
+| `/`                 | search the document                          |
+| `n` / `N`           | go to the next / previous match              |
 | `⌃r`                | toggle dark mode for the page and interface  |
 | click               | follow a reference, citation, or link        |
 | `⌘click`            | show the source for that location in the PDF |
-| `R`                 | rebuild the selected version                 |
+| `R`                 | rebuild the selected version, restarting it  |
 | `⌘K`                | save a snapshot of the working copy          |
 | `?`                 | show this key list in the app                |
 

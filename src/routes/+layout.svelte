@@ -1,6 +1,7 @@
 <script lang="ts">
   import '../app.css';
   import Toasts from '$lib/Toasts.svelte';
+  import { startDisplay } from '$lib/display.svelte';
   import { startTheme, theme } from '$lib/theme.svelte';
 
   let { children } = $props();
@@ -9,6 +10,7 @@
   // in the browser and nothing is on screen yet. Seeding it after mount would
   // show the library light for a frame before a remembered dark took hold.
   startTheme();
+  startDisplay();
 
   // The one place the attribute is written; everything else throws the switch
   // and lets it arrive here — see `$lib/theme.svelte`.

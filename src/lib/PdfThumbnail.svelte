@@ -1,6 +1,7 @@
 <script lang="ts">
   import { api, errorMessage } from '$lib/api';
-  import { fetchPage, pageUrl } from '$lib/pdf';
+  import { display } from '$lib/display.svelte';
+  import { fetchPage, paint, pageUrl } from '$lib/pdf';
   import type { ArtifactSummary, PageSize } from '$lib/types';
 
   /**
@@ -52,6 +53,7 @@
     if (!near || !surface || !element) return;
     const build = `${artifact.id}:${artifact.revision}`;
     const dark = invert;
+    const ratio = display.pixelRatio;
 
     const controller = new AbortController();
     void (async () => {
@@ -67,7 +69,7 @@
         // third of the pixels it is shown at.
         const box = element.getBoundingClientRect();
         const cover = Math.max(width / first.width, box.height / first.height || 0);
-        const scale = Math.min(cover, 1) * (window.devicePixelRatio || 1);
+        const scale = Math.min(cover, 1) * ratio;
         const url = pageUrl(artifact.id, artifact.revision, 0, scale, dark);
         // The previous drawing stays up until the new one replaces it, so
         // changing theme never blinks a library full of empty slots.
@@ -78,15 +80,11 @@
           page.bitmap.close();
           return;
         }
-        surface.width = page.width;
-        surface.height = page.height;
         // Shown at the size it was drawn for. Because that size covers the box,
         // whatever hangs over the edge is what the box crops away.
-        const ratio = window.devicePixelRatio || 1;
         surface.style.width = `${page.width / ratio}px`;
         surface.style.height = `${page.height / ratio}px`;
-        surface.getContext('2d', { alpha: false })?.drawImage(page.bitmap, 0, 0);
-        page.bitmap.close();
+        paint(surface, page);
         painted = url;
         renderError = '';
       } catch (reason) {

@@ -57,6 +57,14 @@ pub struct BuildManager {
     pids: Arc<PidRegistry>,
     permits: Arc<Semaphore>,
     state: Mutex<ManagerState>,
+    /// One per version, held for the whole of a build of it.
+    ///
+    /// A version's auxiliary files are reused from one build to the next, so
+    /// two latexmk processes in the same directory corrupt each other's. A
+    /// build that has been cancelled — by a restart, or by closing and
+    /// reopening the document — takes a moment to die, and the build that
+    /// replaces it waits here for that rather than starting beside it.
+    workspaces: std::sync::Mutex<HashMap<BuildKey, Arc<Mutex<()>>>>,
 }
 
 #[derive(Default)]
@@ -99,6 +107,7 @@ impl BuildManager {
             pids: Arc::new(PidRegistry::default()),
             permits: Arc::new(Semaphore::new(MAX_CONCURRENT_BUILDS)),
             state: Mutex::new(ManagerState::default()),
+            workspaces: std::sync::Mutex::new(HashMap::new()),
         }
     }
 
@@ -173,10 +182,42 @@ impl BuildManager {
         project: Project,
         source_ref: SourceRef,
     ) -> AppResult<u64> {
+        self.start(app, project, source_ref, false).await
+    }
+
+    /// Starts this version again from the beginning, abandoning a build of it
+    /// that is still running.
+    ///
+    /// What asking for a rebuild by hand means. A save only marks a running
+    /// build dirty, which is right for saves and useless when the build in
+    /// flight is the problem: a document stuck in a loop, or one whose build
+    /// the reader can see is going to fail. Replaced in one step under the
+    /// lock, so the build being abandoned sees its successor and leaves the
+    /// state alone on the way out.
+    pub async fn restart(
+        self: Arc<Self>,
+        app: AppHandle,
+        project: Project,
+        source_ref: SourceRef,
+    ) -> AppResult<u64> {
+        self.start(app, project, source_ref, true).await
+    }
+
+    async fn start(
+        self: Arc<Self>,
+        app: AppHandle,
+        project: Project,
+        source_ref: SourceRef,
+        restart: bool,
+    ) -> AppResult<u64> {
         let key = (project.id, source_ref.clone());
         let (build_id, cancel) = {
             let mut state = self.state.lock().await;
-            if let Some(active) = state.active.get_mut(&key) {
+            if restart {
+                if let Some(previous) = state.active.remove(&key) {
+                    previous.cancel.cancel();
+                }
+            } else if let Some(active) = state.active.get_mut(&key) {
                 active.dirty = true;
                 return Ok(active.build_id);
             }
@@ -290,6 +331,14 @@ impl BuildManager {
         build_id: u64,
         cancel: Cancel,
     ) {
+        // Waited for before anything is said about this build, so a restart
+        // shows as queued until the build it replaced has actually stopped.
+        let workspace = self.workspace(&(project.id, source_ref.clone()));
+        let _workspace = workspace.lock().await;
+        if cancel.is_cancelled() {
+            return;
+        }
+
         let started = Instant::now();
         let started_at = now();
         self.record(
@@ -364,6 +413,7 @@ impl BuildManager {
             work_directory: self.work_directory(project.id, source_ref),
             log_path: self.log_path(project.id, source_ref),
             artifact_directory: self.artifact_directory(project.id, source_ref),
+            limits: runner::Limits::default(),
         };
 
         let outcome = runner::run(inputs, cancel.clone(), Arc::clone(&self.pids), sink).await;
@@ -651,6 +701,14 @@ impl BuildManager {
         for build in builds {
             build.cancel.cancel();
         }
+    }
+
+    fn workspace(&self, key: &BuildKey) -> Arc<Mutex<()>> {
+        let mut workspaces = self
+            .workspaces
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        Arc::clone(workspaces.entry(key.clone()).or_default())
     }
 
     // -- paths ------------------------------------------------------------

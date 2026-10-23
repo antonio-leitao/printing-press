@@ -41,9 +41,12 @@ export const api = {
 
   closeProject: () => invoke<void>('close_project'),
 
-  /** Defaults to the working tree; a source reference picks a version. */
-  buildProject: (projectId: number, sourceRef?: SourceRef) =>
-    invoke<number>('build_project', { projectId, sourceRef }),
+  /**
+   * Defaults to the working tree; a source reference picks a version. `restart`
+   * abandons a build of that version already running and starts it again.
+   */
+  buildProject: (projectId: number, sourceRef?: SourceRef, restart = false) =>
+    invoke<number>('build_project', { projectId, sourceRef, restart }),
 
   renameProject: (projectId: number, name: string) =>
     invoke<ProjectSummary>('rename_project', { projectId, name }),

@@ -240,41 +240,68 @@ const INVERTED_INK: [u8; 3] = [0xbb, 0xbb, 0xbb];
 /// itself: the ramp is narrower than the range it maps from, so a page put
 /// through it twice comes back flatter. Nothing does that — inversion is a way
 /// of drawing the original page, never of drawing an inverted one.
+///
+/// Almost every pixel on a page is a grey — paper, text, rules — and a grey has
+/// only 256 possible answers, so those are looked up in [`GREYS`] rather than
+/// worked out. That is the difference between this costing twice what MuPDF
+/// spent drawing the page and costing a fraction of it.
 fn darken(samples: &mut [u8]) {
+    let greys = &*GREYS;
     for pixel in samples.chunks_exact_mut(4) {
-        let red = LINEAR[pixel[0] as usize];
-        let green = LINEAR[pixel[1] as usize];
-        let blue = LINEAR[pixel[2] as usize];
-
-        let luminance = 0.2126 * red + 0.7152 * green + 0.0722 * blue;
-        // Flipped as an 8-bit grey rather than in linear light: sRGB's curve is
-        // roughly how brightness is seen, and inverting there is what makes the
-        // flip symmetric instead of dragging every midtone down.
-        let flipped = 255 - encoded(luminance);
-        let (ground, target) = RAMP[flipped as usize];
-
-        // How much colour there is to keep. Measured against the brightest
-        // channel, so it is a proportion rather than an amount: a dark red is
-        // as red as a light one.
-        let high = red.max(green).max(blue);
-        let low = red.min(green).min(blue);
-        let chroma = if high <= f32::EPSILON {
-            0.0
+        if pixel[0] == pixel[1] && pixel[1] == pixel[2] {
+            let grey = greys[pixel[0] as usize];
+            pixel[..3].copy_from_slice(&grey);
         } else {
-            (high - low) / high
-        };
-        if chroma <= f32::EPSILON {
-            // A grey, which is most of a page. Straight onto the ramp.
-            pixel[..3].copy_from_slice(&ground);
-            continue;
+            darken_pixel(pixel);
         }
+    }
+}
 
-        // `high` is above epsilon here, so the luminance cannot be zero.
-        let factor = target / luminance;
-        for (channel, value) in [red, green, blue].into_iter().enumerate() {
-            let scaled = encoded(value * factor);
-            pixel[channel] = mix(ground[channel], scaled, chroma);
-        }
+/// What every grey becomes, worked out once by the same arithmetic as any
+/// other colour, so a table lookup and the long way round can never disagree.
+static GREYS: std::sync::LazyLock<[[u8; 3]; 256]> = std::sync::LazyLock::new(|| {
+    std::array::from_fn(|level| {
+        let level = level as u8;
+        let mut pixel = [level, level, level, 255];
+        darken_pixel(&mut pixel);
+        [pixel[0], pixel[1], pixel[2]]
+    })
+});
+
+/// One pixel, the long way round: see [`darken`].
+fn darken_pixel(pixel: &mut [u8]) {
+    let red = LINEAR[pixel[0] as usize];
+    let green = LINEAR[pixel[1] as usize];
+    let blue = LINEAR[pixel[2] as usize];
+
+    let luminance = 0.2126 * red + 0.7152 * green + 0.0722 * blue;
+    // Flipped as an 8-bit grey rather than in linear light: sRGB's curve is
+    // roughly how brightness is seen, and inverting there is what makes the
+    // flip symmetric instead of dragging every midtone down.
+    let flipped = 255 - encoded(luminance);
+    let (ground, target) = RAMP[flipped as usize];
+
+    // How much colour there is to keep. Measured against the brightest
+    // channel, so it is a proportion rather than an amount: a dark red is
+    // as red as a light one.
+    let high = red.max(green).max(blue);
+    let low = red.min(green).min(blue);
+    let chroma = if high <= f32::EPSILON {
+        0.0
+    } else {
+        (high - low) / high
+    };
+    if chroma <= f32::EPSILON {
+        // A grey. Straight onto the ramp.
+        pixel[..3].copy_from_slice(&ground);
+        return;
+    }
+
+    // `high` is above epsilon here, so the luminance cannot be zero.
+    let factor = target / luminance;
+    for (channel, value) in [red, green, blue].into_iter().enumerate() {
+        let scaled = encoded(value * factor);
+        pixel[channel] = mix(ground[channel], scaled, chroma);
     }
 }
 
@@ -889,6 +916,31 @@ mod tests {
         }
     }
 
+    /// The shortcut for greys is only a shortcut: a page drawn through it is the
+    /// page the long way round would have drawn, pixel for pixel.
+    #[test]
+    fn the_grey_table_changes_nothing_but_the_time() {
+        let mut page = Vec::new();
+        for red in (0..=255).step_by(5) {
+            for green in (0..=255).step_by(15) {
+                for blue in (0..=255).step_by(51) {
+                    page.extend_from_slice(&[red, green, blue, 255]);
+                }
+            }
+        }
+        for level in 0..=255 {
+            page.extend_from_slice(&[level, level, level, 255]);
+        }
+
+        let mut quick = page.clone();
+        darken(&mut quick);
+        let mut slow = page;
+        for pixel in slow.chunks_exact_mut(4) {
+            darken_pixel(pixel);
+        }
+        assert_eq!(quick, slow);
+    }
+
     /// Nothing inverts an already inverted page — the flag picks how the
     /// original is drawn — but the ramp being narrower than the range it maps
     /// from is worth pinning down, because it is the cost of not using pure
@@ -1335,6 +1387,10 @@ mod tests {
         let unscaled = started.elapsed();
 
         let started = Instant::now();
+        let _ = render_page(&document, 0, 2.6, true).unwrap();
+        let inverted = started.elapsed();
+
+        let started = Instant::now();
         let extracted = words(&document, 0).unwrap();
         let words_time = started.elapsed();
 
@@ -1352,6 +1408,7 @@ mod tests {
              page 1 cold     {cold_time:?} -> {}x{} ({} MiB rgba)\n  \
              warm median     {median:?}   (over {sample} pages, slowest {slowest:?})\n  \
              page 1 @1.0x    {unscaled:?}\n  \
+             page 1 inverted {inverted:?}\n  \
              page 1 words    {words_time:?} -> {} words\n  \
              search all      {search_time:?} -> {hits} hits\n",
             pdf.display(),

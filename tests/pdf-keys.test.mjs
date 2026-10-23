@@ -159,3 +159,11 @@ test('arrow keys mirror hjkl', () => {
   assert.equal(type(['PageDown']).resolution.action.amount, 'page');
   assert.deepEqual(type(['Home']).resolution.action, { kind: 'goto', target: 'first' });
 });
+
+test('slash asks for a search, and n and N walk its hits', () => {
+  assert.deepEqual(type(['/']).resolution.action, { kind: 'search' });
+  assert.deepEqual(type(['n']).resolution.action, { kind: 'match', sign: 1, count: 1 });
+  assert.deepEqual(type(['N']).resolution.action, { kind: 'match', sign: -1, count: 1 });
+  // A count skips that many hits, as it does in vim.
+  assert.equal(type(['3', 'n']).resolution.action.count, 3);
+});

@@ -1,108 +1,47 @@
 <script lang="ts">
-  import { onMount, untrack, type Component } from 'svelte';
+  import { onMount, untrack } from 'svelte';
   import { fade } from 'svelte/transition';
   import {
-    Check,
     Download,
     FilePlus,
-    Folder,
-    FolderOpen,
-    Minus,
-    Monitor,
-    Moon,
     Pencil,
     Pin,
     PinOff,
     Settings,
     Stamp,
-    Sun,
-    Trash2,
-    ZoomIn
+    Trash2
   } from '@lucide/svelte';
   import { listen } from '@tauri-apps/api/event';
   import { getCurrentWebview } from '@tauri-apps/api/webview';
   import { open } from '@tauri-apps/plugin-dialog';
+  import NewDocumentDialog, { type NewDocument } from '$lib/NewDocumentDialog.svelte';
   import PdfThumbnail from '$lib/PdfThumbnail.svelte';
-  import TemplateCover from '$lib/TemplateCover.svelte';
   import PdfViewer, { type PeekRequest } from '$lib/PdfViewer.svelte';
-  import { PageVisibilityTracker } from '$lib/pdf-visibility';
+  import SaveTemplateDialog from '$lib/SaveTemplateDialog.svelte';
+  import SettingsDialog from '$lib/SettingsDialog.svelte';
   import { api, errorMessage } from '$lib/api';
   import { fail, notify } from '$lib/messages.svelte';
   import { modal } from '$lib/modal';
-  import { theme, type ThemePreference } from '$lib/theme.svelte';
+  import { theme } from '$lib/theme.svelte';
   import {
     ENGINES,
-    ICON_CHOICES,
     WORKTREE,
     type BuildProgress,
     type BuildUpdate,
     type Engine,
+    type MenuItem,
     type OpenCandidate,
     type OpenRequest,
     type ArtifactSummary,
-    type DocumentKind,
     type EditorCommand,
     type IconChoice,
     type LooseDocument,
-    type PageSize,
     type ProjectSummary,
-    type ProjectFile,
     type SourcePeek,
-    type TemplateScope,
     type TemplateSummary,
     type VersionSummary,
     type WatcherError
   } from '$lib/types';
-
-  /** The three theme preferences, each with the thing it looks like. */
-  const THEME_OPTIONS: Array<{ value: ThemePreference; label: string; icon: Component }> = [
-    { value: 'light', label: 'Light', icon: Sun },
-    { value: 'dark', label: 'Dark', icon: Moon },
-    { value: 'system', label: 'System', icon: Monitor }
-  ];
-
-  type CreationSource = 'blank' | 'template';
-
-  /** The cell a template's page stands in. The shelf's card, because choosing a
-      template is the same act as choosing off the shelf: you are looking at a
-      page and deciding whether it is the one. */
-  const TEMPLATE_PAGE_WIDTH = 150;
-  const TEMPLATE_PAGE_HEIGHT = 194;
-
-  /** What a closer look leaves around the pages, and the room the name under
-      the last of them takes. The rest of the window is the page: the whole
-      point of opening one is that the card was too small to read.
-
-      `.look-column`'s padding is this number — a page is sized to leave the
-      margin, and the column has to actually leave it. */
-  const LOOK_MARGIN = 56;
-  const LOOK_CAPTION = 40;
-
-  /** One scale for every page of a template, the largest at which none of them
-      overflows the window.
-
-      One rather than a fit per page, because these are the pages of a document
-      and a document is read at one size — the reader does the same. Taking the
-      smallest fit is what keeps a landscape page in an upright document from
-      running off the sides. */
-  function lookScale(pages: PageSize[], box: number, tall: number) {
-    return pages.reduce(
-      (smallest, page) => Math.min(smallest, box / page.width, tall / page.height),
-      Number.POSITIVE_INFINITY
-    );
-  }
-
-  /** A page's size once fitted into a cell.
-
-      The card draws its cover into a fixed cell and has to know where the
-      paper's edges landed: the ring goes round them, and the magnifier sits on
-      a corner. Fitted rather than stretched — a template changes the paper, and
-      a beamer slide is not the shape of a pocket book. A closer look fits a
-      whole document rather than one page, which is `lookScale`. */
-  function fitPage(cover: { width: number; height: number }, box: number, tall: number) {
-    const scale = Math.min(box / cover.width, tall / cover.height);
-    return { width: cover.width * scale, height: cover.height * scale };
-  }
 
   /** Matches the `.pinned-card` track width below, so nothing larger is drawn. */
   const PINNED_THUMB_WIDTH = 150
@@ -121,10 +60,12 @@
     ['+ / -', 'zoom in / out'],
     ['0', 'actual size'],
     ['a / s', 'fit page / fit width'],
+    ['/', 'search the document'],
+    ['n / N', 'next / previous match'],
     ['⌃r', 'the dark theme — the page, and Press around it'],
     ['click', 'follow a reference, a citation or a link'],
     ['⌘click', 'the source behind a place in the PDF'],
-    ['R', 'rebuild this version'],
+    ['R', 'rebuild this version, restarting one already running'],
     ['⌘K', 'snapshot the working tree'],
     ['?', 'this list']
   ];
@@ -160,64 +101,17 @@
   let projectName = $state('');
   let projectEngine = $state<Engine>('pdflatex');
 
-  /// Starting a document, which is the one thing Press does that writes source
-  /// into a folder of the reader's. It may begin blank or as a copy of one of
-  /// the reader's templates.
-  let creating = $state(false);
-  let creationSource = $state<CreationSource>('blank');
-  let blankKind = $state<DocumentKind>('latex');
-  let templates = $state<TemplateSummary[]>([]);
-  let templatePick = $state<number | null>(null);
-  /// Whether the chosen template's pages are being looked at closely. The
-  /// gallery stays open underneath: this is a closer look at the thing being
-  /// chosen, not a place of its own, and it is dismissed the way it was asked
-  /// for.
-  let looking = $state(false);
-  /// The pages of the template being looked at. Starts as the one page the card
-  /// already knew about, so the look opens on a page rather than on nothing,
-  /// and grows into the whole document when the layout arrives.
-  let lookPages = $state<PageSize[]>([]);
-  /// Shared observers for that column, so a template of two hundred pages draws
-  /// the two on screen rather than all of them. Made when the look opens and
-  /// disconnected when it closes: it belongs to one column, not to the page.
-  let lookTracker = $state<PageVisibilityTracker | null>(null);
-  /// The window, so a closer look can be as large as the window allows and
-  /// stay that way when the window changes.
-  let windowWidth = $state(1280);
-  let windowHeight = $state(800);
-  let newName = $state('');
+  /// Starting a document: the templates the gallery was opened with, or null
+  /// while it is closed. The questions are NewDocumentDialog's to ask.
+  let gallery = $state<TemplateSummary[] | null>(null);
   /// Remembered between documents. Nobody keeps their papers somewhere new each
   /// time, and the folder is the one part of this that is usually the same.
   let newFolder = $state<string | null>(null);
-
-  /// Keeping a project as stationery: the name it will be chosen by, and which
-  /// of its files go with it.
-  ///
-  /// The listing is fetched when the dialog opens and is Press's own walk, so
-  /// what can be ticked is exactly what a version would hold. `chosen` is a set
-  /// of the same paths, and the document's own is in it and cannot leave.
+  /// Keeping a project as stationery. See SaveTemplateDialog.
   let savingFor = $state<ProjectSummary | null>(null);
-  let templateName = $state('');
-  let templateScope = $state<TemplateScope>('document');
-  let projectFiles = $state<ProjectFile[]>([]);
-  let chosenFiles = $state<Set<string>>(new Set());
-  let listingFiles = $state(false);
 
-  /// Settings: the preferences that belong to Press rather than to a document.
-  ///
-  /// Nothing here has a Save button. Theme and icon are visual and want to be
-  /// seen at once, and a dialog where two of three controls apply themselves
-  /// and the third waits for a button is a dialog you have to read. The command
-  /// is written when the field is left, which is the same rule stated for a
-  /// control that cannot show its effect.
-  let settingsOpen = $state(false);
-  /// What the Editor button runs. A command line rather than a list of editors
-  /// Press knows: an editor Press has never heard of is one line here, and
-  /// anything that will not fit on one line fits in a script, which is a better
-  /// home for it than a table inside Press.
-  let editorCommand = $state('');
-  let editorDefault = $state<EditorCommand | null>(null);
-  let iconChoice = $state<IconChoice>('green');
+  /// Settings, with what it shows already fetched, or null while it is closed.
+  let settings = $state<{ command: EditorCommand; icon: IconChoice } | null>(null);
   let confirmDelete = $state<ProjectSummary | null>(null);
   let confirmDiscard = $state<VersionSummary | null>(null);
 
@@ -283,14 +177,6 @@
   let panel = $state<Panel>('none');
 
   // -- context menu ---------------------------------------------------------
-  type MenuItem = {
-    label: string;
-    icon: Component;
-    run: () => void;
-    disabled?: boolean;
-    /// Destructive: red on hover, and cut off from the items above by a rule.
-    danger?: boolean;
-  };
   let menu = $state<{ x: number; y: number; items: MenuItem[] } | null>(null);
 
   /// Opens the menu where it was asked for. Right-click and the `⋯` button both
@@ -317,7 +203,7 @@
       {
         label: 'Save as template…',
         icon: Stamp,
-        run: () => void openSaveTemplate(project)
+        run: () => (savingFor = project)
       },
       {
         label: 'Download PDF',
@@ -398,69 +284,6 @@
   /// sentence still exists, on the empty screen, where it is the answer to a
   /// question somebody actually has.
   ///
-  const picked = $derived(templates.find((one) => one.id === templatePick) ?? null);
-  const newExtension = $derived(
-    creationSource === 'blank'
-      ? blankKind === 'markdown'
-        ? 'md'
-        : 'tex'
-      : (picked?.entry.split('.').pop() ?? '')
-  );
-
-  /// The listing as a tree, flattened to rows.
-  ///
-  /// Paths sort so that a folder's files are contiguous, which is the whole
-  /// trick: one pass emits a folder row the first time a prefix appears and a
-  /// file row for every file, each carrying the depth to indent by. A tree
-  /// drawn without a recursive component, and one that can be walked to work
-  /// out what a folder's tick should say.
-  const fileRows = $derived.by(() => {
-    const sorted = [...projectFiles].sort((a, b) => a.path.localeCompare(b.path));
-    const rows: Array<{
-      kind: 'folder' | 'file';
-      path: string;
-      name: string;
-      depth: number;
-      byteSize: number;
-      /** Every file under this row: itself, or a folder's descendants. */
-      files: string[];
-    }> = [];
-    const seen = new Set<string>();
-
-    for (const file of sorted) {
-      const parts = file.path.split('/');
-      for (let depth = 0; depth < parts.length - 1; depth += 1) {
-        const prefix = parts.slice(0, depth + 1).join('/');
-        if (seen.has(prefix)) continue;
-        seen.add(prefix);
-        const under = sorted.filter((one) => one.path.startsWith(`${prefix}/`));
-        rows.push({
-          kind: 'folder',
-          path: prefix,
-          name: parts[depth],
-          depth,
-          byteSize: under.reduce((total, one) => total + one.byteSize, 0),
-          files: under.map((one) => one.path)
-        });
-      }
-      rows.push({
-        kind: 'file',
-        path: file.path,
-        name: parts[parts.length - 1],
-        depth: parts.length - 1,
-        byteSize: file.byteSize,
-        files: [file.path]
-      });
-    }
-    return rows;
-  });
-
-  const chosenBytes = $derived(
-    projectFiles
-      .filter((file) => chosenFiles.has(file.path))
-      .reduce((total, file) => total + file.byteSize, 0)
-  );
-
   const librarySummary = $derived.by(() => {
     const names: Record<string, string> = { latex: 'LaTeX', markdown: 'Markdown' };
     const counts = new Map<string, number>();
@@ -475,7 +298,7 @@
     Boolean(
       choosing ||
         projectFor ||
-        settingsOpen ||
+        settings ||
         confirmDelete ||
         confirmDiscard ||
         snapshotOpen ||
@@ -629,7 +452,7 @@
         const isN = event.code === 'KeyN' || event.key.toLowerCase() === 'n';
         if ((event.metaKey || event.ctrlKey) && !event.altKey && isN) {
           event.preventDefault();
-          if (!creating) void openGallery();
+          if (!gallery) void openGallery();
           return;
         }
         return;
@@ -1027,10 +850,12 @@
     return `${Math.floor(elapsed / 31536000)}y`;
   }
 
+  /// By hand, so it starts over even when a build is already running: that
+  /// build is usually the reason for asking.
   async function rebuild() {
     if (!activeProject) return;
     try {
-      await api.buildProject(activeProject.id, selectedRef);
+      await api.buildProject(activeProject.id, selectedRef, true);
     } catch (reason) {
       fail(reason);
     }
@@ -1051,63 +876,14 @@
 
   // -- preferences -----------------------------------------------------------
 
+  /// Fetched before the dialog opens, so it never appears half filled in.
   async function openSettings() {
     try {
       const [command, icon] = await Promise.all([api.editorCommand(), api.iconChoice()]);
-      editorDefault = command;
-      // An unset command shows the default it is standing in for, so that
-      // editing it is a change to something visible rather than to a blank.
-      editorCommand = command.command;
-      iconChoice = icon;
-      settingsOpen = true;
+      settings = { command, icon };
     } catch (reason) {
       fail(reason);
     }
-  }
-
-  /// The command, written when the field is left rather than on every keystroke.
-  ///
-  /// Called from blur and from closing the dialog, which between them cover
-  /// every way of being finished with it — and it is worth nothing to write the
-  /// same string twice, so neither has to know about the other.
-  async function saveEditorCommand() {
-    // Nothing is known about the command until the dialog has fetched it, and
-    // writing before then would save a field that is still empty over a command
-    // that is not.
-    if (!editorDefault) return;
-    const wanted = editorCommand.trim();
-    if (wanted === editorDefault.command.trim()) return;
-    try {
-      await api.setEditorCommand(wanted);
-      // What was saved is what the field now stands for, so a second blur has
-      // nothing left to do.
-      editorDefault = { ...editorDefault, command: wanted };
-    } catch (reason) {
-      fail(reason);
-    }
-  }
-
-  /// The icon, applied at once — it is a picture, and a picture you have to
-  /// press Save to see is a picture you cannot choose between.
-  async function chooseIcon(name: IconChoice) {
-    const previous = iconChoice;
-    iconChoice = name;
-    try {
-      const shown = await api.setIconChoice(name);
-      if (!shown) {
-        // A development build is a bare binary with no bundle to write on. The
-        // choice is stored and will be worn by the next installed Press.
-        notify('Icon saved. A development build has no bundle to show it on.');
-      }
-    } catch (reason) {
-      iconChoice = previous;
-      fail(reason);
-    }
-  }
-
-  async function closeSettings() {
-    await saveEditorCommand();
-    settingsOpen = false;
   }
 
   // -- templates -------------------------------------------------------------
@@ -1118,91 +894,11 @@
   async function openGallery() {
     busy = true;
     try {
-      templates = await api.listTemplates();
-      creationSource = 'blank';
-      templatePick = null;
-      closeLook();
-      newName = '';
-      creating = true;
+      gallery = await api.listTemplates();
     } catch (reason) {
       fail(reason);
     } finally {
       busy = false;
-    }
-  }
-
-  function closeGallery() {
-    creating = false;
-    templatePick = null;
-    closeLook();
-  }
-
-  function chooseCreationSource(source: CreationSource) {
-    creationSource = source;
-    if (source === 'blank') closeLook();
-  }
-
-  /// Space on a card is the closer look — Quick Look's key, for the same act.
-  /// On the card rather than on the dialog, because everywhere else in here
-  /// Space is what it always is: the name field takes a space, and Create takes
-  /// a press.
-  function cardKeys(event: KeyboardEvent, template: TemplateSummary) {
-    if (event.key !== ' ' && event.code !== 'Space') return;
-    if (!template.cover) return;
-    // Or the card would be pressed as well, this being a button.
-    event.preventDefault();
-    look(template);
-  }
-
-  /// The chosen template, opened large. Choosing it is part of asking: what is
-  /// being looked at closely is what Create would make, and there is no second
-  /// kind of chosen.
-  function look(template: TemplateSummary) {
-    if (!template.cover) return;
-    templatePick = template.id;
-    lookPages = [template.cover];
-    lookTracker?.disconnect();
-    lookTracker = new PageVisibilityTracker(null);
-    looking = true;
-    void loadLookPages(template);
-  }
-
-  function closeLook() {
-    looking = false;
-    lookPages = [];
-    lookTracker?.disconnect();
-    lookTracker = null;
-  }
-
-  /// The rest of the document behind the cover.
-  ///
-  /// Asked for once a look is open rather than with the gallery: it is a read
-  /// of a PDF per template, and a shelf of them would pay for every template to
-  /// answer a question about one.
-  async function loadLookPages(template: TemplateSummary) {
-    try {
-      const pages = await api.templateLayout(template.id);
-      // Only if this is still what is being looked at — the layout is a round
-      // trip, and a second one can have been opened in the meantime.
-      if (looking && templatePick === template.id && pages.length > 0) lookPages = pages;
-    } catch {
-      // The cover is already up and is what the card showed. A template whose
-      // kept PDF cannot be read past its first page is not worth interrupting
-      // the choice for.
-    }
-  }
-
-  async function chooseFolder() {
-    try {
-      const selected = await open({
-        directory: true,
-        multiple: false,
-        title: 'Choose a folder',
-        defaultPath: newFolder ?? undefined
-      });
-      if (typeof selected === 'string') newFolder = selected;
-    } catch (reason) {
-      fail(reason);
     }
   }
 
@@ -1211,17 +907,14 @@
   /// A document that has just been made is one that is about to be written, so
   /// the editor is started with it. Press has done its half of `write + (compile
   /// + view)`; this is the other half being handed over.
-  async function createDocument() {
-    if (!newFolder || !newName.trim() || (creationSource === 'template' && !picked)) return;
+  async function createDocument(request: NewDocument) {
     busy = true;
     try {
       const project =
-        creationSource === 'blank'
-          ? await api.createBlankDocument(blankKind, newFolder, newName.trim())
-          : await api.createFromTemplate(picked!.id, newFolder, newName.trim());
-      creating = false;
-      templatePick = null;
-      closeLook();
+        request.source === 'blank'
+          ? await api.createBlankDocument(request.kind, request.folder, request.name)
+          : await api.createFromTemplate(request.template.id, request.folder, request.name);
+      gallery = null;
       projects = [project, ...projects.filter((item) => item.id !== project.id)];
       await openProject(project);
       // Not worth failing the creation over: the document exists and is open,
@@ -1231,121 +924,6 @@
       } catch (reason) {
         notify(errorMessage(reason), 'error');
       }
-    } catch (reason) {
-      fail(reason);
-    } finally {
-      busy = false;
-    }
-  }
-
-  function templateMenu(template: TemplateSummary): MenuItem[] {
-    return [
-      {
-        label: 'Remove…',
-        icon: Trash2,
-        danger: true,
-        run: () => void removeTemplate(template)
-      }
-    ];
-  }
-
-  /// No confirmation. A template is a copy of something that still exists, so
-  /// removing one loses nothing that cannot be saved again from the document it
-  /// came from — which is not true of a project, and is why that one asks.
-  async function removeTemplate(template: TemplateSummary) {
-    try {
-      await api.deleteTemplate(template.id);
-      templates = templates.filter((one) => one.id !== template.id);
-      if (templatePick === template.id) {
-        templatePick = null;
-        closeLook();
-      }
-    } catch (reason) {
-      fail(reason);
-    }
-  }
-
-  async function openSaveTemplate(project: ProjectSummary) {
-    savingFor = project;
-    // The document's own name without its extension. The project's name carries
-    // the folder above it, which is what tells two `main.tex`es apart in a
-    // library and is not what a template wants to be called.
-    templateName = project.fileName.replace(/\.[^.]+$/, '');
-    templateScope = 'document';
-    chosenFiles = new Set([project.fileName]);
-    projectFiles = [];
-    // Fetched with the dialog rather than when the tree is asked for, so
-    // choosing to select files shows them rather than a wait.
-    listingFiles = true;
-    try {
-      projectFiles = await api.projectFiles(project.id);
-    } catch (reason) {
-      fail(reason);
-    } finally {
-      listingFiles = false;
-    }
-  }
-
-  /// The document alone, or all of it and then strike things out. Starting the
-  /// tree fully ticked is the honest default for a choice named "select files":
-  /// what is on screen when it opens is what will be kept if nothing is touched.
-  function chooseScope(scope: TemplateScope) {
-    templateScope = scope;
-    const entry = savingFor?.fileName;
-    chosenFiles =
-      scope === 'document'
-        ? new Set(entry ? [entry] : [])
-        : new Set(projectFiles.map((file) => file.path));
-  }
-
-  /// The document's own file cannot be struck out: a template without it is not
-  /// a template, and the backend refuses one for the same reason.
-  function locked(path: string) {
-    return path === savingFor?.fileName;
-  }
-
-  /// A folder is ticked when everything under it is. Half of it is neither, and
-  /// says so with a dash rather than by rounding to one of the two.
-  function tickState(files: string[]): 'all' | 'some' | 'none' {
-    const held = files.filter((path) => chosenFiles.has(path)).length;
-    if (held === 0) return 'none';
-    return held === files.length ? 'all' : 'some';
-  }
-
-  /// Reassigned rather than mutated: a `Set` changed in place is the same `Set`,
-  /// and nothing downstream would hear about it.
-  function toggleFiles(files: string[]) {
-    const next = new Set(chosenFiles);
-    if (tickState(files) === 'all') {
-      for (const path of files) if (!locked(path)) next.delete(path);
-    } else {
-      for (const path of files) next.add(path);
-    }
-    chosenFiles = next;
-  }
-
-  /// Bytes as a person reads them. Only ever describing a selection, so one
-  /// decimal on the way up and none below a kilobyte.
-  function readableSize(bytes: number) {
-    if (bytes < 1024) return `${bytes} B`;
-    const units = ['kB', 'MB', 'GB'];
-    let value = bytes / 1024;
-    let unit = 0;
-    while (value >= 1024 && unit < units.length - 1) {
-      value /= 1024;
-      unit += 1;
-    }
-    return `${value < 10 ? value.toFixed(1) : Math.round(value)} ${units[unit]}`;
-  }
-
-  async function saveTemplate() {
-    const project = savingFor;
-    if (!project || !templateName.trim() || chosenFiles.size === 0) return;
-    busy = true;
-    try {
-      await api.saveAsTemplate(project.id, templateName.trim(), [...chosenFiles]);
-      savingFor = null;
-      notify(`Saved “${templateName.trim()}” as a template.`);
     } catch (reason) {
       fail(reason);
     } finally {
@@ -1654,8 +1232,6 @@
     if (viewerError) notify(viewerError, 'error');
   });
 </script>
-
-<svelte:window bind:innerWidth={windowWidth} bind:innerHeight={windowHeight} />
 
 {#if reading}
   <main class="reader">
@@ -2079,91 +1655,13 @@
   </dialog>
 {/if}
 
-{#if settingsOpen}
-  <dialog
-    class="settings"
-    use:modal={closeSettings}
-    aria-labelledby="settings-title"
-  >
-    <h2 id="settings-title">Settings</h2>
-
-    <section>
-      <h3>Theme</h3>
-      <!-- The same switch as ⌃r, not a second preference that has to agree with
-           it. System is not a third way for a page to look — it is declining to
-           choose, and it follows macOS for as long as it is set. -->
-      <div class="choices" role="radiogroup" aria-label="Theme">
-        {#each THEME_OPTIONS as option (option.value)}
-          <button
-            class="choice"
-            role="radio"
-            aria-checked={theme.preference === option.value}
-            onclick={() => (theme.preference = option.value)}
-          >
-            <option.icon size={16} strokeWidth={1.75} aria-hidden="true" />
-            {option.label}
-          </button>
-        {/each}
-      </div>
-    </section>
-
-    <section>
-      <h3>Icon</h3>
-      <!-- No names under these. They are pictures, and the thing a picture is
-           called adds nothing to choosing between three of them you can see. -->
-      <div class="choices" role="radiogroup" aria-label="Dock icon">
-        {#each ICON_CHOICES as name (name)}
-          <button
-            class="choice tile"
-            role="radio"
-            aria-checked={iconChoice === name}
-            onclick={() => chooseIcon(name)}
-            title={name}
-            aria-label={name}
-          >
-            <img src="/icons/press-{name}.png" alt="" width="72" height="72" />
-            <span class="dot" aria-hidden="true"></span>
-          </button>
-        {/each}
-      </div>
-    </section>
-
-    <section>
-      <h3>Editor</h3>
-      <label>
-        Command
-        <input
-          bind:value={editorCommand}
-          spellcheck="false"
-          autocapitalize="off"
-          autocorrect="off"
-          onblur={saveEditorCommand}
-          onkeydown={(event) => {
-            if (event.key === 'Enter') saveEditorCommand();
-          }}
-        />
-      </label>
-      <p class="quiet">
-        What the Editor button runs. <code>{'{file}'}</code> is the document and
-        <code>{'{dir}'}</code> its folder; quote anything with a space in it. Left empty, the
-        document opens in whatever your system uses for that kind of file.
-      </p>
-      {#if editorDefault && editorCommand.trim() !== editorDefault.suggested}
-        <p class="quiet">
-          Suggested for this machine:
-          <button class="link" onclick={() => (editorCommand = editorDefault?.suggested ?? '')}>
-            <code>{editorDefault.suggested}</code>
-          </button>
-        </p>
-      {/if}
-    </section>
-
-    <!-- One button, and it is not Save. Everything here has applied itself
-         already; this only puts the dialog away. -->
-    <div class="dialog-actions">
-      <button onclick={closeSettings} disabled={busy}>Done</button>
-    </div>
-  </dialog>
+{#if settings}
+  <SettingsDialog
+    command={settings.command}
+    icon={settings.icon}
+    {busy}
+    onclose={() => (settings = null)}
+  />
 {/if}
 
 {#if projectFor}
@@ -2192,317 +1690,19 @@
   </dialog>
 {/if}
 
-{#if creating}
-  <!-- Wider than the rest so the template branch has room to compare pages.
-       Still a dialog: starting a document is one act with a few questions in
-       it, not a place of its own. -->
-  <dialog class="gallery" use:modal={closeGallery} aria-labelledby="gallery-title">
-    <h2 id="gallery-title">New document</h2>
-
-    <div class="scopes creation-options" role="radiogroup" aria-label="How to begin">
-      <button
-        class="scope"
-        role="radio"
-        aria-checked={creationSource === 'blank'}
-        onclick={() => chooseCreationSource('blank')}
-      >
-        <strong>Blank document</strong>
-        <span class="quiet">Start with a new Markdown or LaTeX file.</span>
-      </button>
-      <button
-        class="scope"
-        role="radio"
-        aria-checked={creationSource === 'template'}
-        onclick={() => chooseCreationSource('template')}
-      >
-        <strong>From a template</strong>
-        <span class="quiet">
-          {templates.length === 0
-            ? 'No saved templates yet.'
-            : `${templates.length} saved ${templates.length === 1 ? 'template' : 'templates'}.`}
-        </span>
-      </button>
-    </div>
-
-    {#if creationSource === 'blank'}
-      <h3>Format</h3>
-      <div class="scopes creation-options" role="radiogroup" aria-label="Document format">
-        <button
-          class="scope"
-          role="radio"
-          aria-checked={blankKind === 'markdown'}
-          onclick={() => (blankKind = 'markdown')}
-        >
-          <strong>Markdown</strong>
-          <span class="quiet">An empty <code>.md</code> file.</span>
-        </button>
-        <button
-          class="scope"
-          role="radio"
-          aria-checked={blankKind === 'latex'}
-          onclick={() => (blankKind = 'latex')}
-        >
-          <strong>LaTeX</strong>
-          <span class="quiet">A minimal article with a blank page.</span>
-        </button>
-      </div>
-    {:else}
-      <h3>Templates</h3>
-      {#if templates.length === 0}
-        <p class="quiet gallery-empty">
-          Right-click a document in the library and choose <strong>Save as template</strong>. Press
-          keeps a copy without changing the original.
-        </p>
-      {:else}
-        <div class="gallery-shelf">
-          <div class="template-grid">
-            {#each templates as template (template.id)}
-              {@const paper =
-                template.cover
-                  ? fitPage(template.cover, TEMPLATE_PAGE_WIDTH, TEMPLATE_PAGE_HEIGHT)
-                  : null}
-              <article class="template-card" class:chosen={templatePick === template.id}>
-                <button
-                  class="template-open"
-                  onclick={() => (templatePick = template.id)}
-                  ondblclick={() => void createDocument()}
-                  onkeydown={(event) => cardKeys(event, template)}
-                  oncontextmenu={(event) => openMenu(event, templateMenu(template))}
-                  aria-pressed={templatePick === template.id}
-                >
-                  <span class="template-page">
-                    {#if template.cover && paper}
-                      <TemplateCover
-                        id={template.id}
-                        cover={template.cover}
-                        width={paper.width}
-                        height={paper.height}
-                        invert={dark}
-                      />
-                    {:else}
-                      <span class="template-blank">No page yet</span>
-                    {/if}
-                  </span>
-                  <span class="template-lines">
-                    <strong class="name">{template.name}</strong>
-                    <span class="template-files">
-                      {template.kind === 'markdown' ? 'Markdown' : 'LaTeX'}{template.fileCount > 1
-                        ? ` · ${template.fileCount} files`
-                        : ''}
-                    </span>
-                  </span>
-                </button>
-
-                {#if paper}
-                  <button
-                    class="template-look"
-                    style="top: {TEMPLATE_PAGE_HEIGHT - paper.height + 6}px; right: {(TEMPLATE_PAGE_WIDTH - paper.width) / 2 + 6}px"
-                    tabindex="-1"
-                    onclick={() => look(template)}
-                    title="Look closer"
-                    aria-label="Look closer at {template.name}"
-                  >
-                    <ZoomIn size={13} strokeWidth={2} aria-hidden="true" />
-                  </button>
-                {/if}
-              </article>
-            {/each}
-          </div>
-        </div>
-      {/if}
-    {/if}
-
-    <div class="create-row">
-      <label class="create-field">
-        Name
-        <span class="create-name">
-          <input
-            bind:value={newName}
-            placeholder="untitled"
-            spellcheck="false"
-            autocapitalize="off"
-            autocorrect="off"
-            onkeydown={(event) => {
-              if (event.key === 'Enter') void createDocument();
-            }}
-          />
-          {#if newExtension}<span class="create-extension">.{newExtension}</span>{/if}
-        </span>
-      </label>
-
-      <label class="create-field folder">
-        Folder
-        <button class="create-folder" onclick={chooseFolder} title={newFolder ?? ''}>
-          <FolderOpen size={14} strokeWidth={1.75} aria-hidden="true" />
-          <span>{newFolder ?? 'Choose…'}</span>
-        </button>
-      </label>
-    </div>
-
-    <div class="dialog-actions">
-      <button onclick={closeGallery} disabled={busy}>Cancel</button>
-      <button
-        onclick={createDocument}
-        disabled={busy || !newFolder || !newName.trim() ||
-          (creationSource === 'template' && !picked)}
-      >
-        {busy ? 'Creating…' : 'Create'}
-      </button>
-    </div>
-  </dialog>
-{/if}
-
-{#if creating && looking && picked && lookPages.length > 0}
-  <!-- A closer look at the chosen template: its pages, at the size the window
-       allows, in a column that scrolls — the same document the reader would
-       show, read the same way.
-
-       Its own modal dialog rather than a layer inside the gallery, and for one
-       reason: only the top layer can cover a dialog, and what is wanted here is
-       a page larger than the dialog the choice is being made in. The gallery
-       stays open and untouched underneath, so this adds a step to the act
-       rather than a place to be — Escape, Space or a click puts it back.
-
-       A sibling of the gallery in the markup and not a child of it, so that the
-       Escape closing this one never reaches the one behind. -->
-  {@const zoom = lookScale(
-    lookPages,
-    windowWidth - LOOK_MARGIN * 2,
-    windowHeight - LOOK_MARGIN * 2 - LOOK_CAPTION
-  )}
-  <dialog class="look" use:modal={closeLook} aria-label={picked.name}>
-    <!-- The window is the button: anywhere off the pages dismisses, and so do
-         the pages, because there is nothing else to do here. One control, so
-         Enter and Space land on it without being asked to — and Space is what
-         closes a Quick Look, not what pages it. The column inside is a span
-         rather than a div because a button may only hold phrasing content;
-         scrolling it works the same. -->
-    <button class="look-away" onclick={closeLook} aria-label="Close">
-      <span class="look-scroll">
-        <span class="look-column">
-          {#each lookPages as size, index (index)}
-            <TemplateCover
-              id={picked.id}
-              page={index}
-              cover={size}
-              width={size.width * zoom}
-              height={size.height * zoom}
-              invert={dark}
-              tracker={lookTracker}
-            />
-          {/each}
-          <!-- After the last page, the way a colophon is. Which template this
-               is, and how much of it there was — the count is only worth saying
-               once there is more than the one page everybody sees. -->
-          <span class="look-name">
-            {picked.name}{lookPages.length > 1 ? ` · ${lookPages.length} pages` : ''}
-          </span>
-        </span>
-      </span>
-    </button>
-  </dialog>
+{#if gallery}
+  <NewDocumentDialog
+    templates={gallery}
+    bind:folder={newFolder}
+    {busy}
+    onclose={() => (gallery = null)}
+    oncreate={(request) => void createDocument(request)}
+    onmenu={openMenu}
+  />
 {/if}
 
 {#if savingFor}
-  <dialog use:modal={() => (savingFor = null)} aria-labelledby="template-title">
-    <h2 id="template-title">Save as template</h2>
-    <p class="quiet">
-      A copy of {savingFor.fileName} as it stands now. The project is untouched, and editing it
-      later does not change the template.
-    </p>
-    <label>
-      Name
-      <input
-        bind:value={templateName}
-        maxlength="60"
-        onkeydown={(event) => {
-          if (event.key === 'Enter') void saveTemplate();
-        }}
-      />
-    </label>
-
-    <!-- Two answers rather than a list of files to tick. There are two intents
-         here — a house style, and a project you want to begin from again — and
-         ticking files serves neither. -->
-    <div class="scopes" role="radiogroup" aria-label="What the template keeps">
-      <button
-        class="scope"
-        role="radio"
-        aria-checked={templateScope === 'document'}
-        onclick={() => chooseScope('document')}
-      >
-        <strong>The document alone</strong>
-        <span class="quiet">One file, whatever else is in the folder with it.</span>
-      </button>
-      <button
-        class="scope"
-        role="radio"
-        aria-checked={templateScope === 'project'}
-        onclick={() => chooseScope('project')}
-        disabled={listingFiles}
-      >
-        <strong>Select files</strong>
-        <span class="quiet">
-          {#if listingFiles}
-            Reading the folder…
-          {:else}
-            Everything it compiles with, minus whatever you strike out.
-          {/if}
-        </span>
-      </button>
-    </div>
-
-    {#if templateScope === 'project'}
-      <!-- Only what a version would hold: build output, editor scratch, `.git`
-           and a neighbour's document are not in the listing at all, so they
-           cannot be ticked back in. The document's own row is ticked and
-           locked — a template without it is not a template. -->
-      <div class="tree" role="group" aria-label="Files to keep">
-        {#each fileRows as row (row.path)}
-          {@const state = tickState(row.files)}
-          {@const fixed = row.kind === 'file' && locked(row.path)}
-          <button
-            class="tree-row"
-            class:folder={row.kind === 'folder'}
-            class:fixed
-            style="padding-left: calc({row.depth} * 1.1rem + 0.4rem)"
-            aria-pressed={state !== 'none'}
-            disabled={fixed}
-            title={fixed ? 'The document itself is always kept' : row.path}
-            onclick={() => toggleFiles(row.files)}
-          >
-            <span class="tick" class:on={state !== 'none'}>
-              {#if state === 'all'}
-                <Check size={11} strokeWidth={3} aria-hidden="true" />
-              {:else if state === 'some'}
-                <Minus size={11} strokeWidth={3} aria-hidden="true" />
-              {/if}
-            </span>
-            {#if row.kind === 'folder'}
-              <Folder size={13} strokeWidth={1.75} aria-hidden="true" />
-            {/if}
-            <span class="tree-name">{row.name}</span>
-            <span class="tree-size">{readableSize(row.byteSize)}</span>
-          </button>
-        {/each}
-      </div>
-
-      <p class="quiet tree-total">
-        {chosenFiles.size}
-        {chosenFiles.size === 1 ? 'file' : 'files'}, {readableSize(chosenBytes)}
-      </p>
-    {/if}
-
-    <div class="dialog-actions">
-      <button onclick={() => (savingFor = null)} disabled={busy}>Cancel</button>
-      <button
-        onclick={saveTemplate}
-        disabled={busy || !templateName.trim() || chosenFiles.size === 0}
-      >
-        {busy ? 'Saving…' : 'Save'}
-      </button>
-    </div>
-  </dialog>
+  <SaveTemplateDialog project={savingFor} {busy} onclose={() => (savingFor = null)} />
 {/if}
 
 {#if confirmDelete}
@@ -2761,10 +1961,6 @@
     overflow-wrap: anywhere;
   }
 
-  dialog textarea {
-    width: 100%;
-  }
-
   /* The same surface as the viewer, shown when a version has no PDF yet — so it
      matches, rather than flashing a different colour when one is selected. */
   .empty {
@@ -2841,8 +2037,7 @@
     height: 2.375rem;
   }
 
-  .library-actions,
-  .dialog-actions {
+  .library-actions {
     display: flex;
     align-items: center;
     gap: 0.75rem;
@@ -3258,514 +2453,6 @@
     text-align: center;
   }
 
-  /* The shelf's card, at the shelf's size: choosing a template is choosing off
-     a shelf of covers, so it is drawn the same way. A grid rather than a
-     scrolling row, because comparison is the whole task here and a carousel
-     hides half of what is being compared. */
-  .template-grid {
-    display: grid;
-    grid-template-columns: repeat(auto-fill, var(--shelf-thumb-w));
-    justify-content: start;
-    gap: var(--grid-gap-y) var(--grid-gap-x);
-  }
-
-  /* Room for the ring, which is drawn outside the page so that it never covers
-     a millimetre of what is being chosen. Positioned because the magnifier is
-     placed against it — see .template-look. */
-  .template-card {
-    position: relative;
-    border: 0;
-    border-radius: 0;
-    overflow: visible;
-    width: var(--shelf-thumb-w);
-  }
-
-  /* Centred, because the page above is: a template's paper is whatever shape it
-     was saved at, and a name set flush to the left of the box would hang off
-     the edge of a page narrower than the box every time. */
-  .template-open {
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-md);
-    width: 100%;
-    padding: 0;
-    border: 0;
-    background: none;
-    text-align: center;
-    cursor: pointer;
-  }
-
-  .template-page {
-    display: grid;
-    place-items: end center;
-    width: var(--shelf-thumb-w);
-    height: var(--shelf-thumb-h);
-  }
-
-  /* The ring, in the three states that wear one. It is not drawn here: it is
-     handed down as --cover-ring and lands on the page inside — see
-     TemplateCover — so that a landscape template is ringed at its own edges and
-     not at the box's. The order is the precedence, all three being equally
-     specific: the pointer, then the keyboard, then the choice, which outranks
-     both because it is the only one that persists.
-
-     Nothing is written on the card to say it is chosen: there is one accent
-     ring on the screen and it is unmistakable. */
-  .template-card:hover .template-page {
-    --cover-ring: 0 0 0 2px var(--line-3);
-  }
-
-  .template-open:focus-visible .template-page {
-    --cover-ring: 0 0 0 2px var(--accent-line);
-  }
-
-  .template-card.chosen .template-page {
-    --cover-ring: 0 0 0 2px var(--accent-strong);
-  }
-
-  /* The card is the page, so the focus ring is the page's; a box drawn round
-     the caption as well would be a rectangle nothing on the card matches. */
-  .template-open:focus-visible {
-    outline: none;
-  }
-
-  /* The closer look, resting on the page's top corner — the corner of a page
-     with least on it — and only while the pointer is on the card. A card is
-     read by its picture, and a control parked on every one of them all the time
-     is nine small buttons on a shelf that is meant to be nine pages.
-
-     Its own square of the interface rather than a shape cut into the paper:
-     what is underneath is the thing being judged, and it should look like
-     something set down on the page rather than something missing from it. */
-  .template-look {
-    position: absolute;
-    z-index: 1;
-    display: grid;
-    place-items: center;
-    width: 1.375rem;
-    height: 1.375rem;
-    padding: 0;
-    border: var(--bw) solid var(--line-2);
-    border-radius: var(--radius-sm);
-    background: var(--card);
-    color: var(--ink-2);
-    box-shadow: var(--shadow-md);
-    opacity: 0;
-    cursor: zoom-in;
-    transition:
-      opacity var(--duration),
-      color var(--duration),
-      border-color var(--duration);
-  }
-
-  .template-card:hover .template-look {
-    opacity: 1;
-  }
-
-  .template-look:hover {
-    border-color: var(--line-3);
-    color: var(--ink);
-  }
-
-  /* Nothing hovers on a touch screen, so nothing would ever reveal it. */
-  @media (hover: none) {
-    .template-look {
-      opacity: 1;
-    }
-  }
-
-  /* Never compiled when it was kept. Set in the page's own shape so the shelf
-     keeps its rhythm, and quiet, because it is the absence of a picture rather
-     than a warning about one. */
-  .template-blank {
-    display: grid;
-    place-items: center;
-    width: 100%;
-    height: 100%;
-    border: var(--bw) dashed var(--line-2);
-    border-radius: var(--radius);
-    box-shadow: var(--cover-ring, 0 0 #0000);
-    color: var(--ink-3);
-    font-size: var(--fs-meta);
-    transition: box-shadow var(--duration);
-  }
-
-  /* The caption, centred under the paper, which is how every page-shaped card
-     in Press is captioned — see .pinned-name. Centred on the cell and the page
-     both, the two having the same middle: the page is centred in the cell above
-     it. */
-  .template-lines {
-    display: grid;
-    justify-items: center;
-    gap: var(--space-xs);
-    width: 100%;
-    min-width: 0;
-    text-align: center;
-  }
-
-  /* The quiet tier, in the interface's own face. The library's .where is
-     monospace because it is a path and is read character by character; this is
-     a count, and setting it in the same face made a caption look like a
-     fragment of source. */
-  .template-files {
-    display: block;
-    width: 100%;
-    color: var(--ink-3);
-    font-size: var(--fs-meta);
-    line-height: 1.2;
-    text-align: center;
-  }
-
-  /* Wide enough for three pages across, which is as many as can be compared
-     without the eye having to travel. The shelf scrolls inside; the questions
-     under it do not, so they are in the same place whatever is above them. */
-  dialog.gallery {
-    width: min(38rem, calc(100% - 2rem));
-  }
-
-  .gallery-shelf {
-    max-height: min(26rem, 45vh);
-    overflow-y: auto;
-    /* Room for the selection ring, which is drawn outside the page and would
-       otherwise be clipped by the scroller's edge. */
-    padding: 3px;
-    margin-bottom: var(--space-lg);
-  }
-
-  .creation-options {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-
-  .gallery-empty {
-    margin-bottom: var(--space-lg);
-  }
-
-  /* The closer look is the window: no card, no border, no shadow of its own.
-     Everything a dialog is drawn with would be a frame around a page, and a
-     page has an edge already — the only thing wanted here is the paper, as
-     large as the window will hold it, on a room turned down. */
-  dialog.look {
-    width: 100vw;
-    height: 100vh;
-    max-width: none;
-    max-height: none;
-    padding: 0;
-    overflow: hidden;
-    border: 0;
-    border-radius: 0;
-    background: transparent;
-    box-shadow: none;
-  }
-
-  /* Deeper than a dialog's, because what is behind this one is a dialog: a
-     white page laid over a card of near-white keeps no edge, however good the
-     shadow under it. */
-  dialog.look::backdrop {
-    background: var(--backdrop-deep);
-  }
-
-  .look-away {
-    display: block;
-    width: 100%;
-    height: 100%;
-    padding: 0;
-    border: 0;
-    background: none;
-    cursor: zoom-out;
-  }
-
-  .look-away:focus-visible {
-    outline: none;
-  }
-
-  .look-scroll {
-    display: flex;
-    flex-direction: column;
-    height: 100%;
-    overflow-y: auto;
-    /* The gallery is behind this and does not scroll with it. */
-    overscroll-behavior: contain;
-  }
-
-  /* `margin: auto` and not `justify-content`, which is the difference between a
-     single page sitting in the middle of the window and a long template having
-     its first page cut off above the top of the scroller. An auto margin gives
-     up when there is no room to give; centring does not.
-
-     The gutter between pages is the reader's own — see PdfPage — because this
-     is the same column of paper. The corners are square for the same reason.
-
-     The padding is LOOK_MARGIN, which is what the pages were sized to leave. */
-  .look-column {
-    --cover-radius: 0;
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    gap: var(--space-lg);
-    margin: auto;
-    padding-block: 3.5rem;
-  }
-
-  /* After the last page: which template this was, and how long. The gallery
-     behind is covered, so the name has to be here; everything else about it was
-     on the card. */
-  .look-name {
-    color: var(--ink);
-    font-size: var(--fs-card);
-    font-weight: 600;
-  }
-
-  /* The same eyebrow the settings sections wear. */
-  dialog.gallery h3 {
-    margin-bottom: var(--space-md);
-    color: var(--ink-3);
-    font-size: var(--fs-label);
-    font-weight: var(--fw-label);
-    letter-spacing: var(--tracking-label);
-    text-transform: uppercase;
-  }
-
-  @media (max-width: 34rem) {
-    .creation-options {
-      grid-template-columns: 1fr;
-    }
-  }
-
-  /* The name takes the room, the folder takes what it needs, and they sit on
-     one line because they are one sentence: call it this, put it there. */
-  .create-row {
-    display: flex;
-    align-items: flex-end;
-    gap: var(--space-md);
-    margin-bottom: var(--space-lg);
-  }
-
-  .create-field {
-    display: grid;
-    gap: var(--space-xs);
-    margin: 0;
-    color: var(--ink-3);
-    font-size: var(--fs-meta);
-  }
-
-  /* -- the file tree ----------------------------------------------------- */
-
-  /* A listing rather than a control panel: no rules between rows, no boxes
-     around names, and the indent alone saying what is inside what. The frame is
-     the field's own, because that is what this is — one field holding a set. */
-  .tree {
-    max-height: 15rem;
-    overflow-y: auto;
-    padding: 0.25rem 0;
-    margin-bottom: var(--space-sm);
-    border: var(--bw) solid var(--line-2);
-    border-radius: var(--radius-sm);
-    background: var(--paper);
-  }
-
-  .tree-row {
-    display: flex;
-    align-items: center;
-    gap: 0.45rem;
-    width: 100%;
-    padding-block: 0.22rem;
-    padding-right: 0.6rem;
-    border: 0;
-    background: none;
-    color: var(--ink-2);
-    font-family: var(--font-mono);
-    font-size: var(--fs-meta);
-    line-height: 1.5;
-    text-align: left;
-    cursor: pointer;
-    transition: background var(--duration);
-  }
-
-  .tree-row:hover:not(:disabled) {
-    background: var(--paper-2);
-  }
-
-  /* A folder is the thing its contents are named after, so it is set in the
-     interface's own face rather than the face the paths are in. */
-  .tree-row.folder {
-    color: var(--ink-3);
-    font-family: var(--font-sans);
-  }
-
-  /* The document itself, which cannot be struck out. Dimmed rather than
-     disabled-looking: it is not unavailable, it is settled. */
-  .tree-row.fixed {
-    cursor: default;
-    opacity: 0.75;
-  }
-
-  .tree-name {
-    flex: 1;
-    min-width: 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  /* Right-aligned and quiet: a column to be scanned when the question is what
-     is making this template large, and ignorable the rest of the time. */
-  .tree-size {
-    flex: none;
-    color: var(--ink-3);
-    font-family: var(--font-mono);
-    font-size: var(--fs-meta);
-    font-variant-numeric: tabular-nums;
-  }
-
-  /* The square a radio's dot would be if this were a choice of one. Same size,
-     same ring, same accent when it is on — square because these are not
-     alternatives and the shape is the only thing that says so. */
-  .tick {
-    flex: none;
-    display: grid;
-    place-items: center;
-    width: 0.85rem;
-    height: 0.85rem;
-    border: var(--bw) solid var(--line-3);
-    border-radius: var(--radius-xs);
-    background: transparent;
-    color: var(--on-accent);
-    transition:
-      border-color var(--duration),
-      background var(--duration);
-  }
-
-  .tick.on {
-    border-color: var(--accent);
-    background: var(--accent);
-  }
-
-  .tree-total {
-    margin-bottom: var(--space-lg);
-    font-size: var(--fs-meta);
-    font-variant-numeric: tabular-nums;
-  }
-
-  /* The name takes what is left; the folder takes what it needs. A folder path
-     is long and a document name is short, and giving them equal room would
-     leave the name in a field it could never fill. */
-  .create-field:not(.folder) {
-    flex: 1;
-    min-width: 0;
-  }
-
-  .create-field.folder {
-    min-width: 0;
-    max-width: 40%;
-  }
-
-  /* The extension sits inside the field, in the field's own colours, because it
-     is part of the name — just not the part anyone types. */
-  .create-name {
-    display: flex;
-    align-items: center;
-    gap: 0.15rem;
-    padding-right: 0.6rem;
-    border: var(--bw) solid var(--line-2);
-    border-radius: var(--radius-sm);
-    background: var(--paper);
-  }
-
-  .create-name input {
-    flex: 1;
-    min-width: 0;
-    margin: 0;
-    border: 0;
-    background: none;
-  }
-
-  .create-name input:focus {
-    outline: none;
-  }
-
-  .create-extension {
-    flex: none;
-    color: var(--ink-3);
-    font-family: var(--font-mono);
-    font-size: var(--fs-meta);
-  }
-
-  .create-folder {
-    display: flex;
-    align-items: center;
-    gap: 0.4rem;
-    min-width: 0;
-    padding: 0.5rem 0.6rem;
-    border: var(--bw) solid var(--line-2);
-    border-radius: var(--radius-sm);
-    background: var(--paper);
-    color: var(--ink-2);
-    font-family: var(--font-sans);
-    font-size: var(--fs-menu);
-    line-height: 1;
-    cursor: pointer;
-    transition:
-      border-color var(--duration),
-      color var(--duration);
-  }
-
-  .create-folder:hover {
-    border-color: var(--line-3);
-    color: var(--ink);
-  }
-
-  /* A path is read from its end — the folder you are putting this in is the last
-     component, not the first — so it is the front that is dropped. */
-  .create-folder span {
-    overflow: hidden;
-    direction: rtl;
-    text-align: left;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  /* Stacked, because each carries a sentence. Side by side they would be two
-     columns of prose in a dialog that is one question wide. */
-  .scopes {
-    display: grid;
-    gap: var(--space-sm);
-    margin-bottom: var(--space-lg);
-  }
-
-  .scope {
-    display: grid;
-    gap: 0.2rem;
-    padding: 0.6rem 0.7rem;
-    border: var(--bw) solid var(--line-2);
-    border-radius: var(--radius-sm);
-    background: transparent;
-    color: var(--ink-2);
-    font-family: var(--font-sans);
-    font-size: var(--fs-menu);
-    text-align: left;
-    cursor: pointer;
-    transition:
-      border-color var(--duration),
-      color var(--duration);
-  }
-
-  .scope:hover {
-    border-color: var(--line-3);
-    color: var(--ink);
-  }
-
-  .scope[aria-checked='true'] {
-    border-color: var(--accent);
-    box-shadow: inset 0 0 0 var(--bw) var(--accent);
-    color: var(--ink);
-  }
-
-  .scope .quiet {
-    margin: 0;
-    font-size: var(--fs-meta);
-    line-height: 1.4;
-  }
-
   /* The window while a document is being held over it. An accent edge and the
      faintest wash of the same colour — enough to say the drop will land, and
      little enough that the library is still readable underneath it. */
@@ -3928,312 +2615,6 @@
   .context-menu button:disabled,
   .context-menu button:disabled :global(svg) {
     color: var(--line-3);
-    cursor: default;
-  }
-
-  /* Positioned rather than left to the user agent's centring, which the reader's
-     100vh grid does not agree with. `right` and `margin` are reset with it: the
-     user agent sets `inset-inline-end: 0` and `margin: auto` on every dialog,
-     and left:50% against right:0 leaves the box centred in the right half of the
-     window rather than in the window.
-
-     Opened with `showModal` — see `$lib/modal` — so this is in the top layer and
-     the z-index only settles it against the menus. */
-  dialog {
-    position: fixed;
-    top: 50%;
-    left: 50%;
-    right: auto;
-    bottom: auto;
-    margin: 0;
-    transform: translate(-50%, -50%);
-    z-index: 20;
-    width: min(30rem, calc(100% - 2rem));
-    max-height: calc(100vh - 3rem);
-    overflow-y: auto;
-    padding: 1.25rem;
-    background: var(--card);
-    border: var(--bw) solid var(--line-2);
-    border-radius: var(--radius);
-    box-shadow: var(--shadow-xl);
-    color: var(--ink);
-    font-size: var(--fs-menu);
-  }
-
-  /* Enough to say that what is behind is not the thing to click, and no more:
-     a cutout resting on the desk, not a spotlight on a stage. */
-  dialog::backdrop {
-    background: var(--backdrop);
-  }
-
-  /* Settings is the one dialog with more than one subject in it, so the
-     subjects are ruled off from each other rather than left to run together.
-     The last one is not, because a line above the Done button would read as a
-     fourth section that had lost its heading. */
-  dialog.settings section {
-    padding-bottom: 1rem;
-    margin-bottom: 1rem;
-    border-bottom: var(--bw) solid var(--line-1);
-  }
-
-  dialog.settings section:last-of-type {
-    padding-bottom: 0;
-    border-bottom: 0;
-  }
-
-  /* The same eyebrow a field label wears — these name a group of controls
-     rather than announcing a new part of the interface. */
-  dialog.settings h3 {
-    margin-bottom: 0.5rem;
-    color: var(--ink-3);
-    font-size: var(--fs-label);
-    font-weight: var(--fw-label);
-    letter-spacing: var(--tracking-label);
-    text-transform: uppercase;
-  }
-
-  dialog.settings section p:last-child {
-    margin-bottom: 0;
-  }
-
-  /* Two levels, told apart. Uppercase is what names a section; a field inside
-     one wearing the same treatment made EDITOR and COMMAND look like siblings
-     when the first contains the second. Scoped to Settings, because a dialog
-     that is one question and one field has no hierarchy to show. */
-  dialog.settings label {
-    color: var(--ink-3);
-    font-size: var(--fs-meta);
-    font-weight: 500;
-    letter-spacing: normal;
-    text-transform: none;
-  }
-
-  /* Left, on the margin the headings and fields already keep. These were
-     centred when the dialog was wide enough for two columns; at one column,
-     centring them would set three buttons adrift above a field that starts at
-     the edge. */
-  .choices {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 0.5rem;
-    margin-bottom: 0.75rem;
-  }
-
-  /* Radios drawn as what they select. A native radio beside a word would put
-     the choice in the dot rather than in the thing chosen, which is the wrong
-     way round when the thing chosen is a picture. */
-  .choice {
-    display: flex;
-    align-items: center;
-    gap: 0.4rem;
-    padding: 0.45rem 0.7rem;
-    border: var(--bw) solid var(--line-2);
-    border-radius: var(--radius-sm);
-    background: transparent;
-    color: var(--ink-2);
-    font-family: var(--font-sans);
-    font-size: var(--fs-menu);
-    line-height: 1;
-    cursor: pointer;
-    transition:
-      border-color var(--duration),
-      color var(--duration);
-  }
-
-  .choice:hover {
-    color: var(--ink);
-    border-color: var(--line-3);
-  }
-
-  .choice[aria-checked='true'] {
-    border-color: var(--accent);
-    color: var(--ink);
-  }
-
-  /* The word options carry their selection in the ring, having no room below
-     for anything else. The tiles below carry theirs in the dot instead. */
-  .choice:not(.tile)[aria-checked='true'] {
-    box-shadow: inset 0 0 0 var(--bw) var(--accent);
-  }
-
-  /* A tile is the picture and nothing else — no frame competing with artwork
-     that already has its own edge, and no name under it. What marks the chosen
-     one is the dot, which is the only part of a radio worth keeping when the
-     label has gone. */
-  .choice.tile {
-    flex-direction: column;
-    gap: 0.55rem;
-    padding: 0;
-    border: 0;
-  }
-
-  .choice.tile img {
-    display: block;
-    width: 72px;
-    height: 72px;
-    /* Unchosen tiles step back rather than grey out: these are the same picture
-       in three colourways, and a desaturated preview of a colour is no preview
-       at all. */
-    opacity: 0.55;
-    transition: opacity var(--duration);
-  }
-
-  .choice.tile:hover img,
-  .choice.tile[aria-checked='true'] img {
-    opacity: 1;
-  }
-
-  /* One radio mark, wherever a radio is drawn. */
-  .dot {
-    flex: none;
-    width: 0.75rem;
-    height: 0.75rem;
-    border: var(--bw) solid var(--line-3);
-    border-radius: 50%;
-    background: transparent;
-    transition:
-      border-color var(--duration),
-      background var(--duration),
-      box-shadow var(--duration);
-  }
-
-  .choice.tile:hover .dot {
-    border-color: var(--ink-3);
-  }
-
-  /* Filled in the accent, with the ring holding a hairline of the card between
-     dot and border — the way a real radio is drawn. */
-  .choice.tile[aria-checked='true'] .dot {
-    border-color: var(--accent);
-    background: var(--accent);
-    box-shadow: inset 0 0 0 2px var(--card);
-  }
-
-  /* One step above the dialog's own text, and well below the library's
-     title — a dialog announces itself without shouting. */
-  dialog h2 {
-    margin-bottom: 0.75rem;
-    font-size: 0.9375rem;
-    font-weight: 600;
-    letter-spacing: var(--tracking-title);
-  }
-
-  dialog p {
-    margin-bottom: 0.75rem;
-    color: var(--ink-2);
-    line-height: 1.45;
-  }
-
-  dialog p.quiet {
-    color: var(--ink-3);
-  }
-
-  dialog code {
-    font-size: var(--fs-meta);
-    overflow-wrap: anywhere;
-  }
-
-  dialog label,
-  dialog select,
-  dialog input,
-  dialog textarea {
-    display: block;
-    width: 100%;
-  }
-
-  /* The field name is the same eyebrow the library cards use. */
-  dialog label {
-    margin-bottom: 0.85rem;
-    color: var(--ink-3);
-    font-size: var(--fs-label);
-    font-weight: var(--fw-label);
-    letter-spacing: var(--tracking-label);
-    text-transform: uppercase;
-  }
-
-  dialog input,
-  dialog select,
-  dialog textarea {
-    margin-top: 0.3rem;
-    padding: 0.4rem 0.5rem;
-    border: var(--bw) solid var(--line-2);
-    border-radius: var(--radius-sm);
-    background: var(--paper);
-    color: var(--ink);
-    font-size: var(--fs-menu);
-    letter-spacing: normal;
-    text-transform: none;
-  }
-
-  /* The app's own focus, not the browser's: the field lifts to card white, its
-     edge takes the accent, and a soft ring of the same colour sits under it.
-     The global blue outline is suppressed here — inside a dialog it is the
-     only blue on screen, and it reads as a browser artefact. */
-  dialog input:focus,
-  dialog select:focus,
-  dialog textarea:focus {
-    outline: none;
-    border-color: var(--accent-strong);
-    background: var(--card);
-    box-shadow: 0 0 0 3px var(--accent-wash);
-  }
-
-  dialog summary {
-    margin-bottom: 0.5rem;
-    color: var(--ink-3);
-    cursor: pointer;
-  }
-
-  dialog details {
-    margin-bottom: 0.85rem;
-  }
-
-  .dialog-actions {
-    justify-content: flex-end;
-    gap: 0.5rem;
-  }
-
-  /* Cancel is an outline, the action beside it is the one filled control —
-     the same pair the library header uses for its primary button. */
-  .dialog-actions button {
-    padding: 0.4rem 0.85rem;
-    border: var(--bw) solid var(--line-2);
-    border-radius: var(--radius);
-    background: var(--card);
-    color: var(--ink-2);
-    font-size: var(--fs-menu);
-    line-height: 1.2;
-    cursor: pointer;
-    transition: background var(--duration);
-  }
-
-  .dialog-actions button:hover:not(:disabled) {
-    background: var(--paper-2);
-    color: var(--ink);
-  }
-
-  .dialog-actions button:last-child {
-    border-color: transparent;
-    background: var(--accent);
-    color: var(--on-accent);
-  }
-
-  .dialog-actions button:last-child:hover:not(:disabled) {
-    background: var(--accent-hover);
-    color: var(--on-accent);
-  }
-
-  /* Removing a document is the one confirm that undoes something. */
-  .dialog-actions button.danger {
-    background: var(--danger);
-  }
-
-  .dialog-actions button.danger:hover:not(:disabled) {
-    background: var(--danger-strong);
-  }
-
-  .dialog-actions button:disabled {
-    opacity: 0.5;
     cursor: default;
   }
 </style>

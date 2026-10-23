@@ -95,7 +95,8 @@ pub fn run() {
             std::fs::create_dir_all(&work_root)?;
             std::fs::create_dir_all(&objects_root)?;
 
-            let repository = Arc::new(Repository::open(&data_root.join("press.sqlite3"))?);
+            let database_path = data_root.join("press.sqlite3");
+            let repository = Arc::new(Repository::open(&database_path)?);
             // Anything the database wants to say about how it opened. The
             // interface collects it the same way it collects a path from the
             // command line.
@@ -120,7 +121,13 @@ pub fn run() {
             {
                 eprintln!("Press could not put its icon back: {error}");
             }
-            sweep_storage(&artifact_root, &work_root, &objects_root, &repository);
+            sweep_storage(
+                &artifact_root,
+                &work_root,
+                &objects_root,
+                &repository,
+                &database_path,
+            );
             let builds = Arc::new(BuildManager::new(
                 Arc::clone(&repository),
                 artifact_root.clone(),
@@ -280,6 +287,7 @@ fn sweep_storage(
     work_root: &Path,
     objects_root: &Path,
     repository: &Repository,
+    database: &Path,
 ) {
     let Ok(retained) = repository.managed_pdf_paths() else {
         return;
@@ -312,7 +320,7 @@ fn sweep_storage(
         }
     }
 
-    sweep_objects(objects_root, repository);
+    sweep_objects(objects_root, repository, database);
 
     let Ok(known) = repository.project_ids() else {
         return;
@@ -337,11 +345,19 @@ fn sweep_storage(
 
 /// Snapshots share file contents, so an object only becomes rubbish once no
 /// snapshot at all refers to it.
-fn sweep_objects(objects_root: &Path, repository: &Repository) {
+///
+/// That includes the snapshots of a database set aside by a schema change. The
+/// object store is the only copy of what those versions held, and the live
+/// database — new and empty on the first start after the change — cannot speak
+/// for them.
+fn sweep_objects(objects_root: &Path, repository: &Repository, database: &Path) {
     let Ok(referenced) = repository.referenced_objects() else {
         return;
     };
-    let referenced = referenced.into_iter().collect::<HashSet<_>>();
+    let Some(retired) = database::retired_references(database) else {
+        return;
+    };
+    let referenced = referenced.into_iter().chain(retired).collect::<HashSet<_>>();
     for entry in walkdir::WalkDir::new(objects_root)
         .min_depth(2)
         .max_depth(2)
@@ -461,7 +477,13 @@ mod tests {
         std::fs::create_dir_all(orphan_object.parent().unwrap()).unwrap();
         std::fs::write(&orphan_object, b"nothing refers to this").unwrap();
 
-        sweep_storage(&artifact_root, &work_root, &objects_root, &repository);
+        sweep_storage(
+            &artifact_root,
+            &work_root,
+            &objects_root,
+            &repository,
+            &directory.path().join("press.db"),
+        );
 
         assert!(retained.is_file());
         assert!(
@@ -485,6 +507,63 @@ mod tests {
             assert!(
                 crate::snapshot::object_path(&objects_root, &file.object).is_file(),
                 "a snapshot's contents survive the sweep"
+            );
+        }
+    }
+
+    /// A schema change sets the database aside and starts an empty one. The
+    /// versions in the old one are only worth keeping if their files are still
+    /// there, and the first sweep on the new schema is the one that would take
+    /// them — and every sweep after it.
+    #[test]
+    fn a_database_set_aside_keeps_the_files_its_versions_hold() {
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("source");
+        let artifact_root = directory.path().join("artifacts");
+        let work_root = directory.path().join("work");
+        let objects_root = directory.path().join("objects");
+        let database = directory.path().join("press.sqlite3");
+        std::fs::create_dir(&source).unwrap();
+        std::fs::write(source.join("main.tex"), "\\documentclass{article}").unwrap();
+
+        let capture = {
+            let repository = Repository::open(&database).unwrap();
+            let project = repository
+                .upsert_project(NewProject {
+                    name: "source/main.tex",
+                    document_path: source.join("main.tex").to_str().unwrap(),
+                    engine: Engine::PdfLatex,
+                })
+                .unwrap();
+            let capture =
+                crate::snapshot::capture(&source, &objects_root, &HashSet::new()).unwrap();
+            repository
+                .create_snapshot(project.id, &capture, "Before the schema changed", None)
+                .unwrap();
+            capture
+        };
+        // What a newer Press would find: a database it does not understand.
+        rusqlite::Connection::open(&database)
+            .unwrap()
+            .pragma_update(None, "user_version", 999)
+            .unwrap();
+
+        for _ in 0..2 {
+            let repository = Repository::open(&database).unwrap();
+            sweep_storage(
+                &artifact_root,
+                &work_root,
+                &objects_root,
+                &repository,
+                &database,
+            );
+        }
+
+        assert!(directory.path().join("press.schema999.old").is_file());
+        for file in &capture.files {
+            assert!(
+                crate::snapshot::object_path(&objects_root, &file.object).is_file(),
+                "a set-aside version's contents survive every sweep after it"
             );
         }
     }

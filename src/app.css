@@ -455,3 +455,221 @@ textarea {
 ::selection {
   background: color-mix(in oklab, var(--blue) 22%, transparent);
 }
+
+/* -- dialogs --------------------------------------------------------------
+
+   What every dialog in Press is drawn with, wherever it is written. Each one
+   says what is particular to it in its own component; these are plain
+   selectors, the least specific in Press, so anything a component says about
+   its own dialog wins without having to try. */
+
+/* Positioned rather than left to the user agent's centring, which the reader's
+   100vh grid does not agree with. `right` and `margin` are reset with it: the
+   user agent sets `inset-inline-end: 0` and `margin: auto` on every dialog,
+   and left:50% against right:0 leaves the box centred in the right half of the
+   window rather than in the window.
+
+   Opened with `showModal` — see `$lib/modal` — so this is in the top layer and
+   the z-index only settles it against the menus. */
+dialog {
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  right: auto;
+  bottom: auto;
+  margin: 0;
+  transform: translate(-50%, -50%);
+  z-index: 20;
+  width: min(30rem, calc(100% - 2rem));
+  max-height: calc(100vh - 3rem);
+  overflow-y: auto;
+  padding: 1.25rem;
+  background: var(--card);
+  border: var(--bw) solid var(--line-2);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-xl);
+  color: var(--ink);
+  font-size: var(--fs-menu);
+}
+
+/* Enough to say that what is behind is not the thing to click, and no more:
+   a cutout resting on the desk, not a spotlight on a stage. */
+dialog::backdrop {
+  background: var(--backdrop);
+}
+
+/* One step above the dialog's own text, and well below the library's
+   title — a dialog announces itself without shouting. */
+dialog h2 {
+  margin-top: 0;
+  margin-bottom: 0.75rem;
+  font-size: 0.9375rem;
+  font-weight: 600;
+  letter-spacing: var(--tracking-title);
+}
+
+dialog p {
+  margin-top: 0;
+  margin-bottom: 0.75rem;
+  color: var(--ink-2);
+  line-height: 1.45;
+}
+
+dialog p.quiet {
+  color: var(--ink-3);
+}
+
+dialog code {
+  font-size: var(--fs-meta);
+  overflow-wrap: anywhere;
+}
+
+dialog label,
+dialog select,
+dialog input,
+dialog textarea {
+  display: block;
+  width: 100%;
+}
+
+/* The field name is the same eyebrow the library cards use. */
+dialog label {
+  margin-bottom: 0.85rem;
+  color: var(--ink-3);
+  font-size: var(--fs-label);
+  font-weight: var(--fw-label);
+  letter-spacing: var(--tracking-label);
+  text-transform: uppercase;
+}
+
+dialog input,
+dialog select,
+dialog textarea {
+  margin-top: 0.3rem;
+  padding: 0.4rem 0.5rem;
+  border: var(--bw) solid var(--line-2);
+  border-radius: var(--radius-sm);
+  background: var(--paper);
+  color: var(--ink);
+  font-size: var(--fs-menu);
+  letter-spacing: normal;
+  text-transform: none;
+}
+
+/* The app's own focus, not the browser's: the field lifts to card white, its
+   edge takes the accent, and a soft ring of the same colour sits under it.
+   The global blue outline is suppressed here — inside a dialog it is the
+   only blue on screen, and it reads as a browser artefact. */
+dialog input:focus,
+dialog select:focus,
+dialog textarea:focus {
+  outline: none;
+  border-color: var(--accent-strong);
+  background: var(--card);
+  box-shadow: 0 0 0 3px var(--accent-wash);
+}
+
+dialog summary {
+  margin-bottom: 0.5rem;
+  color: var(--ink-3);
+  cursor: pointer;
+}
+
+dialog details {
+  margin-bottom: 0.85rem;
+}
+
+.dialog-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 0.5rem;
+}
+
+/* Cancel is an outline, the action beside it is the one filled control —
+   the same pair the library header uses for its primary button. */
+.dialog-actions button {
+  padding: 0.4rem 0.85rem;
+  border: var(--bw) solid var(--line-2);
+  border-radius: var(--radius);
+  background: var(--card);
+  color: var(--ink-2);
+  font-size: var(--fs-menu);
+  line-height: 1.2;
+  cursor: pointer;
+  transition: background var(--duration);
+}
+
+.dialog-actions button:hover:not(:disabled) {
+  background: var(--paper-2);
+  color: var(--ink);
+}
+
+.dialog-actions button:last-child {
+  border-color: transparent;
+  background: var(--accent);
+  color: var(--on-accent);
+}
+
+.dialog-actions button:last-child:hover:not(:disabled) {
+  background: var(--accent-hover);
+  color: var(--on-accent);
+}
+
+/* Removing a document is the one confirm that undoes something. */
+.dialog-actions button.danger {
+  background: var(--danger);
+}
+
+.dialog-actions button.danger:hover:not(:disabled) {
+  background: var(--danger-strong);
+}
+
+.dialog-actions button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+/* A choice between a few answers, each a sentence long, which the gallery and
+   the template dialog both ask. Stacked, because each carries a sentence. Side
+   by side they would be two columns of prose in a dialog that is one question
+   wide. */
+.scopes {
+  display: grid;
+  gap: var(--space-sm);
+  margin-bottom: var(--space-lg);
+}
+
+.scope {
+  display: grid;
+  gap: 0.2rem;
+  padding: 0.6rem 0.7rem;
+  border: var(--bw) solid var(--line-2);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--ink-2);
+  font-family: var(--font-sans);
+  font-size: var(--fs-menu);
+  text-align: left;
+  cursor: pointer;
+  transition:
+    border-color var(--duration),
+    color var(--duration);
+}
+
+.scope:hover {
+  border-color: var(--line-3);
+  color: var(--ink);
+}
+
+.scope[aria-checked='true'] {
+  border-color: var(--accent);
+  box-shadow: inset 0 0 0 var(--bw) var(--accent);
+  color: var(--ink);
+}
+
+.scope .quiet {
+  margin: 0;
+  font-size: var(--fs-meta);
+  line-height: 1.4;
+}

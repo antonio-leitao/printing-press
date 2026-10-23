@@ -15,7 +15,11 @@ export type ViewerAction =
   /** Back or forward through the places a jump was made from. */
   | { kind: 'jump'; sign: 1 | -1 }
   /** Draw the page for a dark room, or stop. */
-  | { kind: 'invert' };
+  | { kind: 'invert' }
+  /** Open the search prompt. */
+  | { kind: 'search' }
+  /** On to the next search hit, or back to the previous one. */
+  | { kind: 'match'; sign: 1 | -1; count: number };
 
 export type KeyResolution =
   | { kind: 'action'; action: ViewerAction }
@@ -164,6 +168,13 @@ export function resolveKey(
       return done({ kind: 'fit', mode: 'page' });
     case 's':
       return done({ kind: 'fit', mode: 'width' });
+    // zathura's search, and vim's: `/` asks, `n` and `N` walk the answers.
+    case '/':
+      return done({ kind: 'search' });
+    case 'n':
+      return done({ kind: 'match', sign: 1, count });
+    case 'N':
+      return done({ kind: 'match', sign: -1, count });
     case 'Escape':
       return { resolution: { kind: 'ignored' }, state: clear };
     default:

@@ -20,12 +20,12 @@ use std::{
     path::{Path, PathBuf},
     process::Stdio,
     sync::{Arc, Mutex},
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use tokio::{
     io::{AsyncRead, AsyncReadExt},
-    process::Command,
+    process::{Child, Command},
     sync::watch,
 };
 
@@ -40,7 +40,35 @@ use crate::{
 /// The build log kept for the user; older output is discarded first.
 const OUTPUT_LIMIT: usize = 2 * 1024 * 1024;
 /// How long a terminated build gets to exit before it is killed outright.
-const TERMINATE_GRACE: std::time::Duration = std::time::Duration::from_millis(1200);
+const TERMINATE_GRACE: Duration = Duration::from_millis(1200);
+
+/// When Press gives up on a build that will not finish by itself.
+///
+/// TeX will expand `\def\x{\x}\x` until someone stops it, and nonstopmode does
+/// not count that as an error. Nothing else ever would: a save during a build
+/// only marks it to run again once it is done, so without a limit one typo
+/// leaves the document saying "Running" for good, and fixing the typo changes
+/// nothing.
+#[derive(Clone, Copy, Debug)]
+pub struct Limits {
+    /// Silence long enough to mean TeX is stuck. TeX reports as it goes —
+    /// every file it opens, every page it ships out — so a build that has said
+    /// nothing for this long is not slow, it is looping. Long enough for one
+    /// expensive page of plots to finish drawing.
+    pub quiet: Duration,
+    /// The longest any build may take, quiet or not. A loop that prints is
+    /// still a loop, and its log grows on disk for as long as it runs.
+    pub total: Duration,
+}
+
+impl Default for Limits {
+    fn default() -> Self {
+        Self {
+            quiet: Duration::from_secs(120),
+            total: Duration::from_secs(30 * 60),
+        }
+    }
+}
 
 pub type ProgressSink = Arc<dyn Fn(ProgressSnapshot) + Send + Sync>;
 
@@ -125,6 +153,7 @@ pub struct BuildInputs<'a> {
     pub log_path: PathBuf,
     /// Where published PDFs live.
     pub artifact_directory: PathBuf,
+    pub limits: Limits,
 }
 
 pub struct BuildProduct {
@@ -208,6 +237,13 @@ pub async fn run(
     if cancel.is_cancelled() {
         return Ok(BuildOutcome::Cancelled);
     }
+    {
+        let source = inputs.source.directory.clone();
+        let work = inputs.work_directory.clone();
+        tokio::task::spawn_blocking(move || mirror_directories(&source, &work))
+            .await
+            .map_err(|error| AppError::Task(error.to_string()))??;
+    }
 
     let mut command = Command::new(&latexmk);
     command.current_dir(&inputs.source.directory);
@@ -251,6 +287,7 @@ pub async fn run(
         .map_err(|error| AppError::Build(format!("could not start latexmk: {error}")))?;
     let pid = child.id().unwrap_or_default() as i32;
     pids.register(inputs.build_id, pid);
+    let started = Instant::now();
 
     let pump = Arc::new(Mutex::new(Pump::new()));
     let mut readers = Vec::new();
@@ -269,23 +306,47 @@ pub async fn run(
         )));
     }
 
-    let status = tokio::select! {
-        status = child.wait() => {
-            pids.unregister(inputs.build_id);
-            status
-        }
-        () = cancel.cancelled() => {
-            // The child handle is still alive here, so this pid is certainly ours.
-            terminate_process_group(pid, libc::SIGTERM);
-            if tokio::time::timeout(TERMINATE_GRACE, child.wait()).await.is_err() {
-                terminate_process_group(pid, libc::SIGKILL);
-                let _ = child.wait().await;
+    let limits = inputs.limits;
+    let status = loop {
+        // Whichever limit comes first. Output arriving in the meantime moves the
+        // quiet one on, so waking up is only a reason to look, not to stop.
+        let last_output = pump.lock().map(|pump| pump.last_output).unwrap_or(started);
+        let deadline = (last_output + limits.quiet).min(started + limits.total);
+        tokio::select! {
+            status = child.wait() => {
+                pids.unregister(inputs.build_id);
+                break status;
             }
-            pids.unregister(inputs.build_id);
-            for reader in readers {
-                let _ = reader.await;
+            () = cancel.cancelled() => {
+                stop(&mut child, pid).await;
+                pids.unregister(inputs.build_id);
+                for reader in readers {
+                    let _ = reader.await;
+                }
+                return Ok(BuildOutcome::Cancelled);
             }
-            return Ok(BuildOutcome::Cancelled);
+            () = tokio::time::sleep_until(deadline.into()) => {
+                let Some(summary) = overrun(&pump, started, limits) else {
+                    continue;
+                };
+                stop(&mut child, pid).await;
+                pids.unregister(inputs.build_id);
+                for reader in readers {
+                    let _ = reader.await;
+                }
+                // What it printed before it stopped is still worth reading.
+                let output = pump.lock().map(|pump| pump.bytes()).unwrap_or_default();
+                let _ = tokio::fs::write(&inputs.log_path, &output).await;
+                return Ok(BuildOutcome::Failed {
+                    diagnostics: vec![Diagnostic {
+                        file: Some(inputs.source.file_name.clone()),
+                        line: None,
+                        severity: Severity::Error,
+                        message: summary.clone(),
+                    }],
+                    summary,
+                });
+            }
         }
     };
 
@@ -349,6 +410,99 @@ pub async fn run(
         product,
         diagnostics: all,
     })
+}
+
+/// How deep into the source a chapter can sit and still be given a folder in the
+/// work directory. The same depth the snapshot walk goes to.
+const MIRROR_DEPTH: usize = 16;
+
+/// Gives the work directory the shape of the source.
+///
+/// `\include{chapters/one}` has TeX write `chapters/one.aux` beside the rest of
+/// the auxiliary files, and with `-outdir` that is inside the work directory,
+/// where nothing has made a `chapters` folder. pdflatex will not create one, and
+/// latexmk 4.79 — what MacTeX 2023 ships — does not either, so a thesis laid out
+/// the usual way fails with "I can't write on file" on a document that compiles
+/// anywhere else. `\input` writes nothing, which is why it never shows there.
+///
+/// Only folders that hold a `.tex` file, because only those can be included,
+/// and never one Press would not look inside for a snapshot either.
+fn mirror_directories(source: &Path, work: &Path) -> AppResult<()> {
+    let mut made = std::collections::HashSet::new();
+    for entry in walkdir::WalkDir::new(source)
+        .follow_links(false)
+        .min_depth(1)
+        .max_depth(MIRROR_DEPTH)
+        .into_iter()
+        .filter_entry(|entry| {
+            !entry.file_type().is_dir() || {
+                let name = entry.file_name().to_string_lossy();
+                !name.starts_with('.') && !crate::files::is_ignored_directory(&name)
+            }
+        })
+        .filter_map(Result::ok)
+    {
+        let is_tex = entry
+            .path()
+            .extension()
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("tex"));
+        if !entry.file_type().is_file() || !is_tex {
+            continue;
+        }
+        let Some(folder) = entry
+            .path()
+            .parent()
+            .and_then(|parent| parent.strip_prefix(source).ok())
+        else {
+            continue;
+        };
+        if !folder.as_os_str().is_empty() && made.insert(folder.to_path_buf()) {
+            std::fs::create_dir_all(work.join(folder))?;
+        }
+    }
+    Ok(())
+}
+
+/// Terminates a build's whole process group, and reaps it. Only ever called
+/// while `child` is still alive, so `pid` is certainly the build's own.
+async fn stop(child: &mut Child, pid: i32) {
+    terminate_process_group(pid, libc::SIGTERM);
+    if tokio::time::timeout(TERMINATE_GRACE, child.wait()).await.is_err() {
+        terminate_process_group(pid, libc::SIGKILL);
+        let _ = child.wait().await;
+    }
+}
+
+/// Why a build has gone on too long, or `None` while it is still within both
+/// limits.
+fn overrun(pump: &Mutex<Pump>, started: Instant, limits: Limits) -> Option<String> {
+    let now = Instant::now();
+    if now.duration_since(started) >= limits.total {
+        return Some(format!(
+            "Press stopped this build after {}. A document that loops while printing \
+             never finishes on its own.",
+            spoken(limits.total)
+        ));
+    }
+    let last_output = pump.lock().ok()?.last_output;
+    (now.duration_since(last_output) >= limits.quiet).then(|| {
+        format!(
+            "Press stopped this build after {} without any output from TeX. That usually \
+             means a macro that expands forever, such as one defined in terms of itself.",
+            spoken(limits.quiet)
+        )
+    })
+}
+
+/// A limit as a person would say it.
+fn spoken(duration: Duration) -> String {
+    let seconds = duration.as_secs();
+    match seconds {
+        60 => "a minute".to_owned(),
+        _ if seconds >= 60 && seconds.is_multiple_of(60) => format!("{} minutes", seconds / 60),
+        1 => "a second".to_owned(),
+        _ => format!("{seconds} seconds"),
+    }
 }
 
 /// Moves diagnostics off the generated LaTeX and onto the markdown the author
@@ -423,19 +577,22 @@ async fn convert_markdown(inputs: &BuildInputs<'_>, job_name: &str) -> Result<Pa
         command.kill_on_drop(true);
         command
     };
+    // pandoc prints nothing until it is done, so the quiet limit is the whole
+    // of its allowance. Dropping the future on the way out kills the process.
+    let quiet = inputs.limits.quiet;
+    let convert = |input: PathBuf| async move {
+        tokio::time::timeout(quiet, run(input).output())
+            .await
+            .map_err(|_| format!("Press stopped pandoc after {}.", spoken(quiet)))?
+            .map_err(|error| format!("could not start pandoc: {error}"))
+    };
 
-    let mut output = run(input.clone())
-        .output()
-        .await
-        .map_err(|error| format!("could not start pandoc: {error}"))?;
+    let mut output = convert(input.clone()).await?;
     // pandoc counts lines in what it was given, so a complaint about the marked
     // copy would name lines the author cannot find. Asking again with the
     // document itself costs a second run only when something is already wrong.
     if !output.status.success() && input != source {
-        output = run(source.clone())
-            .output()
-            .await
-            .map_err(|error| format!("could not start pandoc: {error}"))?;
+        output = convert(source.clone()).await?;
     }
     if !output.status.success() {
         let _ = tokio::fs::remove_file(&staging).await;
@@ -582,7 +739,9 @@ pub async fn discard_publication(pdf: &Path) {
     }
 }
 
-fn verify_pdf(path: &Path) -> Result<(), String> {
+/// Whether a file is a whole PDF: the header at the front, and the end marker
+/// a writer only puts down once it has finished.
+pub fn verify_pdf(path: &Path) -> Result<(), String> {
     let mut file =
         File::open(path).map_err(|error| format!("could not read the built PDF: {error}"))?;
     let length = file
@@ -651,6 +810,9 @@ struct Pump {
     bytes: VecDeque<u8>,
     pending: String,
     parser: ProgressParser,
+    /// When the build last said anything, which is how a stuck one is told
+    /// from a slow one.
+    last_output: Instant,
 }
 
 impl Pump {
@@ -659,10 +821,12 @@ impl Pump {
             bytes: VecDeque::new(),
             pending: String::new(),
             parser: ProgressParser::default(),
+            last_output: Instant::now(),
         }
     }
 
     fn push(&mut self, data: &[u8]) -> Vec<ProgressSnapshot> {
+        self.last_output = Instant::now();
         // The slice, not an iterator of bytes: `Extend` copies a slice in one
         // go and takes a byte at a time otherwise, and a long build pushes
         // megabytes through here.
@@ -882,6 +1046,7 @@ mod tests {
                 work_directory: directory.path().join("work"),
                 log_path: directory.path().join("work/last-build.log"),
                 artifact_directory: directory.path().join("artifacts"),
+                limits: Limits::default(),
             },
             cancel,
             Arc::new(PidRegistry::default()),
@@ -940,6 +1105,7 @@ mod tests {
                 work_directory: work.clone(),
                 log_path: work.join("last-build.log"),
                 artifact_directory: directory.path().join("artifacts"),
+                limits: Limits::default(),
             },
             cancel,
             Arc::new(PidRegistry::default()),
@@ -979,6 +1145,7 @@ mod tests {
                 work_directory: work.clone(),
                 log_path: work.join("last-build.log"),
                 artifact_directory: directory.path().join("artifacts"),
+                limits: Limits::default(),
             },
             cancel,
             Arc::new(PidRegistry::default()),
@@ -1032,6 +1199,158 @@ mod tests {
         assert_eq!(diagnostics[2].line, Some(5));
     }
 
+    /// TeX expands a macro defined in terms of itself forever, printing nothing
+    /// and never failing. The build has to end anyway, as a failure that says
+    /// why, or the document says "Running" until it is closed.
+    #[tokio::test]
+    async fn a_build_that_goes_quiet_is_stopped() {
+        if resolve_executable("latexmk").is_none() {
+            eprintln!("skipping: latexmk is not installed");
+            return;
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("source");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::write(
+            root.join("main.tex"),
+            "\\documentclass{article}\n\\begin{document}\nHello.\n\\def\\x{\\x}\\x\n\\end{document}\n",
+        )
+        .unwrap();
+
+        let project = fixture_project(&root.join("main.tex"));
+        let store = tempfile::tempdir().unwrap();
+        let repository = crate::database::Repository::open(&store.path().join("press.db")).unwrap();
+        let source =
+            crate::sources::prepare(&project, &SourceRef::Worktree, &repository, store.path())
+                .unwrap();
+        let (_handle, cancel) = CancelHandle::new();
+        let pids = Arc::new(PidRegistry::default());
+        let started = Instant::now();
+        let outcome = run(
+            BuildInputs {
+                build_id: 5,
+                project: &project,
+                source: &source,
+                work_directory: directory.path().join("work"),
+                log_path: directory.path().join("work/last-build.log"),
+                artifact_directory: directory.path().join("artifacts"),
+                limits: Limits {
+                    quiet: Duration::from_secs(3),
+                    total: Duration::from_secs(60),
+                },
+            },
+            cancel,
+            Arc::clone(&pids),
+            Arc::new(|_| {}),
+        )
+        .await
+        .unwrap();
+
+        let BuildOutcome::Failed { summary, .. } = outcome else {
+            panic!("a build that never ends must not be reported as anything but a failure");
+        };
+        assert!(summary.contains("without any output"), "{summary}");
+        assert!(
+            started.elapsed() < Duration::from_secs(30),
+            "stopped near the limit, not whenever TeX felt like it"
+        );
+        assert!(
+            pids.inner.lock().unwrap().is_empty(),
+            "nothing left running"
+        );
+        assert!(directory.path().join("work/last-build.log").is_file());
+    }
+
+    /// The layout a thesis template uses. `\include` writes an `.aux` per
+    /// chapter, beside the chapter's own path, under the work directory.
+    #[tokio::test]
+    async fn a_chapter_included_from_a_folder_compiles() {
+        if resolve_executable("latexmk").is_none() {
+            eprintln!("skipping: latexmk is not installed");
+            return;
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("source");
+        std::fs::create_dir_all(root.join("chapters/part")).unwrap();
+        std::fs::write(
+            root.join("main.tex"),
+            "\\documentclass{report}\n\\begin{document}\n\\include{chapters/one}\n\
+             \\include{chapters/part/two}\n\\end{document}\n",
+        )
+        .unwrap();
+        std::fs::write(root.join("chapters/one.tex"), "Chapter one.\n").unwrap();
+        std::fs::write(root.join("chapters/part/two.tex"), "Chapter two.\n").unwrap();
+
+        let project = fixture_project(&root.join("main.tex"));
+        let store = tempfile::tempdir().unwrap();
+        let repository = crate::database::Repository::open(&store.path().join("press.db")).unwrap();
+        let source =
+            crate::sources::prepare(&project, &SourceRef::Worktree, &repository, store.path())
+                .unwrap();
+        let (_handle, cancel) = CancelHandle::new();
+        let work = directory.path().join("work");
+        let outcome = run(
+            BuildInputs {
+                build_id: 6,
+                project: &project,
+                source: &source,
+                work_directory: work.clone(),
+                log_path: work.join("last-build.log"),
+                artifact_directory: directory.path().join("artifacts"),
+                limits: Limits::default(),
+            },
+            cancel,
+            Arc::new(PidRegistry::default()),
+            Arc::new(|_| {}),
+        )
+        .await
+        .unwrap();
+
+        match outcome {
+            BuildOutcome::Succeeded { product, .. } => {
+                assert_eq!(product.page_count, Some(2), "one page per chapter");
+            }
+            BuildOutcome::Failed { summary, .. } => panic!("{summary}"),
+            BuildOutcome::Cancelled => panic!("nothing cancelled it"),
+        }
+        assert!(work.join("chapters/one.aux").is_file());
+        assert!(work.join("chapters/part/two.aux").is_file());
+        assert!(!root.join("chapters/one.aux").exists(), "nothing lands in the project");
+    }
+
+    #[test]
+    fn the_work_directory_takes_the_shape_of_the_source() {
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("source");
+        let work = directory.path().join("work");
+        for folder in ["chapters", "figures", ".git/refs", "build/chapters", "appendix/a"] {
+            std::fs::create_dir_all(source.join(folder)).unwrap();
+        }
+        std::fs::write(source.join("main.tex"), "").unwrap();
+        std::fs::write(source.join("chapters/one.tex"), "").unwrap();
+        std::fs::write(source.join("appendix/a/notes.TEX"), "").unwrap();
+        std::fs::write(source.join("figures/plot.pdf"), "").unwrap();
+        std::fs::write(source.join(".git/refs/stash.tex"), "").unwrap();
+        std::fs::write(source.join("build/chapters/old.tex"), "").unwrap();
+
+        mirror_directories(&source, &work).unwrap();
+
+        assert!(work.join("chapters").is_dir());
+        assert!(work.join("appendix/a").is_dir());
+        // Nothing to include from there, and nothing Press reads.
+        assert!(!work.join("figures").exists());
+        assert!(!work.join(".git").exists());
+        assert!(!work.join("build").exists());
+    }
+
+    #[test]
+    fn limits_read_the_way_a_person_would_say_them() {
+        assert_eq!(spoken(Duration::from_secs(120)), "2 minutes");
+        assert_eq!(spoken(Duration::from_secs(60)), "a minute");
+        assert_eq!(spoken(Duration::from_secs(1800)), "30 minutes");
+        assert_eq!(spoken(Duration::from_secs(3)), "3 seconds");
+    }
+
     #[tokio::test]
     async fn a_broken_document_fails_with_a_located_diagnostic() {
         if resolve_executable("latexmk").is_none() {
@@ -1062,6 +1381,7 @@ mod tests {
                 work_directory: directory.path().join("work"),
                 log_path: directory.path().join("work/last-build.log"),
                 artifact_directory: directory.path().join("artifacts"),
+                limits: Limits::default(),
             },
             cancel,
             Arc::new(PidRegistry::default()),

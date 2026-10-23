@@ -15,6 +15,7 @@ use std::{
     collections::HashMap,
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
+    time::{Duration, Instant},
 };
 
 use notify::{Event, EventKind, RecursiveMode, Watcher};
@@ -28,7 +29,19 @@ use crate::{
 
 /// Long enough for a build to finish writing the file, short enough not to be
 /// noticed. A PDF appears in pieces while latexmk is writing it.
-const SETTLE: std::time::Duration = std::time::Duration::from_millis(250);
+const SETTLE: Duration = Duration::from_millis(250);
+
+/// How long a file that is still half-written is waited on before it is shown
+/// anyway.
+///
+/// Quiet is not the same as finished. pdfTeX writes pages as it ships them and
+/// the page tree and trailer only at the very end, so a slow page in the middle
+/// of a compile leaves a file nothing can open — and reloading it then only
+/// put an error where the last good document was. So a file without its end
+/// marker is waited on for more writing, up to this long. After that it is
+/// shown for whatever it is, because a writer that died halfway is not coming
+/// back to finish it.
+const PATIENCE: Duration = Duration::from_secs(15);
 
 /// Every PDF Press is showing but does not own.
 ///
@@ -186,23 +199,57 @@ async fn reload_loop(
     id: i64,
     mut events: mpsc::UnboundedReceiver<()>,
 ) {
-    while events.recv().await.is_some() {
-        loop {
-            let settle = tokio::time::sleep(SETTLE);
-            tokio::pin!(settle);
-            tokio::select! {
-                () = &mut settle => break,
-                message = events.recv() => if message.is_none() { return },
-            }
-        }
-        // Gone with the entry: the document was closed while this was waiting.
-        let Some(revision) = viewing.touch(id) else {
-            return;
-        };
+    while let Some(revision) = next_revision(&viewing, id, &mut events, PATIENCE).await {
         let _ = app.emit(
             "viewing-changed",
             serde_json::json!({ "id": id, "revision": revision }),
         );
+    }
+}
+
+/// Waits for the next change worth showing and records it, returning the new
+/// revision. `None` once there is nothing left to watch: the watcher has gone,
+/// or the document was closed while this was waiting.
+async fn next_revision(
+    viewing: &Viewing,
+    id: i64,
+    events: &mut mpsc::UnboundedReceiver<()>,
+    patience: Duration,
+) -> Option<i64> {
+    events.recv().await?;
+    let first = Instant::now();
+    loop {
+        settle(events).await?;
+        let path = viewing.path(id)?;
+        let whole = tauri::async_runtime::spawn_blocking(move || {
+            crate::runner::verify_pdf(&path).is_ok()
+        })
+        .await
+        .unwrap_or(true);
+        let left = patience.saturating_sub(first.elapsed());
+        if whole || left.is_zero() {
+            break;
+        }
+        // Still being written. More writing starts the wait for quiet again;
+        // running out of patience shows what is there.
+        tokio::select! {
+            message = events.recv() => message?,
+            () = tokio::time::sleep(left) => break,
+        }
+    }
+    viewing.touch(id)
+}
+
+/// Returns once `events` has been quiet for [`SETTLE`]. `None` if the channel
+/// closed first.
+async fn settle(events: &mut mpsc::UnboundedReceiver<()>) -> Option<()> {
+    loop {
+        let quiet = tokio::time::sleep(SETTLE);
+        tokio::pin!(quiet);
+        tokio::select! {
+            () = &mut quiet => return Some(()),
+            message = events.recv() => message?,
+        }
     }
 }
 
@@ -270,6 +317,67 @@ trailer<</Root 1 0 R>>\n";
                 .register(&directory.path().join("nothing.pdf"))
                 .is_err()
         );
+    }
+
+    /// The way pdfTeX leaves a PDF partway through a compile: pages written,
+    /// page tree and trailer not yet. Reloading that put an error where the
+    /// last good document had been.
+    #[tokio::test]
+    async fn a_half_written_pdf_is_waited_on_until_it_is_whole() {
+        let directory = tempfile::tempdir().unwrap();
+        let file = directory.path().join("paper.pdf");
+        pdf_at(&file);
+        let viewing = Viewing::default();
+        let document = viewing.register(&file).unwrap();
+        let (sender, mut events) = mpsc::unbounded_channel();
+
+        std::fs::write(&file, b"%PDF-1.4\n1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\n").unwrap();
+        sender.send(()).unwrap();
+        let waiting = tokio::time::timeout(
+            SETTLE * 3,
+            next_revision(&viewing, document.id, &mut events, Duration::from_secs(30)),
+        )
+        .await;
+        assert!(waiting.is_err(), "nothing is shown while the file is incomplete");
+
+        // The writer finishes, and says so the way the watcher hears it.
+        pdf_at(&file);
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&file)
+            .and_then(|mut handle| std::io::Write::write_all(&mut handle, b"%%EOF\n"))
+            .unwrap();
+        sender.send(()).unwrap();
+        let revision = tokio::time::timeout(
+            SETTLE * 4,
+            next_revision(&viewing, document.id, &mut events, Duration::from_secs(30)),
+        )
+        .await
+        .expect("a whole file is shown as soon as it settles");
+        assert_eq!(revision, Some(2));
+    }
+
+    /// A writer that died halfway is not coming back to finish, so the file is
+    /// shown for whatever it is once patience runs out.
+    #[tokio::test]
+    async fn an_abandoned_half_written_pdf_is_shown_in_the_end() {
+        let directory = tempfile::tempdir().unwrap();
+        let file = directory.path().join("paper.pdf");
+        pdf_at(&file);
+        let viewing = Viewing::default();
+        let document = viewing.register(&file).unwrap();
+        let (sender, mut events) = mpsc::unbounded_channel();
+
+        std::fs::write(&file, b"%PDF-1.4\npartial").unwrap();
+        sender.send(()).unwrap();
+        let revision = tokio::time::timeout(
+            Duration::from_secs(5),
+            next_revision(&viewing, document.id, &mut events, Duration::from_secs(1)),
+        )
+        .await
+        .expect("patience ran out and the file was shown");
+        assert_eq!(revision, Some(2));
+        drop(sender);
     }
 
     /// A rebuild is what bumps the revision, and the revision is what makes the

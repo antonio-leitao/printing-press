@@ -1,10 +1,21 @@
 <script lang="ts">
   import { api, errorMessage } from '$lib/api';
-  import { fetchPage, pageUrl, renderScale } from '$lib/pdf';
+  import { display } from '$lib/display.svelte';
+  import { blank, fetchPage, paint, pageUrl, renderScale } from '$lib/pdf';
   import type { PageVisibility, PageVisibilityTracker } from '$lib/pdf-visibility';
-  import type { ArtifactSummary, LinkBox, PageSize } from '$lib/types';
+  import type { ArtifactSummary, LinkBox, PageSize, SearchHit } from '$lib/types';
 
-  let { artifact, size, pageNumber, zoom, tracker, onFollow, invert = false } = $props<{
+  let {
+    artifact,
+    size,
+    pageNumber,
+    zoom,
+    tracker,
+    onFollow,
+    invert = false,
+    hits = [],
+    current = null
+  } = $props<{
     artifact: ArtifactSummary;
     size: PageSize;
     pageNumber: number;
@@ -14,6 +25,10 @@
     onFollow?: (link: LinkBox) => void;
     /** Drawn for a dark room: the page is inverted as it is rasterised. */
     invert?: boolean;
+    /** Search hits on this page, in PDF points from its top left. */
+    hits?: SearchHit[];
+    /** The hit the search is on, which may be on another page entirely. */
+    current?: SearchHit | null;
   }>();
 
   let host = $state<HTMLElement | null>(null);
@@ -38,8 +53,7 @@
   // page it has ever shown.
   $effect(() => {
     if (visibility.retain || !canvas || painted === null) return;
-    canvas.width = 0;
-    canvas.height = 0;
+    blank(canvas);
     painted = null;
   });
 
@@ -65,7 +79,9 @@
 
   $effect(() => {
     if (!visibility.render || !canvas) return;
-    const scale = renderScale(size.width, size.height, zoom, window.devicePixelRatio || 1);
+    // The display's ratio as state, so a window moved to another screen is
+    // drawn again for it.
+    const scale = renderScale(size.width, size.height, zoom, display.pixelRatio);
     const url = pageUrl(artifact.id, artifact.revision, pageNumber - 1, scale, invert);
     // The previous drawing stays on screen until the new one replaces it, so a
     // rebuild or a zoom never flashes an empty page.
@@ -82,14 +98,7 @@
           page.bitmap.close();
           return;
         }
-        surface.width = page.width;
-        surface.height = page.height;
-        const context = surface.getContext('2d', { alpha: false });
-        if (!context) throw new Error('could not get a drawing context');
-        context.drawImage(page.bitmap, 0, 0);
-        // The bitmap has been copied into the canvas; holding it would double
-        // the memory for every visible page.
-        page.bitmap.close();
+        paint(surface, page);
         painted = url;
       } catch (reason) {
         if (controller.signal.aborted) return;
@@ -114,6 +123,20 @@
     <p class="render-error" role="alert">Page {pageNumber} could not render: {renderError}</p>
   {/if}
   <canvas bind:this={canvas}></canvas>
+  <!-- Over the page like the links, and for the same reason: a highlight is the
+       reader's mark, not the document's, and it has to stay put at any zoom.
+       A point of slack on each side, because MuPDF's boxes are cut tight to
+       the glyphs and a highlight that touches the letters reads as a smudge. -->
+  {#each hits as hit, index (index)}
+    <span
+      class="hit"
+      class:current={hit === current}
+      style:left={`${(hit.x - 1) * zoom}px`}
+      style:top={`${(hit.y - 1) * zoom}px`}
+      style:width={`${(hit.width + 2) * zoom}px`}
+      style:height={`${(hit.height + 2) * zoom}px`}
+    ></span>
+  {/each}
   <!-- Over the page rather than drawn into it, so a reference stays clickable
        at any zoom and the rasteriser stays a rasteriser. Modified clicks are
        left alone: cmd-click is the source peek. -->
@@ -171,6 +194,20 @@
 
   .link-box:hover {
     background: var(--accent-wash);
+  }
+
+  /* Translucent rather than blended, so the same mark reads on paper and on a
+     page drawn for the dark. Clicks go through to the link underneath. */
+  .hit {
+    position: absolute;
+    border-radius: var(--radius-xs);
+    background: color-mix(in oklab, var(--amber) 34%, transparent);
+    pointer-events: none;
+  }
+
+  .hit.current {
+    background: color-mix(in oklab, var(--accent) 42%, transparent);
+    box-shadow: 0 0 0 var(--bw) var(--accent);
   }
 
   canvas {

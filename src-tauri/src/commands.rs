@@ -156,19 +156,26 @@ pub async fn close_project(state: State<'_, AppState>) -> AppResult<()> {
 
 /// Queues a build. Defaults to the working tree; a source reference selects a
 /// version from the history.
+///
+/// `restart` is a rebuild asked for by hand: a build of this version already
+/// running is abandoned and started again, rather than left to finish first.
 #[tauri::command]
 pub async fn build_project(
     project_id: i64,
     source_ref: Option<String>,
+    restart: Option<bool>,
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> AppResult<u64> {
     let target = self::source_ref(source_ref)?;
     let repository = Arc::clone(&state.repository);
     let project = blocking(move || repository.get_project(project_id)).await?;
-    Arc::clone(&state.builds)
-        .request(app, project, target)
-        .await
+    let builds = Arc::clone(&state.builds);
+    if restart.unwrap_or(false) {
+        builds.restart(app, project, target).await
+    } else {
+        builds.request(app, project, target).await
+    }
 }
 
 #[tauri::command]

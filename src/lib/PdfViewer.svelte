@@ -5,9 +5,10 @@
   import { MAX_ZOOM, MIN_ZOOM, normalizeZoom, wheelZoomFactor, zoomBySteps } from '$lib/pdf-controls';
   import { initialKeyState, resolveKey, type KeyState, type ViewerAction } from '$lib/pdf-keys';
   import { indexAt } from '$lib/pdf-layout';
+  import { describe, firstFrom, groupByPage, hitsOn, stepFrom } from '$lib/pdf-search';
   import { PageVisibilityTracker } from '$lib/pdf-visibility';
   import { theme } from '$lib/theme.svelte';
-  import type { ArtifactSummary, LinkBox, PageSize } from '$lib/types';
+  import type { ArtifactSummary, LinkBox, PageSize, SearchHit } from '$lib/types';
 
   let {
     artifact,
@@ -501,6 +502,144 @@
     viewer.scrollLeft = 0;
   }
 
+  // -- search -----------------------------------------------------------
+
+  /**
+   * zathura's search: `/` opens a prompt, Enter runs it from where the reader
+   * is, and `n` and `N` walk the hits. The prompt stays up with the count while
+   * there are hits to walk; Escape in it puts everything away.
+   */
+  let searchOpen = $state(false);
+  let query = $state('');
+  let searchInput = $state<HTMLInputElement | null>(null);
+  /** What was last searched for. A rebuild asks again for the same thing. */
+  let searched = $state<string | null>(null);
+  let hits = $state<SearchHit[]>([]);
+  let currentHit = $state(-1);
+  let searchError = $state('');
+  let searchGeneration = 0;
+
+  const hitPages = $derived(groupByPage(hits));
+  const searchStatus = $derived(
+    searchError || (searched === null ? '' : describe(currentHit, hits.length))
+  );
+
+  async function openSearch() {
+    searchOpen = true;
+    await tick();
+    searchInput?.focus();
+    searchInput?.select();
+  }
+
+  function clearSearch() {
+    searchGeneration++;
+    searchOpen = false;
+    query = '';
+    searched = null;
+    hits = [];
+    currentHit = -1;
+    searchError = '';
+    viewer?.focus();
+  }
+
+  /** Asks the renderer, and keeps the answer only if nothing newer was asked. */
+  async function find(needle: string): Promise<SearchHit[] | null> {
+    const target = shown;
+    if (!target) return null;
+    const request = ++searchGeneration;
+    try {
+      const found = await api.searchDocument(target.id, needle);
+      if (request !== searchGeneration) return null;
+      searched = needle;
+      searchError = '';
+      hits = found;
+      return found;
+    } catch (reason) {
+      if (request !== searchGeneration) return null;
+      hits = [];
+      currentHit = -1;
+      searchError = errorMessage(reason);
+      return null;
+    }
+  }
+
+  async function submitSearch(event: SubmitEvent) {
+    event.preventDefault();
+    const needle = query;
+    if (!needle.trim()) {
+      clearSearch();
+      return;
+    }
+    // Back to the page, so `n` works straight away. The prompt stays up with
+    // the count in it.
+    viewer?.focus();
+    const from = readingPosition();
+    const found = await find(needle);
+    if (!found) return;
+    currentHit = firstFrom(found, from.page, from.top);
+    if (currentHit >= 0) {
+      recordJump();
+      reveal(found[currentHit]);
+    }
+  }
+
+  function searchKeydown(event: KeyboardEvent) {
+    if (event.key !== 'Escape') return;
+    event.preventDefault();
+    // Not the window's: Escape there closes menus, and this one is spent.
+    event.stopPropagation();
+    clearSearch();
+  }
+
+  function stepHit(sign: 1 | -1, count: number) {
+    if (hits.length === 0) return;
+    recordJump();
+    currentHit = stepFrom(currentHit, hits.length, sign, count);
+    reveal(hits[currentHit]);
+  }
+
+  /**
+   * After a rebuild the same words are somewhere slightly different, so the
+   * search is asked again and the reader kept on the nearest hit to the one
+   * they were on.
+   */
+  async function searchAgain() {
+    if (searched === null) return;
+    const previous = hits[currentHit];
+    const found = await find(searched);
+    if (!found) return;
+    currentHit = previous ? firstFrom(found, previous.page, previous.y) : -1;
+  }
+
+  /** The top of the view, as a page and a distance down it in PDF points. */
+  function readingPosition(): { page: number; top: number } {
+    const elements = pageElements();
+    const element = viewer ? pageAt(viewer.scrollTop) : null;
+    if (!viewer || !element || elements.length === 0) return { page: 0, top: 0 };
+    const offset = viewer.scrollTop - (element.offsetTop - elements[0].offsetTop);
+    return {
+      page: Number(element.dataset.page ?? 1) - 1,
+      top: Math.max(0, offset / zoom)
+    };
+  }
+
+  /**
+   * Brings a hit into view a third of the way down, where the eye already is,
+   * and across to it when the page is wider than the window.
+   */
+  function reveal(hit: SearchHit) {
+    if (!viewer) return;
+    const element = viewer.querySelector<HTMLElement>(`[data-page="${hit.page + 1}"]`);
+    if (!element) return;
+    const viewerRect = viewer.getBoundingClientRect();
+    const pageRect = element.getBoundingClientRect();
+    const x = pageRect.left - viewerRect.left + viewer.scrollLeft + (hit.x + hit.width / 2) * zoom;
+    const y = pageRect.top - viewerRect.top + viewer.scrollTop + (hit.y + hit.height / 2) * zoom;
+    glideX = clampX(x - viewer.clientWidth / 2);
+    glideY = clampY(y - viewer.clientHeight / 3);
+    startGlide();
+  }
+
   // -- keyboard ---------------------------------------------------------
 
   function editableTarget(target: EventTarget | null): boolean {
@@ -549,6 +688,12 @@
       case 'invert':
         // The whole of Press, not only the page under the pointer.
         theme.toggle();
+        return;
+      case 'search':
+        void openSearch();
+        return;
+      case 'match':
+        stepHit(action.sign, action.count);
     }
   }
 
@@ -689,6 +834,8 @@
         } else {
           void fitHeightOnOpen(sizes);
         }
+        // The hits belonged to the build that was on screen.
+        void searchAgain();
       })
       .catch((reason) => {
         if (request !== generation) return;
@@ -699,33 +846,59 @@
   });
 </script>
 
-<div class="viewer" bind:this={viewer} tabindex="-1">
-  {#if shown && tracker && layout.length > 0}
-    <div
-      class="pages"
-      class:zooming={transientScale !== 1}
-      bind:this={pagesHost}
-      style:transform={`scale(${transientScale})`}
-      style:transform-origin={`${transformOriginX}px ${transformOriginY}px`}
-    >
-      {#each layout as size, index}
-        <PdfPage
-          artifact={shown}
-          size={size}
-          pageNumber={index + 1}
-          zoom={zoom}
-          tracker={tracker}
-          invert={inverted}
-          onFollow={followLink}
-        />
-      {/each}
-    </div>
-  {:else if !loadError}
-    <p class="placeholder">Opening PDF…</p>
+<div class="frame">
+  <div class="viewer" bind:this={viewer} tabindex="-1">
+    {#if shown && tracker && layout.length > 0}
+      <div
+        class="pages"
+        class:zooming={transientScale !== 1}
+        bind:this={pagesHost}
+        style:transform={`scale(${transientScale})`}
+        style:transform-origin={`${transformOriginX}px ${transformOriginY}px`}
+      >
+        {#each layout as size, index}
+          <PdfPage
+            artifact={shown}
+            size={size}
+            pageNumber={index + 1}
+            zoom={zoom}
+            tracker={tracker}
+            invert={inverted}
+            onFollow={followLink}
+            hits={hitsOn(hitPages, index)}
+            current={hits[currentHit] ?? null}
+          />
+        {/each}
+      </div>
+    {:else if !loadError}
+      <p class="placeholder">Opening PDF…</p>
+    {/if}
+  </div>
+  {#if searchOpen}
+    <form class="search" role="search" onsubmit={submitSearch}>
+      <span class="slash" aria-hidden="true">/</span>
+      <input
+        bind:this={searchInput}
+        bind:value={query}
+        onkeydown={searchKeydown}
+        aria-label="Search the document"
+        placeholder="Search"
+        autocomplete="off"
+        spellcheck="false"
+      />
+      {#if searchStatus}<span class="count">{searchStatus}</span>{/if}
+    </form>
   {/if}
 </div>
 
 <style>
+  /* Only there to give the search prompt something to sit in the corner of. */
+  .frame {
+    position: relative;
+    height: 100%;
+    min-height: 0;
+  }
+
   .viewer {
     height: 100%;
     min-height: 0;
@@ -747,6 +920,44 @@
 
   .pages.zooming {
     will-change: transform;
+  }
+
+  /* zathura keeps its prompt along the bottom. Tucked into the corner here, so
+     it covers the margin of a page rather than a line of it. */
+  .search {
+    position: absolute;
+    right: var(--space-lg);
+    bottom: var(--space-lg);
+    display: flex;
+    align-items: center;
+    gap: var(--space-sm);
+    width: min(22rem, calc(100% - 2 * var(--space-lg)));
+    padding: var(--space-xs) var(--space-sm);
+    background: var(--card);
+    border: var(--bw) solid var(--line-2);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow-lg);
+    font-size: var(--fs-body);
+  }
+
+  .slash,
+  .count {
+    flex: none;
+    color: var(--ink-3);
+  }
+
+  .count {
+    font-size: var(--fs-meta);
+    font-variant-numeric: tabular-nums;
+  }
+
+  .search input {
+    flex: 1;
+    min-width: 0;
+    padding: 0.15rem 0;
+    border: 0;
+    outline: none;
+    background: none;
   }
 
   .placeholder {

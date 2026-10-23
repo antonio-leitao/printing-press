@@ -13,7 +13,8 @@
      and pass what came out, so they know where its edges landed: a ring goes
      round the paper and not round the cell. */
 
-  import { fetchPage, coverUrl } from '$lib/pdf';
+  import { display } from '$lib/display.svelte';
+  import { blank, fetchPage, coverUrl, paint } from '$lib/pdf';
   import type { PageVisibility, PageVisibilityTracker } from '$lib/pdf-visibility';
   import type { TemplateCover } from '$lib/types';
 
@@ -71,21 +72,18 @@
   // long after it stops being drawn, and a small scroll back costs nothing.
   $effect(() => {
     if (kept || !canvas || painted === null) return;
-    canvas.width = 0;
-    canvas.height = 0;
+    blank(canvas);
     painted = null;
   });
 
   $effect(() => {
     const surface = canvas;
     if (!shown) return;
+    const ratio = display.pixelRatio;
     const url = coverUrl(
       id,
       page,
-      Math.min(
-        Math.min(width / cover.width, height / cover.height) * (window.devicePixelRatio || 1),
-        4
-      ),
+      Math.min(Math.min(width / cover.width, height / cover.height) * ratio, 4),
       invert
     );
     if (!surface || painted === url) return;
@@ -98,13 +96,9 @@
           page.bitmap.close();
           return;
         }
-        const ratio = window.devicePixelRatio || 1;
-        surface.width = page.width;
-        surface.height = page.height;
         surface.style.width = `${page.width / ratio}px`;
         surface.style.height = `${page.height / ratio}px`;
-        surface.getContext('2d', { alpha: false })?.drawImage(page.bitmap, 0, 0);
-        page.bitmap.close();
+        paint(surface, page);
         painted = url;
         failed = false;
       } catch {

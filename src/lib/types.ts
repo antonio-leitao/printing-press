@@ -1,3 +1,5 @@
+import type { Component } from 'svelte';
+
 export type Engine = 'pdflatex' | 'xelatex' | 'lualatex';
 
 /** What a project is written in. Markdown reaches latexmk through pandoc. */
@@ -309,4 +311,14 @@ export type WatcherError = {
 export type CommandError = {
   code?: string;
   message?: string;
+};
+
+/** One entry in a right-click menu, wherever the menu is asked for. */
+export type MenuItem = {
+  label: string;
+  icon: Component;
+  run: () => void;
+  disabled?: boolean;
+  /// Destructive: red on hover, and cut off from the items above by a rule.
+  danger?: boolean;
 };
