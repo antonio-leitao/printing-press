@@ -109,6 +109,15 @@ export type VersionSummary = {
   snapshot: SnapshotSummary | null;
   build: BuildState;
   artifact: ArtifactSummary | null;
+  /** As last counted: after the first successful build, and every one after. */
+  words: number | null;
+};
+
+/** The working tree's word count on one day, the day's last count. */
+export type WordDay = {
+  /** `YYYY-MM-DD`, in this machine's time zone. */
+  day: string;
+  words: number;
 };
 
 /**
@@ -210,6 +219,26 @@ export type OpenRequest = {
     pandoc: ToolInfo;
     neovim: ToolInfo;
   };
+  /** Where the editor's cursor was, when it asked with one. */
+  sync: SourceLine | null;
+};
+
+/** A line of a source file, as the editor names it. */
+export type SourceLine = {
+  /** Absolute. */
+  file: string;
+  /** 1-based. */
+  line: number;
+};
+
+/** A place on a page in PDF points from its top left: where a line ended up. */
+export type PdfSpot = {
+  /** 1-based. */
+  page: number;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
 };
 
 /**

@@ -1,12 +1,14 @@
 <script lang="ts">
-  import { onMount, untrack } from 'svelte';
+  import { onMount, tick, untrack } from 'svelte';
   import { fade } from 'svelte/transition';
   import {
+    ChevronRight,
     Download,
     FilePlus,
     Pencil,
     Pin,
     PinOff,
+    Search,
     Settings,
     Stamp,
     Trash2
@@ -14,12 +16,14 @@
   import { listen } from '@tauri-apps/api/event';
   import { getCurrentWebview } from '@tauri-apps/api/webview';
   import { open } from '@tauri-apps/plugin-dialog';
+  import GroupingControl from '$lib/GroupingControl.svelte';
   import NewDocumentDialog, { type NewDocument } from '$lib/NewDocumentDialog.svelte';
   import PdfThumbnail from '$lib/PdfThumbnail.svelte';
-  import PdfViewer, { type PeekRequest } from '$lib/PdfViewer.svelte';
+  import PdfViewer, { type PeekRequest, type SyncTarget } from '$lib/PdfViewer.svelte';
   import SaveTemplateDialog from '$lib/SaveTemplateDialog.svelte';
   import SettingsDialog from '$lib/SettingsDialog.svelte';
   import { api, errorMessage } from '$lib/api';
+  import { groupByFolder, groupingDepth, matchesFilter, narrowGrouping } from '$lib/library';
   import { fail, notify } from '$lib/messages.svelte';
   import { modal } from '$lib/modal';
   import { theme } from '$lib/theme.svelte';
@@ -37,10 +41,12 @@
     type IconChoice,
     type LooseDocument,
     type ProjectSummary,
+    type SourceLine,
     type SourcePeek,
     type TemplateSummary,
     type VersionSummary,
-    type WatcherError
+    type WatcherError,
+    type WordDay
   } from '$lib/types';
 
   /** Matches the `.pinned-card` track width below, so nothing larger is drawn. */
@@ -117,6 +123,14 @@
 
   // -- history -------------------------------------------------------------
   let versions = $state<VersionSummary[]>([]);
+  /// Where the editor's cursor was when it asked, waiting for the working
+  /// tree's PDF to be on screen; then where the viewer should go.
+  let pendingSync = $state<SourceLine | null>(null);
+  let syncTarget = $state<SyncTarget | null>(null);
+  let syncs = 0;
+  /// The working tree's count a day at a time, for the line at the top of the
+  /// history. Fetched with the versions, because a count changes when they do.
+  let wordDays = $state<WordDay[]>([]);
   /** Which row of the history the viewer is showing. */
   let selectedKey = $state<string>(WORKTREE);
   let showHistory = $state(false);
@@ -278,6 +292,106 @@
   const pinned = $derived(projects.filter((project) => project.pinned));
   const unpinned = $derived(projects.filter((project) => !project.pinned));
 
+  // -- arranging the library ---------------------------------------------------
+
+  /// How many folder levels the library is grouped by, and which groups are
+  /// folded shut. Remembered on this machine the way the theme is: they are how
+  /// one reader likes to look at the shelf, not facts about the documents.
+  const GROUPING_KEY = 'press:grouping';
+  const COLLAPSED_KEY = 'press:collapsed-groups';
+
+  function remembered<T>(key: string, fallback: T): T {
+    try {
+      const saved = localStorage.getItem(key);
+      return saved === null ? fallback : (JSON.parse(saved) as T);
+    } catch {
+      return fallback;
+    }
+  }
+
+  function remember(key: string, value: unknown) {
+    try {
+      localStorage.setItem(key, JSON.stringify(value));
+    } catch {
+      // A preference that cannot be written down still applies to this session.
+    }
+  }
+
+  let grouping = $state(Number(remembered(GROUPING_KEY, 0)) || 0);
+  let collapsedGroups = $state(new Set<string>(remembered<string[]>(COLLAPSED_KEY, [])));
+  /// Words typed into the library's filter. Not remembered: a filter left on
+  /// from yesterday is a library with documents missing from it.
+  let filter = $state('');
+  let filterInput = $state<HTMLInputElement | null>(null);
+  /// The filter is an icon until it is asked for, and stays a field for as
+  /// long as it holds words.
+  let searching = $state(false);
+
+  $effect(() => remember(GROUPING_KEY, grouping));
+  $effect(() => remember(COLLAPSED_KEY, [...collapsedGroups]));
+
+  /// Zero when every document shares one folder, and the slider has nothing to
+  /// offer. The level is clamped rather than reset, so a library that grows
+  /// back into its old depth comes back the way it was left.
+  const groupingLimit = $derived(groupingDepth(projects));
+  const groupingLevel = $derived(Math.min(grouping, groupingLimit));
+  const filtering = $derived(filter.trim() !== '');
+  const listed = $derived(
+    filtering ? projects.filter((project) => matchesFilter(project, filter)) : projects
+  );
+
+  /// Grouped, every document is in its folder's group, pinned or not: the shelf
+  /// is a shortcut to a few of them, not where they live. Flat, the pinned ones
+  /// stay on the shelf as they always have — unless a filter has the shelf
+  /// hidden, when the matches are all there is.
+  const arrangement = $derived.by(() => {
+    if (groupingLevel === 0) return { groups: [], loose: filtering ? listed : unpinned };
+    const grouped = groupByFolder(projects, groupingLevel);
+    return filtering ? narrowGrouping(grouped, (project) => matchesFilter(project, filter)) : grouped;
+  });
+  const groupCount = $derived(
+    groupingLevel === 0 ? 0 : groupByFolder(projects, groupingLevel).groups.length
+  );
+
+  function toggleGroup(key: string) {
+    const next = new Set(collapsedGroups);
+    if (next.has(key)) next.delete(key);
+    else next.add(key);
+    collapsedGroups = next;
+  }
+
+  function openFilter() {
+    searching = true;
+    void tick().then(() => {
+      filterInput?.focus();
+      filterInput?.select();
+    });
+  }
+
+  function closeFilter() {
+    filter = '';
+    searching = false;
+  }
+
+  /// Leaving an empty field folds it back into the icon. One with words in it
+  /// stays open, because the library below is still narrowed by them.
+  function settleFilter() {
+    if (!filtering) searching = false;
+  }
+
+  /// Escape gives the whole library back; Enter opens the one document a filter
+  /// has narrowed it to, and does nothing while there is still a choice.
+  function filterKeys(event: KeyboardEvent) {
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      event.stopPropagation();
+      closeFilter();
+    } else if (event.key === 'Enter' && filtering && listed.length === 1) {
+      event.preventDefault();
+      void openProject(listed[0]);
+    }
+  }
+
   /// What the library holds, by what it is written in. This line used to be a
   /// sentence about what Press is — read once on the first run and then read
   /// past for good, which is a poor use of the only line under the title. The
@@ -331,6 +445,12 @@
               progress = null;
             }
             if (update.build.status !== 'running') buildLog = '';
+          })
+        );
+        unlisteners.push(
+          // A count arrives a moment after the PDF it was taken beside.
+          await listen<{ projectId: number }>('words-counted', (event) => {
+            if (event.payload.projectId === activeProject?.id) void refreshVersions();
           })
         );
         unlisteners.push(
@@ -453,6 +573,15 @@
         if ((event.metaKey || event.ctrlKey) && !event.altKey && isN) {
           event.preventDefault();
           if (!gallery) void openGallery();
+          return;
+        }
+        // ⌘F as everywhere, and `/` as in the reader, where it searches the
+        // page: one key for "find" whichever screen it is pressed on.
+        const isF = event.code === 'KeyF' || event.key.toLowerCase() === 'f';
+        const find = (event.metaKey && !event.altKey && isF) || (event.key === '/' && !event.metaKey && !event.ctrlKey);
+        if (find && projects.length > 0) {
+          event.preventDefault();
+          openFilter();
           return;
         }
         return;
@@ -578,12 +707,28 @@
       return;
     }
     const only = request.candidates.length === 1 ? request.candidates[0] : null;
+    // Asked from the editor about the document already open: a request to look
+    // somewhere in it, not to open it again. Opening again would restart its
+    // watcher and rebuild it for nothing.
+    if (
+      request.sync &&
+      only?.projectId != null &&
+      only.projectId === activeProject?.id &&
+      request.warnings.length === 0
+    ) {
+      selectedKey = WORKTREE;
+      pendingSync = request.sync;
+      return;
+    }
     // A `.latexmkrc` is executable Perl, so it is shown before it ever runs —
     // but only once: a document Press already keeps was accepted when it was
     // added, and asking again on every `:Press` would train the answer away.
     const consented = only?.projectId !== null || only.latexmkrcPaths.length === 0;
     if (only && consented && request.warnings.length === 0) {
       await openCandidate(only);
+      // After it is open, so the place is looked for in this document's PDF
+      // and not in whatever was on screen before it.
+      pendingSync = request.sync;
       return;
     }
     choosing = request;
@@ -709,7 +854,13 @@
   async function refreshVersions() {
     if (!activeProject) return;
     try {
-      versions = await api.listVersions(activeProject.id);
+      const projectId = activeProject.id;
+      const [listed, days] = await Promise.all([
+        api.listVersions(projectId),
+        api.wordHistory(projectId)
+      ]);
+      versions = listed;
+      wordDays = days;
       if (!versions.some((version) => versionKey(version) === selectedKey)) {
         selectedKey = WORKTREE;
       }
@@ -1210,9 +1361,94 @@
     return version && version.sourceRef !== WORKTREE ? name : `${name} · up to date`;
   }
 
+  // -- word counts -------------------------------------------------------------
+
+  const counting = new Intl.NumberFormat();
+
+  function words(count: number) {
+    return `${counting.format(count)} ${count === 1 ? 'word' : 'words'}`;
+  }
+
+  /// A difference as it is read aloud: with its sign, and none for nothing.
+  function signed(count: number) {
+    if (count === 0) return '±0';
+    return `${count > 0 ? '+' : '−'}${counting.format(Math.abs(count))}`;
+  }
+
+  /// The newest snapshot with a count, which is what the working tree's own
+  /// count is measured against: how much has been written since it was taken.
+  const lastCounted = $derived(
+    versions.find((version) => version.snapshot && version.words !== null) ?? null
+  );
+
+  /// Today's change: today's count against the last day before it that had
+  /// one. Nothing on a day nothing was built.
+  const todayChange = $derived.by(() => {
+    const today = new Date();
+    const key = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
+    const last = wordDays[wordDays.length - 1];
+    if (!last || last.day !== key || wordDays.length < 2) return null;
+    return last.words - wordDays[wordDays.length - 2].words;
+  });
+
+  /// The last month of counts as a line, in a box 100 wide and 24 tall. One
+  /// point a day that was counted, so a week away from the document is a step
+  /// rather than a gap — the line is about how the document grew, not about
+  /// when it was looked at.
+  const sparkline = $derived.by(() => {
+    const recent = wordDays.slice(-30);
+    if (recent.length < 2) return '';
+    const counts = recent.map((day) => day.words);
+    const low = Math.min(...counts);
+    const high = Math.max(...counts);
+    const span = Math.max(1, high - low);
+    return recent
+      .map((day, index) => {
+        const x = (index / (recent.length - 1)) * 100;
+        const y = 22 - ((day.words - low) / span) * 20;
+        return `${x.toFixed(1)},${y.toFixed(1)}`;
+      })
+      .join(' ');
+  });
+
+  // Forward search: once the working tree's PDF is the one shown, ask where
+  // the editor's line ended up in it and send the viewer there.
+  $effect(() => {
+    const wanted = pendingSync;
+    const artifact = shownArtifact;
+    if (!wanted || !artifact || selectedRef !== WORKTREE) return;
+    if (!viewing && artifact.projectId !== activeProject?.id) return;
+    pendingSync = null;
+    void api
+      .forwardSearch(artifact.id, wanted.file, wanted.line)
+      .then((spot) => {
+        if (spot) syncTarget = { ...spot, artifactId: artifact.id, nonce: ++syncs };
+      })
+      .catch(() => {
+        // A PDF whose sync data cannot be read is still the right PDF to be
+        // looking at; it is only not scrolled.
+      });
+  });
+
   function location(file: string | null, line: number | null) {
     if (!file) return '';
     return line ? `${file}:${line}` : file;
+  }
+
+  /// A file the editor can be pointed at: one in the working tree, named
+  /// relative to the project. An absolute name is a class or a package of the
+  /// TeX distribution, which is not the reader's to edit.
+  function openable(file: string) {
+    return activeProject !== null && selectedRef === WORKTREE && !file.startsWith('/');
+  }
+
+  async function openDiagnostic(file: string, line: number | null) {
+    if (!activeProject) return;
+    try {
+      notify(await api.launchEditor(activeProject.id, file, line ?? undefined));
+    } catch (reason) {
+      fail(reason);
+    }
   }
 
   // From the version being read, not from the project. The project's own build
@@ -1244,7 +1480,22 @@
         <nav class="history" aria-label="Version history">
           <!-- Clears the traffic lights, which sit over this panel's top left
                whenever it is open. -->
-          <div class="history-head quiet">{activeProject.name}</div>
+          <div class="history-head">
+            <span class="quiet">{activeProject.name}</span>
+            {#if versions[0]?.words != null}
+              <div class="word-trend">
+                {#if sparkline}
+                  <svg viewBox="0 0 100 24" preserveAspectRatio="none" aria-hidden="true">
+                    <polyline points={sparkline} />
+                  </svg>
+                {/if}
+                <span>{words(versions[0].words)}</span>
+                {#if todayChange !== null}
+                  <span class="quiet">{signed(todayChange)} today</span>
+                {/if}
+              </div>
+            {/if}
+          </div>
           {#each versions as version (versionKey(version))}
             <div class="version" class:current={versionKey(version) === selectedKey}>
               <!-- Right-click for rename, download and discard. -->
@@ -1262,6 +1513,13 @@
                 {#if version.snapshot?.body}
                   <span class="quiet body">{version.snapshot.body}</span>
                 {/if}
+                {#if version.words !== null}
+                  <span class="quiet version-words">
+                    {words(version.words)}{#if !version.snapshot && lastCounted?.words != null}{` · ${signed(
+                        version.words - lastCounted.words
+                      )} since ${lastCounted.title}`}{/if}
+                  </span>
+                {/if}
               </button>
             </div>
           {/each}
@@ -1278,6 +1536,7 @@
             bind:loadError={viewerError}
             enabled={!dialogOpen}
             onPeek={peekSource}
+            target={syncTarget}
           />
         {:else}
           <div class="empty">
@@ -1303,7 +1562,21 @@
             <ul class="diagnostics">
               {#each [...errors, ...warnings] as diagnostic}
                 <li class={diagnostic.severity}>
-                  {#if diagnostic.file}<code>{location(diagnostic.file, diagnostic.line)}</code>{/if}
+                  {#if diagnostic.file && openable(diagnostic.file)}
+                    <!-- The working tree's own files, opened where the error
+                         is. A version from the history was built from a copy
+                         that is gone, and the file on disk has moved on since,
+                         so its line numbers would point at the wrong place. -->
+                    <button
+                      class="link source"
+                      title="Open in the editor"
+                      onclick={() => openDiagnostic(diagnostic.file!, diagnostic.line)}
+                    >
+                      <code>{location(diagnostic.file, diagnostic.line)}</code>
+                    </button>
+                  {:else if diagnostic.file}
+                    <code>{location(diagnostic.file, diagnostic.line)}</code>
+                  {/if}
                   <span>{diagnostic.message}</span>
                 </li>
               {/each}
@@ -1350,6 +1623,9 @@
         </button>
       {/if}
       <span class="spacer"></span>
+      {#if selected?.words != null}
+        <span class="quiet">{words(selected.words)}</span>
+      {/if}
       {#if viewerPageCount > 0}
         <span class="quiet">{viewerPage}/{viewerPageCount}</span>
       {/if}
@@ -1382,7 +1658,53 @@
             : librarySummary}
         </p>
       </div>
-      <div class="library-actions">
+      <!-- A row of quiet icons and one button with words on it. What changes the
+           view (filter, grouping) and what is a way in (settings, a new
+           document) are all 30px icons; Open document is the one filled
+           control, past a hairline at the end. -->
+      <div class="library-actions toolbar">
+        {#if projects.length > 0}
+          {#if searching || filtering}
+            <label class="filter">
+              <Search size={14} strokeWidth={1.75} aria-hidden="true" />
+              <input
+                bind:this={filterInput}
+                bind:value={filter}
+                onkeydown={filterKeys}
+                onblur={settleFilter}
+                placeholder="Filter"
+                aria-label="Filter documents by name or path"
+                spellcheck="false"
+                autocomplete="off"
+              />
+              <!-- Pressed without taking focus from the field, so an empty
+                   field is not folded away by its own blur first. -->
+              <button
+                class="filter-close"
+                onpointerdown={(event) => event.preventDefault()}
+                onclick={closeFilter}
+                aria-label="Clear and close the filter"
+              >
+                esc
+              </button>
+            </label>
+          {:else}
+            <button
+              class="quiet-action"
+              onclick={openFilter}
+              title="Filter  /"
+              aria-label="Filter documents"
+            >
+              <Search size={16} strokeWidth={1.75} aria-hidden="true" />
+            </button>
+          {/if}
+        {/if}
+        {#if groupingLimit > 0}
+          <!-- A slider rather than a switch, because the useful amount of
+               grouping depends on how deep the library goes: one level is
+               a few broad shelves, the last is every folder on its own. -->
+          <GroupingControl bind:level={grouping} limit={groupingLimit} groups={groupCount} />
+        {/if}
         <button
           class="quiet-action"
           onclick={openSettings}
@@ -1391,11 +1713,17 @@
         >
           <Settings size={16} strokeWidth={1.75} aria-hidden="true" />
         </button>
-        <button class="quiet-action wide" onclick={openGallery} disabled={busy}>
+        <button
+          class="quiet-action"
+          onclick={openGallery}
+          disabled={busy}
+          title="New document"
+          aria-label="New document"
+        >
           <FilePlus size={16} strokeWidth={1.75} aria-hidden="true" />
-          New document
         </button>
-        <button onclick={chooseDocument} disabled={busy}>
+        <span class="toolbar-rule" aria-hidden="true"></span>
+        <button class="primary" onclick={chooseDocument} disabled={busy}>
           {busy ? 'Opening…' : 'Open document'}
         </button>
       </div>
@@ -1418,7 +1746,56 @@
         </div>
       </section>
     {:else}
-      {#if pinned.length > 0}
+      {#snippet projectCard(project: ProjectSummary)}
+        {@const state = cardState(project)}
+        <article class="project-card">
+          <!-- Right-click anywhere on the row for pin, rename, download and
+               remove. There is no ⋯ button: the menu is the only place those
+               live, so there is nothing to keep in step with it. -->
+          <button
+            class="project-open"
+            onclick={() => openProject(project)}
+            oncontextmenu={(event) => openMenu(event, projectMenu(project))}
+            disabled={busy || !project.available}
+          >
+            <span class="project-thumb" class:inverted={dark}>
+              {#if project.artifact}
+                <PdfThumbnail
+                  artifact={project.artifact}
+                  width={GRID_THUMB_WIDTH}
+                  invert={dark}
+                />
+              {:else}
+                <span class="missing-thumbnail">No PDF</span>
+              {/if}
+            </span>
+            <span class="project-lines">
+              <strong class="name" title={project.documentPath}>{project.name}</strong>
+              <!-- Which document this is, when the name alone does not say.
+                   `main.tex` and `paper.tex` are what half the world calls
+                   its source, so the folder is what tells two of them apart
+                   — and the extension carries what the old `LATEX` line used
+                   to, for nothing, on a line that was needed anyway. -->
+              <span class="where" title={project.documentPath}
+                >{#if project.location}<span class="where-folder">{project.location}/</span
+                  >{/if}<span class="where-file">{project.fileName}</span></span
+              >
+              <span class="state {state.tone}">
+                <!-- Grouped or filtered, a pinned document is shown among
+                     the rest, and this is what still says it is pinned. -->
+                {#if project.pinned && (groupingLevel > 0 || filtering)}<Pin
+                    class="pin-mark"
+                    size={10}
+                    strokeWidth={2}
+                    aria-label="Pinned"
+                  />{/if}{state.text}
+              </span>
+            </span>
+          </button>
+        </article>
+      {/snippet}
+
+      {#if pinned.length > 0 && !filtering}
         <section class="shelf" aria-labelledby="pinned-heading">
           <h2 class="section-title" id="pinned-heading">Pinned</h2>
           <div class="pinned-row">
@@ -1453,50 +1830,62 @@
         </section>
       {/if}
 
-      <section class="grid-section" aria-labelledby="all-heading">
-        <h2 class="section-title" id="all-heading">All documents</h2>
-        <div class="project-grid">
-        {#each unpinned as project (project.id)}
-          {@const state = cardState(project)}
-          <article class="project-card">
-            <!-- Right-click anywhere on the row for pin, rename, download and
-                 remove. There is no ⋯ button: the menu is the only place those
-                 live, so there is nothing to keep in step with it. -->
-            <button
-              class="project-open"
-              onclick={() => openProject(project)}
-              oncontextmenu={(event) => openMenu(event, projectMenu(project))}
-              disabled={busy || !project.available}
-            >
-              <span class="project-thumb" class:inverted={dark}>
-                {#if project.artifact}
-                  <PdfThumbnail
-                    artifact={project.artifact}
-                    width={GRID_THUMB_WIDTH}
-                    invert={dark}
-                  />
-                {:else}
-                  <span class="missing-thumbnail">No PDF</span>
-                {/if}
-              </span>
-              <span class="project-lines">
-                <strong class="name" title={project.documentPath}>{project.name}</strong>
-                <!-- Which document this is, when the name alone does not say.
-                     `main.tex` and `paper.tex` are what half the world calls
-                     its source, so the folder is what tells two of them apart
-                     — and the extension carries what the old `LATEX` line used
-                     to, for nothing, on a line that was needed anyway. -->
-                <span class="where" title={project.documentPath}
-                  >{#if project.location}<span class="where-folder">{project.location}/</span
-                    >{/if}<span class="where-file">{project.fileName}</span></span
-                >
-                <span class="state {state.tone}">{state.text}</span>
-              </span>
-            </button>
-          </article>
+      {#if filtering && listed.length === 0}
+        <section class="grid-section">
+          <p class="quiet">No documents match “{filter.trim()}”.</p>
+        </section>
+      {:else if groupingLevel === 0}
+        <section class="grid-section" aria-labelledby="all-heading">
+          <h2 class="section-title" id="all-heading">
+            {filtering ? 'Matching documents' : 'All documents'}
+          </h2>
+          <div class="project-grid">
+            {#each arrangement.loose as project (project.id)}
+              {@render projectCard(project)}
+            {/each}
+          </div>
+        </section>
+      {:else}
+        {#each arrangement.groups as group (group.key)}
+          <!-- A filter opens every group it finds something in: a match
+               folded away inside a shut group is a match nobody sees. -->
+          {@const open = filtering || !collapsedGroups.has(group.key)}
+          <section class="grid-section" aria-label={group.name}>
+            <h2 class="section-title">
+              <button
+                class="group-toggle"
+                aria-expanded={open}
+                onclick={() => toggleGroup(group.key)}
+                title={group.key}
+              >
+                <ChevronRight size={12} strokeWidth={2.25} aria-hidden="true" />
+                {#each group.parents as parent, index (index)}<span>{parent}&nbsp;/&nbsp;</span>{/each}
+                <span class="group-name">{group.name}</span>
+                <span class="group-count">{group.items.length}</span>
+              </button>
+            </h2>
+            {#if open}
+              <div class="project-grid">
+                {#each group.items as project (project.id)}
+                  {@render projectCard(project)}
+                {/each}
+              </div>
+            {:else}
+              <p class="group-preview">{group.items.map((item) => item.name).join(', ')}</p>
+            {/if}
+          </section>
         {/each}
-        </div>
-      </section>
+        {#if arrangement.loose.length > 0}
+          <section class="grid-section" aria-labelledby="other-heading">
+            <h2 class="section-title" id="other-heading">Other documents</h2>
+            <div class="project-grid">
+              {#each arrangement.loose as project (project.id)}
+                {@render projectCard(project)}
+              {/each}
+            </div>
+          </section>
+        {/if}
+      {/if}
     {/if}
   </main>
 {/if}
@@ -1878,8 +2267,43 @@
      Only the history needs it: everywhere else the lights sit over the PDF's
      own margin. */
   .history-head {
+    display: grid;
+    gap: 0.4rem;
     padding: 2.25rem 0.6rem 0.4rem;
     border-bottom: var(--bw) solid var(--line);
+  }
+
+  /* The working tree's count, and how it has moved over the last month: a
+     line of the accent's own colour, the size of a word, beside the number it
+     ends at. */
+  .word-trend {
+    display: flex;
+    align-items: center;
+    gap: 0.45rem;
+    color: var(--ink-2);
+    font-size: var(--fs-meta);
+    font-variant-numeric: tabular-nums;
+  }
+
+  .word-trend svg {
+    flex: none;
+    width: 3.5rem;
+    height: 0.9rem;
+    overflow: visible;
+  }
+
+  .word-trend polyline {
+    fill: none;
+    stroke: var(--accent);
+    stroke-width: 1.5;
+    stroke-linejoin: round;
+    stroke-linecap: round;
+    vector-effect: non-scaling-stroke;
+  }
+
+  .version-words {
+    font-size: var(--fs-meta);
+    font-variant-numeric: tabular-nums;
   }
 
   /* Over the document rather than beside it. Laid out in the flex row the
@@ -2000,6 +2424,20 @@
 
   .diagnostics code {
     margin-right: 0.4rem;
+  }
+
+  /* The location, as something to click. Kept in the error's own colour
+     rather than turned into a link-blue, and underlined on hover, which is
+     the only thing that says it does something. */
+  .diagnostics .source {
+    padding: 0;
+    color: inherit;
+  }
+
+  .diagnostics .source:hover:not(:disabled) {
+    background: none;
+    color: inherit;
+    text-decoration: underline;
   }
 
   .keys {
@@ -2140,6 +2578,164 @@
   .library-actions .quiet-action:disabled {
     color: var(--line-3);
     cursor: default;
+  }
+
+  /* The header's row: every control 30px tall and 2px apart, so the icons
+     read as one strip and the button at the end as the thing to press. */
+  .library-actions.toolbar {
+    gap: 0.125rem;
+  }
+
+  .toolbar .quiet-action {
+    width: 1.875rem;
+    height: 1.875rem;
+    padding: 0;
+  }
+
+  .toolbar .primary {
+    height: 1.875rem;
+    padding: 0 0.875rem;
+  }
+
+  .toolbar-rule {
+    flex: none;
+    width: var(--bw);
+    height: 1rem;
+    margin: 0 0.625rem;
+    background: var(--line-2);
+  }
+
+  /* The field's own frame and the dialogs' focus — the accent edge and a soft
+     ring under it — because it is a field like theirs, sitting in a header.
+     It opens out of the icon it replaces, from that icon's width. */
+  .filter {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    width: 13rem;
+    height: 1.875rem;
+    margin-right: 0.25rem;
+    padding: 0 0.3rem 0 0.6rem;
+    border: var(--bw) solid var(--line-2);
+    border-radius: var(--radius);
+    color: var(--ink-3);
+    animation: filter-open var(--duration) ease-out;
+    transition:
+      border-color var(--duration),
+      box-shadow var(--duration);
+  }
+
+  @keyframes filter-open {
+    from {
+      width: 1.875rem;
+      opacity: 0.4;
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .filter {
+      animation: none;
+    }
+  }
+
+  .filter:focus-within {
+    border-color: var(--accent-strong);
+    box-shadow: 0 0 0 3px var(--accent-wash);
+  }
+
+  .filter input {
+    flex: 1;
+    min-width: 0;
+    padding: 0;
+    border: 0;
+    outline: none;
+    background: none;
+    color: var(--ink);
+    font-size: var(--fs-menu);
+  }
+
+  .filter input::placeholder {
+    color: var(--ink-3);
+  }
+
+  /* The key that closes the field, drawn as a key and pressable as one. */
+  .library-actions .filter-close {
+    flex: none;
+    height: 1.125rem;
+    padding: 0 0.3rem;
+    border: var(--bw) solid var(--line);
+    border-radius: var(--radius-sm);
+    background: var(--paper-2);
+    color: var(--ink-3);
+    font-size: var(--fs-label);
+    transition:
+      background var(--duration),
+      color var(--duration);
+  }
+
+  .library-actions .filter-close:hover:not(:disabled) {
+    background: var(--paper-3);
+    color: var(--ink);
+  }
+
+  /* The section title is the group's name, and it folds the group: the same
+     eyebrow as Pinned and All documents, with a chevron and a count. The
+     folders above the group stay in the quietest ink, so the eye lands on the
+     one the group is named after. */
+  .group-toggle {
+    display: flex;
+    align-items: center;
+    gap: 0.375rem;
+    margin-left: -0.375rem;
+    padding: 0.125rem 0.375rem;
+    border: 0;
+    border-radius: var(--radius-xs);
+    background: none;
+    color: inherit;
+    font: inherit;
+    letter-spacing: inherit;
+    text-transform: inherit;
+    cursor: pointer;
+    transition: color var(--duration);
+  }
+
+  .group-toggle:hover {
+    color: var(--ink);
+  }
+
+  .group-toggle :global(svg) {
+    flex: none;
+    transition: transform var(--duration);
+  }
+
+  .group-toggle[aria-expanded='true'] :global(svg) {
+    transform: rotate(90deg);
+  }
+
+  .group-name {
+    color: var(--ink-2);
+  }
+
+  .group-count {
+    margin-left: 0.375rem;
+    letter-spacing: normal;
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* What a folded group holds, on one line, so shutting it hides the cards
+     without hiding what they were. */
+  .group-preview {
+    margin: calc(var(--section-gap) * -0.5) 0 0 1.125rem;
+    overflow: hidden;
+    color: var(--ink-3);
+    font-size: var(--fs-body);
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .state :global(.pin-mark) {
+    margin-right: 0.3rem;
+    vertical-align: -1px;
   }
 
   /* The band, which holds its own name as well as the documents on it.

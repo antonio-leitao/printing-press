@@ -8,6 +8,7 @@ import type {
   LinkBox,
   OpenRequest,
   PageSize,
+  PdfSpot,
   ProjectSummary,
   SearchHit,
   SnapshotOutcome,
@@ -16,7 +17,8 @@ import type {
   SourceRef,
   TemplateSummary,
   TextBox,
-  VersionSummary
+  VersionSummary,
+  WordDay
 } from '$lib/types';
 
 export const api = {
@@ -99,6 +101,16 @@ export const api = {
   peekSource: (artifactId: number, page: number, x: number, y: number) =>
     invoke<SourcePeek | null>('peek_source', { artifactId, page, x, y }),
 
+  /** The working tree's word count, a day at a time, oldest first. */
+  wordHistory: (projectId: number) => invoke<WordDay[]>('word_history', { projectId }),
+
+  /**
+   * Where a line of source ended up in a PDF. Null when it has nowhere to go:
+   * a version from the history, or a markdown line above the first block.
+   */
+  forwardSearch: (artifactId: number, file: string, line: number) =>
+    invoke<PdfSpot | null>('forward_search', { artifactId, file, line }),
+
   searchDocument: (artifactId: number, needle: string) =>
     invoke<SearchHit[]>('search_document', { artifactId, needle }),
 
@@ -109,8 +121,12 @@ export const api = {
   getBuildLog: (projectId: number, sourceRef?: SourceRef) =>
     invoke<string>('get_build_log', { projectId, sourceRef }),
 
-  /** Runs the editor command on a document. Nothing is kept open afterwards. */
-  launchEditor: (projectId: number) => invoke<string>('launch_editor', { projectId }),
+  /**
+   * Runs the editor command on a document, or on the file and line a build
+   * error names. Nothing is kept open afterwards.
+   */
+  launchEditor: (projectId: number, file?: string, line?: number) =>
+    invoke<string>('launch_editor', { projectId, file, line }),
 
   editorCommand: () => invoke<EditorCommand>('editor_command'),
 

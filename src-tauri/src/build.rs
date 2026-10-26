@@ -474,6 +474,11 @@ impl BuildManager {
                             Some(artifact),
                         )
                         .await;
+                        // After the PDF is on screen, never before it: a count
+                        // is something to glance at, and the page is what the
+                        // build was for. While the source is still here,
+                        // because a version's checkout goes with this build.
+                        self.count_words(app, project, source_ref, &source).await;
                     }
                     Err(error) => {
                         // The PDF exists but could not be recorded, so it would
@@ -523,6 +528,36 @@ impl BuildManager {
                 .await;
             }
         }
+    }
+
+    /// Counts the words of a version that has just built, stores the count and
+    /// says so. Silent when there is nothing to count with.
+    async fn count_words(
+        &self,
+        app: &AppHandle,
+        project: &Project,
+        source_ref: &SourceRef,
+        source: &sources::PreparedSource,
+    ) {
+        let Some(words) = crate::words::count(project, source).await else {
+            return;
+        };
+        let repository = Arc::clone(&self.repository);
+        let project_id = project.id;
+        let reference = source_ref.clone();
+        let stored = tauri::async_runtime::spawn_blocking(move || {
+            repository.record_words(project_id, &reference, words)
+        })
+        .await
+        .unwrap_or_else(|error| Err(AppError::Task(error.to_string())));
+        if let Err(error) = stored {
+            eprintln!("Press could not record a word count: {error}");
+            return;
+        }
+        let _ = app.emit(
+            "words-counted",
+            serde_json::json!({ "projectId": project.id, "sourceRef": source_ref, "words": words }),
+        );
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -664,6 +699,17 @@ impl BuildManager {
         });
     }
 
+    /// The project whose working tree is being watched: the document open in
+    /// the reader, or `None` in the library.
+    pub async fn watched(&self) -> Option<i64> {
+        self.state
+            .lock()
+            .await
+            .watch
+            .as_ref()
+            .map(|watch| watch.project_id)
+    }
+
     /// Cancels the build of one version, leaving the project's others alone.
     pub async fn cancel_version(&self, project_id: i64, source_ref: &SourceRef) {
         let build = {
@@ -717,7 +763,7 @@ impl BuildManager {
         root.join(project_id.to_string()).join(source_ref.slug())
     }
 
-    fn work_directory(&self, project_id: i64, source_ref: &SourceRef) -> PathBuf {
+    pub fn work_directory(&self, project_id: i64, source_ref: &SourceRef) -> PathBuf {
         self.version_directory(&self.work_root, project_id, source_ref)
             .join("work")
     }

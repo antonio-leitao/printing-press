@@ -12,7 +12,7 @@ use crate::{
     model::{
         ArtifactSummary, BuildState, Diagnostic, DocumentKind, Engine, Project, ProjectSummary,
         SnapshotOutcome, SnapshotSummary, SourceRef, TemplateCover, TemplateSummary,
-        VersionSummary,
+        VersionSummary, WordDay,
     },
 };
 
@@ -431,6 +431,72 @@ impl Repository {
         Ok(())
     }
 
+    /// Stores a version's word count.
+    ///
+    /// The day is the reader's own, local to this machine: a count taken just
+    /// after midnight belongs to the new day, which is the one they will look
+    /// for it under. SQLite knows the local zone where Rust's standard library
+    /// does not, so it is asked.
+    pub fn record_words(&self, project_id: i64, source_ref: &SourceRef, words: i64) -> AppResult<()> {
+        let mut connection = self.lock()?;
+        let transaction = connection.transaction()?;
+        let reference = source_ref.to_string();
+        if matches!(source_ref, SourceRef::Snapshot(_)) {
+            transaction.execute(
+                "DELETE FROM word_counts WHERE project_id = ?1 AND source_ref = ?2",
+                params![project_id, reference],
+            )?;
+        }
+        transaction.execute(
+            "INSERT INTO word_counts (project_id, source_ref, day, words, counted_at)
+             VALUES (?1, ?2, date(?3, 'unixepoch', 'localtime'), ?4, ?3)
+             ON CONFLICT(project_id, source_ref, day) DO UPDATE SET
+                words = excluded.words,
+                counted_at = excluded.counted_at",
+            params![project_id, reference, unix_timestamp(), words],
+        )?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    /// Each version's most recent count.
+    fn latest_words(&self, project_id: i64) -> AppResult<HashMap<SourceRef, i64>> {
+        let connection = self.lock()?;
+        let mut statement = connection.prepare(
+            "SELECT source_ref, words FROM word_counts
+             WHERE project_id = ?1 ORDER BY counted_at, day",
+        )?;
+        let rows = statement.query_map([project_id], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+        })?;
+        let mut latest = HashMap::new();
+        for row in rows {
+            let (reference, words) = row?;
+            // Later rows replace earlier ones, so what is left is the last.
+            if let Ok(source_ref) = reference.parse() {
+                latest.insert(source_ref, words);
+            }
+        }
+        Ok(latest)
+    }
+
+    /// The working tree's count, one entry a day, oldest first.
+    pub fn word_history(&self, project_id: i64) -> AppResult<Vec<WordDay>> {
+        let connection = self.lock()?;
+        let mut statement = connection.prepare(
+            "SELECT day, words FROM word_counts
+             WHERE project_id = ?1 AND source_ref = ?2
+             ORDER BY day",
+        )?;
+        let rows = statement.query_map(params![project_id, SourceRef::Worktree.to_string()], |row| {
+            Ok(WordDay {
+                day: row.get(0)?,
+                words: row.get(1)?,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(AppError::from)
+    }
+
     /// Builds cannot survive a restart, so anything still marked queued or
     /// running belongs to a process that is gone.
     pub fn mark_running_builds_interrupted(&self) -> AppResult<()> {
@@ -757,6 +823,7 @@ impl Repository {
         let snapshots = self.list_snapshots(project_id)?;
         let builds = self.build_states(project_id)?;
         let artifacts = self.artifacts_for_project(project_id, project.engine)?;
+        let words = self.latest_words(project_id)?;
 
         let mut versions = Vec::with_capacity(snapshots.len() + 1);
         // Read rather than taken. Two snapshots of identical content share a
@@ -770,6 +837,7 @@ impl Repository {
                     .cloned()
                     .unwrap_or_else(|| BuildState::never(source_ref.clone())),
                 artifact: artifacts.get(&source_ref).cloned(),
+                words: words.get(&source_ref).copied(),
                 title,
                 snapshot,
                 source_ref,
@@ -1276,6 +1344,20 @@ const SCHEMA: &str = "
         diagnostics TEXT NOT NULL DEFAULT '[]',
         PRIMARY KEY (project_id, source_ref)
     );
+
+    -- How many words each version had. The working tree keeps one row a day,
+    -- the day's last count standing for it, which is what makes a count over
+    -- time out of a count per build; a snapshot keeps one, because it cannot
+    -- change. Apart from the builds, because a count is worth keeping after
+    -- the PDF it was taken beside has been replaced.
+    CREATE TABLE IF NOT EXISTS word_counts (
+        project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+        source_ref TEXT NOT NULL,
+        day TEXT NOT NULL,
+        words INTEGER NOT NULL,
+        counted_at INTEGER NOT NULL,
+        PRIMARY KEY (project_id, source_ref, day)
+    );
 ";
 
 /// Bump only when an existing table changes shape. Adding a table or an index
@@ -1549,6 +1631,39 @@ mod tests {
 
         std::fs::write(directory.path().join("press.schema3.old"), b"not a database").unwrap();
         assert_eq!(retired_references(&database_path), None);
+    }
+
+    /// A count per build becomes a count per day for the working tree, and one
+    /// count for a snapshot however often it is rebuilt.
+    #[test]
+    fn word_counts_keep_one_a_day_and_one_per_snapshot() {
+        let directory = tempfile::tempdir().unwrap();
+        let repository = Repository::open(&directory.path().join("press.db")).unwrap();
+        let root = project_fixture(directory.path(), "thesis");
+        let project = add(&repository, &root.join("main.tex"));
+
+        repository.record_words(project.id, &SourceRef::Worktree, 1200).unwrap();
+        repository.record_words(project.id, &SourceRef::Worktree, 1250).unwrap();
+        let snapshot = SourceRef::Snapshot("abc".into());
+        repository.record_words(project.id, &snapshot, 900).unwrap();
+        repository.record_words(project.id, &snapshot, 900).unwrap();
+
+        let history = repository.word_history(project.id).unwrap();
+        assert_eq!(history.len(), 1, "two counts today are one day");
+        assert_eq!(history[0].words, 1250, "the day's last count stands for it");
+
+        let latest = repository.latest_words(project.id).unwrap();
+        assert_eq!(latest.get(&SourceRef::Worktree), Some(&1250));
+        assert_eq!(latest.get(&snapshot), Some(&900));
+        let rows: i64 = repository
+            .lock()
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM word_counts", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(rows, 2);
+
+        let versions = repository.list_versions(project.id).unwrap();
+        assert_eq!(versions[0].words, Some(1250), "the working tree carries its count");
     }
 
     fn project_fixture(directory: &Path, name: &str) -> PathBuf {

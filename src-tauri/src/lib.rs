@@ -15,9 +15,11 @@ mod render;
 mod runner;
 mod snapshot;
 mod sources;
+mod sync;
 mod templates;
 mod toolchain;
 mod viewing;
+mod words;
 
 use std::{
     collections::HashSet,
@@ -69,13 +71,15 @@ pub fn run() {
         // behind `:Press` in the editor.
         .plugin(tauri_plugin_single_instance::init(
             |app, arguments, working_directory| {
-                if let Some(window) = app.get_webview_window("main") {
-                    let _ = window.unminimize();
-                    let _ = window.show();
-                    let _ = window.set_focus();
-                }
-                if let Some(path) = path_argument(&arguments, Path::new(&working_directory)) {
-                    accept_open_request(app.clone(), path);
+                match path_argument(&arguments, Path::new(&working_directory)) {
+                    // Raised or not once the path is resolved: whether this
+                    // is a new document or the editor asking to re-sync the
+                    // open one depends on what the path turns out to mean.
+                    Some(path) => {
+                        accept_open_request(app.clone(), path, line_argument(&arguments));
+                    }
+                    // Nothing to open: a request to see Press.
+                    None => raise(app),
                 }
             },
         ))
@@ -150,7 +154,7 @@ pub fn run() {
             let arguments = std::env::args().collect::<Vec<_>>();
             let working_directory = std::env::current_dir().unwrap_or_default();
             if let Some(path) = path_argument(&arguments, &working_directory) {
-                accept_open_request(app.handle().clone(), path);
+                accept_open_request(app.handle().clone(), path, line_argument(&arguments));
             }
             Ok(())
         })
@@ -173,6 +177,8 @@ pub fn run() {
             commands::open_external,
             commands::peek_source,
             commands::search_document,
+            commands::word_history,
+            commands::forward_search,
             commands::create_snapshot,
             commands::list_versions,
             commands::rename_snapshot,
@@ -205,6 +211,29 @@ pub fn run() {
     });
 }
 
+/// Brings the window forward and gives it the keyboard.
+fn raise(app: &tauri::AppHandle) {
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.unminimize();
+        let _ = window.show();
+        let _ = window.set_focus();
+    }
+}
+
+/// Whether a request only moves the reader within the document already open:
+/// `:Press` pressed again in the editor, at a new line of the same document.
+///
+/// That is the one request that leaves the window where it is. Its whole point
+/// is the editor staying in front while the PDF follows along beside it, and
+/// taking the keyboard on every press would turn re-syncing into switching
+/// back and forth.
+fn only_resyncs(request: &model::OpenRequest, open: Option<i64>) -> bool {
+    request.sync.is_some()
+        && request.warnings.is_empty()
+        && open.is_some()
+        && matches!(request.candidates.as_slice(), [only] if only.project_id == open)
+}
+
 /// Counts one path down again however its resolution ends, including a panic.
 struct Resolving(tauri::AppHandle);
 
@@ -234,10 +263,28 @@ fn path_argument(arguments: &[String], working_directory: &Path) -> Option<PathB
         })
 }
 
+/// The line the editor's cursor was on, from `--line=42`.
+///
+/// One word, `=` and all, and after the path: `press chapter.tex --line=42`. A
+/// flag of its own followed by a number would be read as a path by any Press
+/// that predates it, and a word starting with `-` is one every Press skips.
+fn line_argument(arguments: &[String]) -> Option<u32> {
+    arguments
+        .iter()
+        .skip(1)
+        .find_map(|argument| argument.strip_prefix("--line="))
+        .and_then(|line| line.trim().parse::<u32>().ok())
+        .filter(|line| *line > 0)
+}
+
 /// Resolves a path off the main thread, stores the result, and nudges the
 /// interface. Storing it is what makes this work at startup, when nothing is
 /// listening yet.
-fn accept_open_request(app: tauri::AppHandle, path: PathBuf) {
+///
+/// With a line, the request also says where the editor was, so the viewer can
+/// be brought to the same place in the PDF: forward search, the other half of
+/// ⌘click.
+fn accept_open_request(app: tauri::AppHandle, path: PathBuf, line: Option<u32>) {
     // Counted before the work starts, not after: the whole point is to be true
     // during the resolving.
     app.state::<AppState>()
@@ -249,7 +296,20 @@ fn accept_open_request(app: tauri::AppHandle, path: PathBuf) {
         let handle = app.clone();
         let resolved = tauri::async_runtime::spawn_blocking(move || {
             let state = handle.state::<AppState>();
-            documents::resolve(&path, &state.repository)
+            let mut request = documents::resolve(&path, &state.repository)?;
+            // Only for a source file: a line of a folder or of a PDF means
+            // nothing to SyncTeX.
+            if let Some(line) = line
+                && request.pdf.is_none()
+                && let Ok(file) = path.canonicalize()
+                && file.is_file()
+            {
+                request.sync = Some(model::SourceLine {
+                    file: file.to_string_lossy().into_owned(),
+                    line,
+                });
+            }
+            Ok::<_, error::AppError>(request)
         })
         .await;
 
@@ -261,12 +321,24 @@ fn accept_open_request(app: tauri::AppHandle, path: PathBuf) {
                 pdf: None,
                 warnings: vec![error.to_string()],
                 toolchain: documents::toolchain(),
+                sync: None,
             },
             Err(error) => {
                 eprintln!("Press could not resolve a path from the command line: {error}");
                 return;
             }
         };
+
+        // Raised unless it only re-syncs — and raised even then when it is
+        // minimised, because a PDF scrolled out of sight is no use to anyone.
+        let open = app.state::<AppState>().builds.watched().await;
+        let minimised = app
+            .get_webview_window("main")
+            .and_then(|window| window.is_minimized().ok())
+            .unwrap_or(false);
+        if minimised || !only_resyncs(&request, open) {
+            raise(&app);
+        }
 
         if let Ok(mut pending) = app.state::<AppState>().pending_open.lock() {
             *pending = Some(request);
@@ -410,6 +482,61 @@ mod tests {
         );
         assert_eq!(path_argument(&["press".into()], cwd), None);
         assert_eq!(path_argument(&[], cwd), None);
+    }
+
+    /// Pressed again in the editor, at a new line of the document already on
+    /// screen: the window stays where it is. Anything else is a reason to look
+    /// at Press, and brings it forward.
+    #[test]
+    fn only_a_resync_of_the_open_document_leaves_the_window_alone() {
+        let candidate = |project_id| model::OpenCandidate {
+            document_path: "/papers/thesis/main.tex".into(),
+            name: "thesis/main.tex".into(),
+            kind: model::DocumentKind::Latex,
+            engine: None,
+            project_id,
+            latexmkrc_paths: Vec::new(),
+        };
+        let request = |candidates, line: Option<u32>| model::OpenRequest {
+            path: "/papers/thesis/chapters/two.tex".into(),
+            candidates,
+            pdf: None,
+            warnings: Vec::new(),
+            toolchain: documents::toolchain(),
+            sync: line.map(|line| model::SourceLine {
+                file: "/papers/thesis/chapters/two.tex".into(),
+                line,
+            }),
+        };
+
+        assert!(only_resyncs(&request(vec![candidate(Some(7))], Some(42)), Some(7)));
+        // A different document, or the same one with nothing to sync to.
+        assert!(!only_resyncs(&request(vec![candidate(Some(8))], Some(42)), Some(7)));
+        assert!(!only_resyncs(&request(vec![candidate(Some(7))], None), Some(7)));
+        // The library is showing, or the document is new to Press.
+        assert!(!only_resyncs(&request(vec![candidate(Some(7))], Some(42)), None));
+        assert!(!only_resyncs(&request(vec![candidate(None)], Some(42)), Some(7)));
+        // A choice to make is something to look at.
+        assert!(!only_resyncs(
+            &request(vec![candidate(Some(7)), candidate(Some(9))], Some(42)),
+            Some(7)
+        ));
+    }
+
+    /// The editor sends where its cursor is after the path, as one word, so
+    /// the path is still the first thing that is not a flag.
+    #[test]
+    fn reads_the_editor_line_from_the_command_line() {
+        let cwd = Path::new("/home/antonio/papers");
+        let arguments = ["press".into(), "/tmp/thesis/three.tex".into(), "--line=42".into()];
+        assert_eq!(line_argument(&arguments), Some(42));
+        assert_eq!(
+            path_argument(&arguments, cwd),
+            Some(PathBuf::from("/tmp/thesis/three.tex"))
+        );
+        assert_eq!(line_argument(&["press".into(), "main.tex".into()]), None);
+        assert_eq!(line_argument(&["press".into(), "--line=zero".into()]), None);
+        assert_eq!(line_argument(&["press".into(), "--line=0".into()]), None);
     }
 
     #[test]

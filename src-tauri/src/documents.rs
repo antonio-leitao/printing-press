@@ -8,10 +8,13 @@
 //! Two rules do all the work.
 //!
 //! * **A named file resolves to its document root.** A markdown file is its own
-//!   root. A `.tex` resolves through `% !TEX root`, then through the inclusion
-//!   graph of the folder it sits in, so editing `chapters/three.tex` opens the
-//!   thesis and a `standalone` figure opens the document that includes it. A
-//!   `.tex` nothing includes is its own root.
+//!   root. A `.tex` resolves through `% !TEX root` or the main file a subfile
+//!   names, then through the inclusion graph above it, followed however deep —
+//!   so editing `content/chapter.tex` opens the book even when the main file
+//!   only includes `content/index.tex`, and a `standalone` figure opens the
+//!   document that includes it. A `.tex` nothing includes is its own root if
+//!   it can be: when it has neither a `\documentclass` nor plain TeX's `\bye`
+//!   it is a fragment, and the nearest document above it is the one meant.
 //! * **A directory is never a project, only a place to look for one.** It lists
 //!   what is there and lets the user choose. Nothing is ever guessed at.
 
@@ -43,6 +46,9 @@ const MAX_SCAN_BYTES: u64 = 256 * 1024;
 const DIRECTIVE_LINES: usize = 50;
 /// How far above a named file to look for the document that includes it.
 const MAX_ASCENT: usize = 4;
+/// How many files one document's inclusions are followed through before the
+/// search gives up on it. A book is a few dozen.
+const MAX_REACH: usize = 512;
 
 /// Extensions that can hold a document root. `.Rnw` is knitr, which produces a
 /// `.tex` but is what the author actually edits.
@@ -65,6 +71,12 @@ static INCLUSION: LazyLock<Regex> = LazyLock::new(|| {
 /// `\import{dir/}{file}` and `\subimport{dir/}{file}` take their path in two parts.
 static IMPORT: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\\(?:sub)?import\s*\{([^}]*)\}\s*\{([^}]+)\}").unwrap());
+/// The class, and its options, on a `\documentclass` line.
+static DOCUMENT_CLASS: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"\\documentclass\s*(?:\[([^\]]*)\])?\s*\{\s*([^}\s]+)\s*\}").unwrap()
+});
+/// How plain TeX ends a document, and what tells one from a LaTeX fragment.
+static PLAIN_END: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\\bye\b").unwrap());
 
 // -- resolving ------------------------------------------------------------
 
@@ -86,6 +98,7 @@ pub fn resolve(path: &Path, repository: &Repository) -> AppResult<OpenRequest> {
             pdf: Some(display),
             warnings: Vec::new(),
             toolchain: detect_toolchain(),
+            sync: None,
         });
     }
 
@@ -123,6 +136,7 @@ pub fn resolve(path: &Path, repository: &Repository) -> AppResult<OpenRequest> {
         pdf: None,
         warnings,
         toolchain: detect_toolchain(),
+        sync: None,
     })
 }
 
@@ -195,13 +209,47 @@ pub fn document_root(file: &Path) -> AppResult<Option<PathBuf>> {
         return Ok(Some(root));
     }
 
+    // The subfiles package says it in the class line: the option is the main
+    // file, relative to this one.
+    if let Some(main) = &metadata.subfiles_main
+        && let Some(root) = inclusion_targets(&directory, &directory, main)
+            .into_iter()
+            .find(|root| is_latex(root))
+    {
+        return Ok(Some(root));
+    }
+
     // Otherwise: whichever document in this folder, or the folders above it,
-    // pulls this file in. A repository boundary is as far as one paper reaches.
-    let mut search = directory.clone();
-    for _ in 0..=MAX_ASCENT {
-        if let Some(includer) = includer_of(&file, &search) {
+    // pulls this file in, directly or through the files it includes. A
+    // repository boundary is as far as one paper reaches.
+    let levels = levels_above(&directory);
+    for search in &levels {
+        if let Some(includer) = includer_of(&file, search) {
             return Ok(Some(includer));
         }
+    }
+
+    // Nothing includes it. A file with a `\documentclass` is a document, and
+    // so is plain TeX, which has none but ends with `\bye`. Anything else is a
+    // fragment that cannot compile on its own — a chapter being drafted, a
+    // talk swapped out of the main file — and the document above it is the one
+    // editing it is for.
+    if !metadata.has_document_class
+        && !metadata.plain_tex
+        && let Some(document) = levels.iter().find_map(|search| nearest_document(&file, search))
+    {
+        return Ok(Some(document));
+    }
+    Ok(Some(file))
+}
+
+/// The folder a file is in and the ones above it, as far as a search for its
+/// document goes: `MAX_ASCENT` levels, or the top of a repository.
+fn levels_above(directory: &Path) -> Vec<PathBuf> {
+    let mut levels = Vec::new();
+    let mut search = directory.to_path_buf();
+    for _ in 0..=MAX_ASCENT {
+        levels.push(search.clone());
         if search.join(".git").exists() {
             break;
         }
@@ -210,34 +258,88 @@ pub fn document_root(file: &Path) -> AppResult<Option<PathBuf>> {
             _ => break,
         }
     }
-
-    // Nothing includes it, so it is its own document — whether or not it has a
-    // `\documentclass`, because plain TeX has none and still compiles.
-    Ok(Some(file))
+    levels
 }
 
 /// The document in `directory` that pulls `file` in, if there is one.
 fn includer_of(file: &Path, directory: &Path) -> Option<PathBuf> {
-    for candidate in latex_files(directory) {
-        if candidate == file {
+    latex_files(directory)
+        .into_iter()
+        .filter(|candidate| candidate != file)
+        .filter(|candidate| read_latex(candidate).is_ok_and(|metadata| metadata.has_document_class))
+        .find(|candidate| reaches(candidate, file))
+}
+
+/// Whether `file` is part of the document `root`: included by it, or by a
+/// file it includes, however deep.
+///
+/// Every path is read the way TeX reads it — from the folder the document is
+/// compiled in, which is the root's own, whichever file the `\input` is in —
+/// and, failing that, from the including file's folder, which is how
+/// `\subimport` and a good many authors write them.
+fn reaches(root: &Path, file: &Path) -> bool {
+    let Some(base) = root.parent() else {
+        return false;
+    };
+    let mut seen = HashSet::new();
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(current) = pending.pop() {
+        if !seen.insert(current.clone()) {
             continue;
         }
-        let Ok(metadata) = read_latex(&candidate) else {
+        if seen.len() > MAX_REACH {
+            return false;
+        }
+        let Ok(metadata) = read_latex(&current) else {
             continue;
         };
-        if !metadata.has_document_class {
-            continue;
-        }
-        let parent = candidate.parent().unwrap_or(directory);
-        if metadata
-            .inclusions
-            .iter()
-            .any(|target| inclusion_matches(target, parent, file))
-        {
-            return Some(candidate);
+        let parent = current.parent().unwrap_or(base);
+        for target in &metadata.inclusions {
+            for resolved in inclusion_targets(parent, base, target) {
+                if resolved == file {
+                    return true;
+                }
+                if is_latex(&resolved) {
+                    pending.push(resolved);
+                }
+            }
         }
     }
-    None
+    false
+}
+
+/// The document a fragment in or below `directory` most likely belongs to:
+/// `main.tex` when there is one, otherwise the document most recently saved,
+/// which is the one being worked on.
+///
+/// Never a part that has a class of its own — a `standalone` figure or a
+/// `subfiles` chapter — because those are pieces of a document, not what a
+/// fragment beside them is for.
+fn nearest_document(file: &Path, directory: &Path) -> Option<PathBuf> {
+    let documents = latex_files(directory)
+        .into_iter()
+        .filter(|candidate| candidate != file)
+        .filter(|candidate| {
+            read_latex(candidate).is_ok_and(|metadata| {
+                metadata.has_document_class
+                    && !matches!(
+                        metadata.document_class.as_deref(),
+                        Some("standalone" | "subfiles")
+                    )
+            })
+        })
+        .collect::<Vec<_>>();
+    let named_main = documents.iter().find(|candidate| {
+        candidate
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .is_some_and(|stem| stem.eq_ignore_ascii_case("main"))
+    });
+    named_main.cloned().or_else(|| {
+        documents
+            .into_iter()
+            .max_by_key(|candidate| std::fs::metadata(candidate).and_then(|data| data.modified()).ok())
+    })
 }
 
 /// Every document root in a directory, known projects first.
@@ -368,6 +470,13 @@ pub fn toolchain() -> ToolchainReport {
 
 struct LatexMetadata {
     has_document_class: bool,
+    /// `article`, `book`, `standalone`…
+    document_class: Option<String>,
+    /// The main file a `subfiles` chapter names in its class options.
+    subfiles_main: Option<String>,
+    /// Ends the way a plain TeX document does, so it compiles without a
+    /// `\documentclass`.
+    plain_tex: bool,
     root_directive: Option<String>,
     program: Option<String>,
     inclusions: Vec<String>,
@@ -381,6 +490,9 @@ fn read_latex(path: &Path) -> AppResult<LatexMetadata> {
     let text = String::from_utf8_lossy(&bytes);
     let mut metadata = LatexMetadata {
         has_document_class: false,
+        document_class: None,
+        subfiles_main: None,
+        plain_tex: false,
         root_directive: None,
         program: None,
         inclusions: Vec::new(),
@@ -412,6 +524,21 @@ fn read_latex(path: &Path) -> AppResult<LatexMetadata> {
             rest.starts_with('{') || rest.starts_with('[')
         }) {
             metadata.has_document_class = true;
+            if metadata.document_class.is_none()
+                && let Some(capture) = DOCUMENT_CLASS.captures(trimmed)
+            {
+                let class = capture.get(2).map(|class| class.as_str().to_owned());
+                if class.as_deref() == Some("subfiles") {
+                    metadata.subfiles_main = capture
+                        .get(1)
+                        .map(|option| trim_quotes(option.as_str().trim()))
+                        .filter(|option| !option.is_empty());
+                }
+                metadata.document_class = class;
+            }
+        }
+        if PLAIN_END.is_match(active) {
+            metadata.plain_tex = true;
         }
         for capture in INCLUSION.captures_iter(active) {
             if let Some(target) = capture.get(1) {
@@ -453,12 +580,6 @@ fn inclusion_targets(parent: &Path, directory: &Path, target: &str) -> Vec<PathB
         }
     }
     resolved
-}
-
-fn inclusion_matches(target: &str, parent: &Path, file: &Path) -> bool {
-    inclusion_targets(parent, parent, target)
-        .iter()
-        .any(|candidate| candidate == file)
 }
 
 fn latex_files(directory: &Path) -> Vec<PathBuf> {
@@ -652,6 +773,130 @@ mod tests {
 
         let request = resolve(&root.join("figures/plot.tex"), &repository).unwrap();
         assert_eq!(paths(&request), ["main.tex"]);
+    }
+
+    /// The layout most books and long papers have: the main file pulls in one
+    /// file that pulls in the chapters, with every path written from the main
+    /// file's folder, because that is where TeX runs and how it reads them.
+    #[test]
+    fn a_chapter_two_inclusions_deep_resolves_to_the_main_file() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("book");
+        write(
+            &root,
+            "main.tex",
+            "\\documentclass{book}\n\\begin{document}\n\\input{content/content}\n\\end{document}\n",
+        );
+        write(&root, "content/content.tex", "\\input{content/one}\n\\input{content/two}\n");
+        write(&root, "content/one.tex", "\\chapter{One}\n");
+        write(&root, "content/two.tex", "\\chapter{Two}\n\\input{content/parts/aside}\n");
+        // Written relative to the file that includes it, which some people do.
+        write(&root, "content/parts/aside.tex", "\\input{note}\n");
+        write(&root, "content/parts/note.tex", "a note\n");
+        let repository = repository(directory.path());
+
+        for chapter in [
+            "content/content.tex",
+            "content/one.tex",
+            "content/two.tex",
+            "content/parts/aside.tex",
+            "content/parts/note.tex",
+        ] {
+            let request = resolve(&root.join(chapter), &repository).unwrap();
+            assert_eq!(paths(&request), ["main.tex"], "{chapter}");
+        }
+    }
+
+    /// A figure deep in the tree is part of the document that eventually
+    /// includes it, even when it has a `\documentclass` of its own.
+    #[test]
+    fn a_standalone_figure_included_by_a_chapter_opens_the_main_file() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("paper");
+        write(&root, "main.tex", "\\documentclass{article}\n\\input{content/index}\n");
+        write(&root, "content/index.tex", "text\n\\input{figures/tree}%\n");
+        write(
+            &root,
+            "figures/tree.tex",
+            "\\documentclass{standalone}\n\\begin{document}\\end{document}\n",
+        );
+        let repository = repository(directory.path());
+
+        let request = resolve(&root.join("figures/tree.tex"), &repository).unwrap();
+        assert_eq!(paths(&request), ["main.tex"]);
+    }
+
+    /// A fragment nothing includes right now — a talk swapped out of the main
+    /// file, a chapter being drafted — cannot compile on its own: it has no
+    /// `\documentclass`. The document above it is what editing it is for.
+    #[test]
+    fn a_fragment_nothing_includes_opens_the_document_above_it() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("talks");
+        write(&root, "main.tex", "\\documentclass{beamer}\n\\input{2026/index}\n");
+        write(&root, "2026/index.tex", "\\begin{frame}new\\end{frame}\n");
+        write(&root, "2025/index.tex", "\\input{2025/one}\n");
+        write(&root, "2025/one.tex", "\\begin{frame}old\\end{frame}\n");
+        // Parts with a class of their own are never what a fragment means.
+        write(
+            &root,
+            "2025/diagram.tex",
+            "\\documentclass{standalone}\n\\begin{document}\\end{document}\n",
+        );
+        let repository = repository(directory.path());
+
+        for fragment in ["2025/index.tex", "2025/one.tex"] {
+            let request = resolve(&root.join(fragment), &repository).unwrap();
+            assert_eq!(paths(&request), ["main.tex"], "{fragment}");
+        }
+    }
+
+    /// Several documents above a fragment: `main.tex` is the one meant.
+    #[test]
+    fn a_fragment_prefers_the_main_file_among_several_documents() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("paper");
+        write(&root, "appendix.tex", "\\documentclass{article}\n");
+        write(&root, "main.tex", "\\documentclass{article}\n");
+        write(&root, "sections/draft.tex", "\\section{Draft}\n");
+        let repository = repository(directory.path());
+
+        let request = resolve(&root.join("sections/draft.tex"), &repository).unwrap();
+        assert_eq!(paths(&request), ["main.tex"]);
+    }
+
+    /// The subfiles package names the main file in the part's own class line.
+    #[test]
+    fn a_subfile_names_its_main_file() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("thesis");
+        write(&root, "thesis.tex", "\\documentclass{book}\n");
+        write(
+            &root,
+            "chapters/one.tex",
+            "\\documentclass[../thesis]{subfiles}\n\\begin{document}One\\end{document}\n",
+        );
+        let repository = repository(directory.path());
+
+        let request = resolve(&root.join("chapters/one.tex"), &repository).unwrap();
+        assert_eq!(paths(&request), ["thesis.tex"]);
+    }
+
+    /// Files that include each other are followed once, not forever.
+    #[test]
+    fn an_inclusion_cycle_still_resolves() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("paper");
+        write(&root, "main.tex", "\\documentclass{article}\n\\input{a}\n");
+        write(&root, "a.tex", "\\input{b}\n");
+        write(&root, "b.tex", "\\input{a}\n");
+        write(&root, "loop/c.tex", "\\input{loop/c}\n");
+        let repository = repository(directory.path());
+
+        let request = resolve(&root.join("b.tex"), &repository).unwrap();
+        assert_eq!(paths(&request), ["main.tex"]);
+        let request = resolve(&root.join("loop/c.tex"), &repository).unwrap();
+        assert_eq!(paths(&request), ["main.tex"], "an orphan that includes itself");
     }
 
     #[test]

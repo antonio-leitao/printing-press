@@ -160,6 +160,11 @@
       <code>{'{dir}'}</code> its folder; quote anything with a space in it. Left empty, the
       document opens in whatever your system uses for that kind of file.
     </p>
+    <p class="quiet">
+      Clicking a build error runs it too, with <code>{'{file}'}</code> as the file the error is
+      in and <code>{'{line}'}</code> as its line, as in <code>nvim +{'{line}'} {'{file}'}</code>
+      or <code>code --goto {'{file}'}:{'{line}'}</code>.
+    </p>
     {#if editorCommand.trim() !== editorDefault.suggested}
       <p class="quiet">
         Suggested for this machine:

@@ -556,6 +556,50 @@ pub async fn search_document(
         .collect())
 }
 
+/// Where a line of source ended up in a PDF: forward search, asked for when
+/// the editor opens a document at its cursor.
+///
+/// Only the working tree's PDF, or a PDF Press is only showing. A version from
+/// the history was built from a copy that is gone, and the editor's line is a
+/// line of the file as it is now.
+#[tauri::command]
+pub async fn forward_search(
+    artifact_id: i64,
+    file: String,
+    line: u32,
+    state: State<'_, AppState>,
+) -> AppResult<Option<crate::model::PdfSpot>> {
+    let repository = Arc::clone(&state.repository);
+    let builds = Arc::clone(&state.builds);
+    let loose = state.viewing.path(artifact_id);
+    blocking(move || {
+        let (project, pdf, work) = match loose {
+            Some(path) => (crate::peek::beside(&path), path, PathBuf::new()),
+            None => {
+                let stored = repository.artifact(artifact_id)?;
+                if stored.summary.source_ref != SourceRef::Worktree {
+                    return Ok(None);
+                }
+                let project = repository.get_project(stored.summary.project_id)?;
+                let work = builds.work_directory(project.id, &SourceRef::Worktree);
+                (project, stored.pdf_path, work)
+            }
+        };
+        crate::sync::forward(&project, &pdf, &work, std::path::Path::new(&file), line)
+    })
+    .await
+}
+
+/// The working tree's word count, a day at a time, oldest first.
+#[tauri::command]
+pub async fn word_history(
+    project_id: i64,
+    state: State<'_, AppState>,
+) -> AppResult<Vec<crate::model::WordDay>> {
+    let repository = Arc::clone(&state.repository);
+    blocking(move || repository.word_history(project_id)).await
+}
+
 /// Copies a built PDF into the user's Downloads folder, and says where it went.
 ///
 /// The only thing Press writes outside its own storage, and only when asked for
@@ -654,14 +698,27 @@ pub async fn get_build_log(
 }
 
 #[tauri::command]
-pub async fn launch_editor(project_id: i64, state: State<'_, AppState>) -> AppResult<String> {
+pub async fn launch_editor(
+    project_id: i64,
+    file: Option<String>,
+    line: Option<u32>,
+    state: State<'_, AppState>,
+) -> AppResult<String> {
     let repository = Arc::clone(&state.repository);
     blocking(move || {
         let project = repository.get_project(project_id)?;
         let command = repository
             .setting(editor::SETTING)?
             .unwrap_or_else(|| editor::default_command().to_owned());
-        editor::launch(&project, &command)
+        // A build error's file and line, when the click came from one.
+        let place = match file {
+            Some(file) => Some(editor::Place {
+                file: editor::place_in(&project, &file)?,
+                line: line.unwrap_or(1),
+            }),
+            None => None,
+        };
+        editor::launch(&project, &command, place)
     })
     .await
 }

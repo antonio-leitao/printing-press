@@ -14,7 +14,8 @@
     onFollow,
     invert = false,
     hits = [],
-    current = null
+    current = null,
+    mark = null
   } = $props<{
     artifact: ArtifactSummary;
     size: PageSize;
@@ -29,6 +30,8 @@
     hits?: SearchHit[];
     /** The hit the search is on, which may be on another page entirely. */
     current?: SearchHit | null;
+    /** A line the editor jumped to, marked for a moment. */
+    mark?: { x: number; y: number; width: number; height: number; nonce: number } | null;
   }>();
 
   let host = $state<HTMLElement | null>(null);
@@ -127,6 +130,18 @@
        reader's mark, not the document's, and it has to stay put at any zoom.
        A point of slack on each side, because MuPDF's boxes are cut tight to
        the glyphs and a highlight that touches the letters reads as a smudge. -->
+  {#if mark}
+    <!-- Keyed so a second jump to the same line plays the fade again. -->
+    {#key mark.nonce}
+      <span
+        class="sync-mark"
+        style:left={`${(mark.x - 2) * zoom}px`}
+        style:top={`${(mark.y - 2) * zoom}px`}
+        style:width={`${(mark.width + 4) * zoom}px`}
+        style:height={`${(mark.height + 4) * zoom}px`}
+      ></span>
+    {/key}
+  {/if}
   {#each hits as hit, index (index)}
     <span
       class="hit"
@@ -203,6 +218,26 @@
     border-radius: var(--radius-xs);
     background: color-mix(in oklab, var(--amber) 34%, transparent);
     pointer-events: none;
+  }
+
+  /* Lit, held long enough to be found, then gone: it says where the jump
+     landed, and after that it would only be in the way. */
+  .sync-mark {
+    position: absolute;
+    border-radius: var(--radius-xs);
+    background: color-mix(in oklab, var(--accent) 28%, transparent);
+    pointer-events: none;
+    animation: sync-fade 1.8s ease-out forwards;
+  }
+
+  @keyframes sync-fade {
+    0%,
+    45% {
+      opacity: 1;
+    }
+    100% {
+      opacity: 0;
+    }
   }
 
   .hit.current {

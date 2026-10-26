@@ -149,6 +149,20 @@ pub fn source_line(anchors: &[Anchor], generated: u32) -> Option<u32> {
         .map(|anchor| anchor.source)
 }
 
+/// The line of generated LaTeX a markdown line became: the block the line is
+/// in, whose marker is the last one at or before it. The marker is a comment
+/// on a line of its own, so the block's content starts on the line after it.
+///
+/// `None` above the first marker — the front matter — which became nothing
+/// anyone could point at.
+pub fn generated_line(anchors: &[Anchor], source: u32) -> Option<u32> {
+    anchors
+        .iter()
+        .take_while(|anchor| anchor.source <= source)
+        .last()
+        .map(|anchor| anchor.generated + 1)
+}
+
 /// `generated:source` pairs, one per line — the form stored beside a built PDF.
 pub fn encode(anchors: &[Anchor]) -> String {
     let mut out = String::new();
@@ -272,6 +286,27 @@ mod tests {
         assert_eq!(source_line(&anchors, 14), Some(5));
         assert_eq!(source_line(&anchors, 20), Some(9));
         assert_eq!(source_line(&anchors, 900), Some(9));
+    }
+
+    /// The same table read the other way: a markdown line to the generated
+    /// LaTeX its block starts on, the line after the block's marker.
+    #[test]
+    fn a_markdown_line_resolves_to_the_start_of_its_block() {
+        let anchors = vec![
+            Anchor {
+                generated: 10,
+                source: 5,
+            },
+            Anchor {
+                generated: 20,
+                source: 9,
+            },
+        ];
+        assert_eq!(generated_line(&anchors, 4), None, "the front matter set nothing");
+        assert_eq!(generated_line(&anchors, 5), Some(11));
+        assert_eq!(generated_line(&anchors, 8), Some(11));
+        assert_eq!(generated_line(&anchors, 9), Some(21));
+        assert_eq!(generated_line(&anchors, 400), Some(21));
     }
 
     #[test]

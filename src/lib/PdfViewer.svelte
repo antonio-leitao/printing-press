@@ -8,7 +8,7 @@
   import { describe, firstFrom, groupByPage, hitsOn, stepFrom } from '$lib/pdf-search';
   import { PageVisibilityTracker } from '$lib/pdf-visibility';
   import { theme } from '$lib/theme.svelte';
-  import type { ArtifactSummary, LinkBox, PageSize, SearchHit } from '$lib/types';
+  import type { ArtifactSummary, LinkBox, PageSize, PdfSpot, SearchHit } from '$lib/types';
 
   let {
     artifact,
@@ -17,7 +17,8 @@
     zoomPercent = $bindable(100),
     loadError = $bindable(''),
     enabled = true,
-    onPeek
+    onPeek,
+    target = null
   } = $props<{
     artifact: ArtifactSummary;
     page?: number;
@@ -28,7 +29,14 @@
     enabled?: boolean;
     /** Cmd-click, in PDF points from the page's top left. */
     onPeek?: (at: PeekRequest) => void;
+    /**
+     * A place to go to and mark: where the editor's cursor is, in the PDF of
+     * `artifactId`. A new `nonce` is a new request, even for the same place.
+     */
+    target?: SyncTarget | null;
   }>();
+
+  export type SyncTarget = PdfSpot & { artifactId: number; nonce: number };
 
   export type PeekRequest = {
     page: number;
@@ -640,6 +648,47 @@
     startGlide();
   }
 
+  // -- forward search ------------------------------------------------------
+
+  /// The line the editor asked for, marked on its page for a moment so the eye
+  /// finds it after the jump. A mark rather than a lasting highlight: the
+  /// cursor moves on, and a line left lit up would be a lie by the next edit.
+  let mark = $state<SyncTarget | null>(null);
+  /// The last request acted on, so a re-render does not jump again.
+  let reached = 0;
+  /// The document whose opening has finished: laid out, fitted to the window
+  /// or put back where the reader was. Until then the viewer is still moving
+  /// itself, and a jump made in the middle of that is undone by it.
+  let settled = $state<number | null>(null);
+
+  $effect(() => {
+    const wanted = target;
+    // A request that arrives with the document it is about — `:Press` opening
+    // it — is held until that document has settled.
+    if (!wanted || shown?.id !== wanted.artifactId || settled !== wanted.artifactId) return;
+    if (wanted.nonce === reached) return;
+    reached = wanted.nonce;
+    void tick().then(() => {
+      recordJump();
+      revealSpot(wanted);
+      mark = wanted;
+    });
+  });
+
+  /** Brings a place a third of the way down the view, like a search hit. */
+  function revealSpot(spot: PdfSpot) {
+    if (!viewer) return;
+    const element = viewer.querySelector<HTMLElement>(`[data-page="${spot.page}"]`);
+    if (!element) return;
+    const viewerRect = viewer.getBoundingClientRect();
+    const pageRect = element.getBoundingClientRect();
+    const x = pageRect.left - viewerRect.left + viewer.scrollLeft + (spot.x + spot.width / 2) * zoom;
+    const y = pageRect.top - viewerRect.top + viewer.scrollTop + (spot.y + spot.height / 2) * zoom;
+    glideX = clampX(x - viewer.clientWidth / 2);
+    glideY = clampY(y - viewer.clientHeight / 3);
+    startGlide();
+  }
+
   // -- keyboard ---------------------------------------------------------
 
   function editableTarget(target: EventTarget | null): boolean {
@@ -829,11 +878,8 @@
         shown = next;
         measured = wanted;
         loadError = '';
-        if (sized) {
-          void restoreAnchor(anchor, ++zoomGeneration);
-        } else {
-          void fitHeightOnOpen(sizes);
-        }
+        const opening = sized ? restoreAnchor(anchor, ++zoomGeneration) : fitHeightOnOpen(sizes);
+        void opening.then(() => (settled = next.id));
         // The hits belonged to the build that was on screen.
         void searchAgain();
       })
@@ -867,6 +913,7 @@
             onFollow={followLink}
             hits={hitsOn(hitPages, index)}
             current={hits[currentHit] ?? null}
+            mark={mark?.page === index + 1 ? mark : null}
           />
         {/each}
       </div>
@@ -899,10 +946,15 @@
     min-height: 0;
   }
 
+  /* The vertical bar is always there, empty until there is something to
+     scroll, so zooming past the window's height does not shove the page
+     sideways as the bar arrives — and fitting to the width measures the same
+     width either way. */
   .viewer {
     height: 100%;
     min-height: 0;
-    overflow: auto;
+    overflow-x: auto;
+    overflow-y: scroll;
     outline: none;
     overscroll-behavior: contain;
     background: var(--paper);

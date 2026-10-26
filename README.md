@@ -88,11 +88,27 @@ Give Press a file and it opens the corresponding document. Give it a folder and 
 documents it finds, with recently used documents first.
 
 You can open a document from any file that belongs to it. For example, running `:Press` while
-editing `chapters/three.tex` opens the full thesis. Press follows `% !TEX root` directives and the
-`\input` graph to find the document root. If a folder contains two papers, Press treats them as
+editing `content/chapter_one.tex` opens the full book, even when `main.tex` only includes
+`content/index.tex` and that file includes the chapters. Press follows `% !TEX root` directives,
+the main file a `subfiles` chapter names, and the `\input` graph however deep it goes, reading
+paths the way TeX does. A file with no `\documentclass` that nothing includes cannot compile on
+its own, so Press opens the document above it instead: `main.tex` if there is one. If a folder contains two papers, Press treats them as
 separate projects, with separate builds and histories.
 
 You only need to add a document once. Press keeps it in the library after that.
+
+The top bar is a row of icons and one button. From the left: filter, grouping, settings, new
+document, and **Open document**.
+
+The library can group documents by the folders they are in. The grouping icon shows how deep the
+grouping goes, one indent per level. Click it to open a small slider with the levels and how many
+groups each one makes. The first step makes a few broad groups, and each step after splits them by
+the next folder down. A folder that only leads to one other folder counts as one step, and a folder
+holding a single document doesn't become a group. Click a group's name to fold it.
+
+Click the filter icon (or press `/` or `⌘F`) to open the filter, then type to narrow the library to
+documents whose name or path contains every word you type. `Enter` opens the document when only
+one is left, and `Esc` clears the filter and closes it.
 
 ## Starting a document
 
@@ -123,6 +139,10 @@ Press is a viewer, not an editor. The **Editor** button runs the command you cho
 Use `{file}` as a placeholder for the document and `{dir}` for its folder. If you leave the command
 unset, Press opens the file with the system's default application.
 
+Click the location of a build error to open the editor at it. The same command runs, with `{file}`
+as the file the error is in and `{line}` as its line, so write the line where your editor wants
+it: `nvim +{line} {file}`, `code --goto {file}:{line}`. Opened from the button, `{line}` is 1.
+
 Press watches files directly, so it works with Vim, VS Code, Emacs, TextEdit, and background
 scripts without a plugin or save hook. After a change, it rebuilds the document and updates the
 page in place while preserving your scroll position.
@@ -141,6 +161,11 @@ for saved versions whose source is no longer on disk.
 sends the current file path to Press, which finds and opens the document root. The plugin locates
 the installed app automatically and does not require `--link` or configuration.
 
+`:Press` also sends the line your cursor is on. Press asks SyncTeX where that line ended up,
+scrolls the PDF there and marks the line for a moment. Run it again after moving to jump again; a
+document that is already open is not reopened or rebuilt. From a terminal, the same thing is
+`press chapters/two.tex --line=42`.
+
 The plugin only opens documents. Press handles compilation, file watching, and reloading.
 
 ## Versions
@@ -152,6 +177,10 @@ The sidebar pins the working copy at the top, followed by each saved version, it
 build status. Select a version to read it just like the working copy. If Press has not compiled it
 before, it does so in the background. Press builds versions from temporary copies and writes
 nothing to your project folder.
+
+Each version shows how many words it has, counted from the source with texcount (LaTeX) or
+directly (Markdown), and the working tree shows how many it has gained since the newest snapshot.
+The top of the history draws the working tree's count over the last month, a point per day.
 
 Git still handles branches, merges, and remotes. Press history is a flat list of document versions
 stored outside the project. Press deduplicates identical content, so snapshots that use the same

@@ -503,6 +503,9 @@ pub struct OpenRequest {
     pub pdf: Option<String>,
     pub warnings: Vec<String>,
     pub toolchain: ToolchainReport,
+    /// Where in the source the editor was when it asked, so the PDF can be
+    /// brought to the same place once the document is open.
+    pub sync: Option<SourceLine>,
 }
 
 /// A PDF Press is showing without owning: opened from the command line or the
@@ -580,6 +583,41 @@ pub struct VersionSummary {
     pub snapshot: Option<SnapshotSummary>,
     pub build: BuildState,
     pub artifact: Option<ArtifactSummary>,
+    /// The words in this version, as last counted. `None` until a build has
+    /// succeeded and the count with it.
+    pub words: Option<i64>,
+}
+
+/// A place on a page, in PDF points from the page's top left: where a line of
+/// source ended up.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PdfSpot {
+    /// 1-based.
+    pub page: usize,
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
+}
+
+/// A line of a source file, as the editor names it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SourceLine {
+    /// Absolute.
+    pub file: String,
+    /// 1-based.
+    pub line: u32,
+}
+
+/// The working tree's word count on one day: the last count taken that day.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WordDay {
+    /// `YYYY-MM-DD`, in the machine's own time zone.
+    pub day: String,
+    pub words: i64,
 }
 
 /// A link on a page, as a rectangle in PDF points and a destination.

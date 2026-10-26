@@ -270,7 +270,7 @@ fn read_source(
     }
 }
 
-fn read_sidecar(pdf: &Path, extension: &str) -> Option<String> {
+pub fn read_sidecar(pdf: &Path, extension: &str) -> Option<String> {
     std::fs::read_to_string(pdf.with_extension(extension)).ok()
 }
 

@@ -13,9 +13,14 @@
 //! and a placeholder; a terminal editor is the terminal, its flags and the
 //! editor. Anything that will not fit on one line fits in a script, which is a
 //! better place for it than a table inside Press.
+//!
+//! The same command opens a build error where it happened: `{file}` is then
+//! the file the error is in and `{line}` its line. Written into the command
+//! the way the editor wants it — `nvim +{line} {file}`, `code --goto
+//! {file}:{line}` — and left out by a command that has no use for it.
 
 use std::{
-    path::Path,
+    path::{Path, PathBuf},
     process::{Command, Stdio},
 };
 
@@ -33,6 +38,45 @@ pub const SETTING: &str = "editor.command";
 /// builds in, so it is the one an editor should open on.
 const FILE: &str = "{file}";
 const DIRECTORY: &str = "{dir}";
+/// The line to start on. The first, when the editor is opened on the document
+/// rather than on an error, so a command written for errors still opens the
+/// document from the button.
+const LINE: &str = "{line}";
+
+/// A line of a file in the project, for an editor that can be told where to
+/// start.
+pub struct Place {
+    pub file: PathBuf,
+    pub line: u32,
+}
+
+/// The file a build error names, as a path an editor can be pointed at.
+///
+/// Diagnostics name a file relative to the project when they can, and
+/// absolutely when it is somewhere else — a class or a package of the TeX
+/// distribution. Only the first kind is opened: the error is in the reader's
+/// document or it is not theirs to edit, and a click should never be the way a
+/// file outside the folder they chose gets opened.
+pub fn place_in(project: &Project, file: &str) -> AppResult<PathBuf> {
+    let directory = project.directory().canonicalize().map_err(|error| {
+        AppError::NotFound(format!("the project folder cannot be read: {error}"))
+    })?;
+    let named = Path::new(file);
+    let candidate = if named.is_absolute() {
+        named.to_path_buf()
+    } else {
+        directory.join(named)
+    };
+    let resolved = candidate
+        .canonicalize()
+        .map_err(|_| AppError::NotFound(format!("{file} is not there any more")))?;
+    if !resolved.starts_with(&directory) || !resolved.is_file() {
+        return Err(AppError::InvalidInput(format!(
+            "{file} is not part of this document's folder"
+        )));
+    }
+    Ok(resolved)
+}
 
 /// What the button does before anyone has said what it should do: hand the
 /// document to the system and let it honour whatever the reader already set as
@@ -62,16 +106,19 @@ pub const fn default_command() -> &'static str {
 /// Reaping this one child rather than ignoring `SIGCHLD` for the whole process
 /// matters — latexmk is waited on, and a process-wide ignore would take its exit
 /// status away with it.
-pub fn launch(project: &Project, command: &str) -> AppResult<String> {
-    let document = project.document();
+pub fn launch(project: &Project, command: &str, place: Option<Place>) -> AppResult<String> {
     let directory = project.directory();
+    let (document, line) = match place {
+        Some(place) => (place.file, place.line.max(1)),
+        None => (project.document(), 1),
+    };
 
     let words = split(command)?;
     let (program, arguments) = words.split_first().ok_or_else(|| {
         AppError::InvalidInput("The editor command is empty. Set one in Settings.".into())
     })?;
 
-    let program = fill(program, &document, &directory);
+    let program = fill(program, &document, &directory, line);
     let resolved = resolve_executable(&program).ok_or_else(|| {
         AppError::ToolUnavailable(format!(
             "{program} was not found. Check the editor command in Settings."
@@ -80,7 +127,7 @@ pub fn launch(project: &Project, command: &str) -> AppResult<String> {
 
     let mut child = Command::new(&resolved);
     for argument in arguments {
-        child.arg(fill(argument, &document, &directory));
+        child.arg(fill(argument, &document, &directory, line));
     }
     child
         // An editor opened on a document should start where the document is,
@@ -126,13 +173,14 @@ fn name_of(document: &Path) -> String {
         .unwrap_or_else(|| document.to_string_lossy().into_owned())
 }
 
-/// Puts the document and its folder into one word of the command.
+/// Puts the document, its folder and the line into one word of the command.
 ///
 /// After the split, never before: a word is one argument no matter what the
 /// substitution puts in it, so a path with a space in it stays one path.
-fn fill(word: &str, document: &Path, directory: &Path) -> String {
+fn fill(word: &str, document: &Path, directory: &Path, line: u32) -> String {
     word.replace(FILE, &document.to_string_lossy())
         .replace(DIRECTORY, &directory.to_string_lossy())
+        .replace(LINE, &line.to_string())
 }
 
 /// Splits a command line the way a shell would — single quotes, double quotes
@@ -227,7 +275,7 @@ pub fn suggested_command() -> String {
             .iter()
             .find(|(terminal, _)| resolve_executable(terminal).is_some())
     {
-        return format!("{prefix} nvim {FILE}");
+        return format!("{prefix} nvim +{LINE} {FILE}");
     }
     default_command().to_owned()
 }
@@ -289,12 +337,12 @@ mod tests {
         let document = Path::new("/papers/drift/paper; rm -rf ~.tex");
         let directory = Path::new("/papers/drift");
         assert_eq!(
-            fill("{file}", document, directory),
+            fill("{file}", document, directory, 1),
             "/papers/drift/paper; rm -rf ~.tex"
         );
         let spaced = Path::new("/papers/my drift paper/main.tex");
         assert_eq!(
-            fill("{file}", spaced, directory),
+            fill("{file}", spaced, directory, 1),
             "/papers/my drift paper/main.tex"
         );
         // Whatever the substitution puts in, the word count does not change.
@@ -303,7 +351,7 @@ mod tests {
         assert_eq!(
             words
                 .iter()
-                .map(|word| fill(word, document, directory))
+                .map(|word| fill(word, document, directory, 1))
                 .collect::<Vec<_>>()
                 .len(),
             2
@@ -316,22 +364,58 @@ mod tests {
         let document = project.document();
         let directory = project.directory();
         assert_eq!(
-            fill("{file}", &document, &directory),
+            fill("{file}", &document, &directory, 1),
             "/papers/drift/main.tex"
         );
-        assert_eq!(fill("{dir}", &document, &directory), "/papers/drift");
+        assert_eq!(fill("{dir}", &document, &directory, 1), "/papers/drift");
         // Joined forms, which some terminals need.
         assert_eq!(
-            fill("--working-directory={dir}", &document, &directory),
+            fill("--working-directory={dir}", &document, &directory, 1),
             "--working-directory=/papers/drift"
         );
         // A word with no placeholder is left exactly as it was written.
-        assert_eq!(fill("-e", &document, &directory), "-e");
+        assert_eq!(fill("-e", &document, &directory, 1), "-e");
+    }
+
+    /// The line goes wherever the editor wants it, alone or inside a word.
+    #[test]
+    fn fills_the_line_an_error_is_on() {
+        let document = Path::new("/papers/drift/chapters/two.tex");
+        let directory = Path::new("/papers/drift");
+        assert_eq!(fill("+{line}", document, directory, 42), "+42");
+        assert_eq!(
+            fill("{file}:{line}", document, directory, 42),
+            "/papers/drift/chapters/two.tex:42"
+        );
+    }
+
+    /// An error names a file in the project, relative to it, and only those
+    /// are opened: anything that resolves outside the folder is refused,
+    /// however it is spelled.
+    #[test]
+    fn only_a_file_in_the_project_is_opened_at_an_error() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("paper");
+        std::fs::create_dir_all(root.join("chapters")).unwrap();
+        std::fs::write(root.join("main.tex"), "").unwrap();
+        std::fs::write(root.join("chapters/two.tex"), "").unwrap();
+        std::fs::write(directory.path().join("outside.tex"), "").unwrap();
+        let project = project(root.join("main.tex").to_str().unwrap());
+
+        let found = place_in(&project, "chapters/two.tex").unwrap();
+        assert!(found.ends_with("paper/chapters/two.tex"));
+        let absolute = root.join("chapters/two.tex");
+        assert!(place_in(&project, absolute.to_str().unwrap()).is_ok());
+
+        assert!(place_in(&project, "../outside.tex").is_err());
+        assert!(place_in(&project, "/usr/local/texlive/article.cls").is_err());
+        assert!(place_in(&project, "chapters").is_err(), "a folder is not a file");
+        assert!(place_in(&project, "chapters/gone.tex").is_err());
     }
 
     #[test]
     fn an_empty_command_says_so_rather_than_failing_obscurely() {
-        let error = launch(&project("/papers/drift/main.tex"), "   ").unwrap_err();
+        let error = launch(&project("/papers/drift/main.tex"), "   ", None).unwrap_err();
         assert!(
             format!("{error}").contains("empty"),
             "an empty command explains itself: {error}"
@@ -343,6 +427,7 @@ mod tests {
         let error = launch(
             &project("/papers/drift/main.tex"),
             "press-no-such-editor {file}",
+            None,
         )
         .unwrap_err();
         let message = format!("{error}");

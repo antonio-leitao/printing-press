@@ -113,6 +113,13 @@
   --line-2: #d5d3cd;
   --line-3: #b3b1a9;
 
+  /* A slider: the groove it runs in, and the knob that runs in it. The knob is
+     the lightest thing in either theme, so it reads as lifted off the groove
+     rather than cut into it. */
+  --groove: var(--line-2);
+  --knob: var(--card);
+  --knob-edge: rgb(32 32 30 / 18%);
+
   /* Hues. Three, and no more. The green is the primary action and also the
      colour of a document that built; the other two are status signals,
      desaturated on purpose so that at the size they are used — a line of
@@ -318,6 +325,12 @@
   --line-2: #536e7a; /* subdued */
   --line-3: #536e7a; /* subdued — also the colour a disabled control goes */
 
+  /* --line-2 is as bright as the ticks under a slider here, so the groove
+     drops a step to keep them apart. --card is dark, so the knob is the ink. */
+  --groove: var(--line);
+  --knob: var(--ink);
+  --knob-edge: rgb(0 0 0 / 50%);
+
   /* The one colour that is not taken from Fandango, and very nearly not a
      change at all: the light theme's phthalo green at the same hue and the same
      chroma — 170° and 0.100 — lifted 0.02 in lightness and no more.
@@ -404,6 +417,23 @@ body {
 
 html {
   background: var(--desk);
+}
+
+/* The library scrolls the window itself, and its scrollbar takes its width
+   from the page when it appears. Grouping, folding a group or filtering can
+   each make it come and go, and every card and the header moved sideways with
+   it. So the bar is always there, with nothing drawn in it until there is
+   something to scroll — the track is transparent and the thumb only appears
+   with overflow. `scrollbar-gutter` says the same thing more politely and is
+   ignored for a styled scrollbar, which is what Press has.
+
+   Only for the library: the reader is a fixed shell that never scrolls the
+   window, and a kept bar there would be an empty strip down its edge. The
+   window's own background fills the bar, so it is the library's paper rather
+   than the desk. */
+:root:has(main.library) {
+  overflow-y: scroll;
+  background: var(--paper);
 }
 
 body {
