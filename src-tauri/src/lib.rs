@@ -172,6 +172,7 @@ pub fn run() {
             commands::set_project_pinned,
             commands::delete_project,
             commands::page_layout,
+            commands::page_size,
             commands::page_words,
             commands::page_links,
             commands::open_external,

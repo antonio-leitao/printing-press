@@ -142,16 +142,21 @@
       ></span>
     {/key}
   {/if}
-  {#each hits as hit, index (index)}
-    <span
-      class="hit"
-      class:current={hit === current}
-      style:left={`${(hit.x - 1) * zoom}px`}
-      style:top={`${(hit.y - 1) * zoom}px`}
-      style:width={`${(hit.width + 2) * zoom}px`}
-      style:height={`${(hit.height + 2) * zoom}px`}
-    ></span>
-  {/each}
+  <!-- Only near the window, like the drawing. A short search in a long
+       document matches thousands of times, and a box for every one of them on
+       every page at once was enough to stall the interface. -->
+  {#if visibility.render}
+    {#each hits as hit, index (index)}
+      <span
+        class="hit"
+        class:current={hit === current}
+        style:left={`${(hit.x - 1) * zoom}px`}
+        style:top={`${(hit.y - 1) * zoom}px`}
+        style:width={`${(hit.width + 2) * zoom}px`}
+        style:height={`${(hit.height + 2) * zoom}px`}
+      ></span>
+    {/each}
+  {/if}
   <!-- Over the page rather than drawn into it, so a reference stays clickable
        at any zoom and the rasteriser stays a rasteriser. Modified clicks are
        left alone: cmd-click is the source peek. -->

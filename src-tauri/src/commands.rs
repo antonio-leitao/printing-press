@@ -13,8 +13,8 @@ use crate::{
     error::{AppError, AppResult},
     model::{
         DocumentKind, EditorCommand, Engine, OpenRequest, PageSize, ProjectSummary, SearchHit,
-        ProjectFile, SnapshotOutcome, SourceRef, TemplateCover, TemplateSummary, TextBox,
-        VersionSummary,
+        ProjectFile, SearchResults, SnapshotOutcome, SourceRef, TemplateCover, TemplateSummary,
+        TextBox, VersionSummary,
     },
     templates,
 };
@@ -378,6 +378,25 @@ pub async fn page_layout(
         .collect())
 }
 
+/// One page's size in PDF points.
+///
+/// What a library thumbnail asks for. It draws one page, and `page_layout`
+/// would load every other page of the document to answer the same question.
+#[tauri::command]
+pub async fn page_size(
+    artifact_id: i64,
+    page: usize,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> AppResult<PageSize> {
+    let path = crate::protocol::resolve(&app, artifact_id).await?;
+    let size = state.renderer.size(path, page).await?;
+    Ok(PageSize {
+        width: size.width,
+        height: size.height,
+    })
+}
+
 /// Every page's size in the PDF a template kept, so a closer look at one can
 /// lay the whole document out before drawing any of it.
 ///
@@ -536,24 +555,29 @@ pub async fn search_document(
     needle: String,
     app: AppHandle,
     state: State<'_, AppState>,
-) -> AppResult<Vec<SearchHit>> {
+) -> AppResult<SearchResults> {
     if needle.trim().is_empty() {
-        return Ok(Vec::new());
+        return Ok(SearchResults {
+            hits: Vec::new(),
+            complete: true,
+        });
     }
     let path = crate::protocol::resolve(&app, artifact_id).await?;
-    Ok(state
-        .renderer
-        .search(path, needle)
-        .await?
-        .into_iter()
-        .map(|hit| SearchHit {
-            page: hit.page,
-            x: hit.x,
-            y: hit.y,
-            width: hit.width,
-            height: hit.height,
-        })
-        .collect())
+    let found = state.renderer.search(path, needle).await?;
+    Ok(SearchResults {
+        hits: found
+            .hits
+            .into_iter()
+            .map(|hit| SearchHit {
+                page: hit.page,
+                x: hit.x,
+                y: hit.y,
+                width: hit.width,
+                height: hit.height,
+            })
+            .collect(),
+        complete: found.complete,
+    })
 }
 
 /// Where a line of source ended up in a PDF: forward search, asked for when

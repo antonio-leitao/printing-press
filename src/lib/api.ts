@@ -10,7 +10,7 @@ import type {
   PageSize,
   PdfSpot,
   ProjectSummary,
-  SearchHit,
+  SearchResults,
   SnapshotOutcome,
   SourcePeek,
   ProjectFile,
@@ -82,6 +82,10 @@ export const api = {
   pageLayout: (artifactId: number) =>
     invoke<PageSize[]>('page_layout', { artifactId }),
 
+  /** One page's size, for something that draws only that page. */
+  pageSize: (artifactId: number, page: number) =>
+    invoke<PageSize>('page_size', { artifactId, page }),
+
   /** Word boxes for the selection overlay. */
   pageWords: (artifactId: number, page: number) =>
     invoke<TextBox[]>('page_words', { artifactId, page }),
@@ -111,8 +115,9 @@ export const api = {
   forwardSearch: (artifactId: number, file: string, line: number) =>
     invoke<PdfSpot | null>('forward_search', { artifactId, file, line }),
 
+  /** Every hit in reading order, up to the renderer's limit. */
   searchDocument: (artifactId: number, needle: string) =>
-    invoke<SearchHit[]>('search_document', { artifactId, needle }),
+    invoke<SearchResults>('search_document', { artifactId, needle }),
 
   /** Copies a built PDF into Downloads. Returns where it was written. */
   exportArtifact: (artifactId: number) =>

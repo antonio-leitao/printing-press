@@ -523,13 +523,15 @@
   /** What was last searched for. A rebuild asks again for the same thing. */
   let searched = $state<string | null>(null);
   let hits = $state<SearchHit[]>([]);
+  /** False when the renderer stopped at its limit before the last page. */
+  let searchComplete = $state(true);
   let currentHit = $state(-1);
   let searchError = $state('');
   let searchGeneration = 0;
 
   const hitPages = $derived(groupByPage(hits));
   const searchStatus = $derived(
-    searchError || (searched === null ? '' : describe(currentHit, hits.length))
+    searchError || (searched === null ? '' : describe(currentHit, hits.length, searchComplete))
   );
 
   async function openSearch() {
@@ -545,6 +547,7 @@
     query = '';
     searched = null;
     hits = [];
+    searchComplete = true;
     currentHit = -1;
     searchError = '';
     viewer?.focus();
@@ -560,11 +563,13 @@
       if (request !== searchGeneration) return null;
       searched = needle;
       searchError = '';
-      hits = found;
-      return found;
+      hits = found.hits;
+      searchComplete = found.complete;
+      return found.hits;
     } catch (reason) {
       if (request !== searchGeneration) return null;
       hits = [];
+      searchComplete = true;
       currentHit = -1;
       searchError = errorMessage(reason);
       return null;

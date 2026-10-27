@@ -53,3 +53,8 @@ test('the prompt counts from one', () => {
   assert.equal(describe(4, 5), '5 of 5');
   assert.equal(describe(-1, 0), 'No matches');
 });
+
+test('a search that stopped early says there are more', () => {
+  assert.equal(describe(0, 10000, false), '1 of 10000+');
+  assert.equal(describe(0, 10000, true), '1 of 10000');
+});

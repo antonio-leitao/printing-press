@@ -19,7 +19,7 @@ use std::{
     collections::HashSet,
     fmt::Write as _,
     fs::File,
-    io::{BufReader, Read},
+    io::{Read, Write},
     path::{Path, PathBuf},
 };
 
@@ -207,6 +207,32 @@ pub fn object_path(objects: &Path, hash: &str) -> PathBuf {
 /// present is left alone: identical content is stored once.
 pub fn store(source: &Path, objects: &Path) -> AppResult<String> {
     let hash = hash_file(source)?;
+    if object_path(objects, &hash).exists() {
+        return Ok(hash);
+    }
+    copy_in(source, objects)
+}
+
+/// Where an object is written before it has a name. Two characters would be a
+/// shard, so this can never be mistaken for one. Anything a crash leaves in it
+/// is named by no snapshot, and the sweep at the next start removes it.
+const INCOMING: &str = "incoming";
+
+/// Copies a file into the store, named by the hash of exactly what was copied.
+///
+/// Not by the hash `store` took a moment earlier. The file is read twice, and a
+/// save in between used to put the new bytes under the old content's name.
+/// That object then answered for the old content in every snapshot after it,
+/// and the store is the only copy of the history, so nothing could put it
+/// right.
+fn copy_in(source: &Path, objects: &Path) -> AppResult<String> {
+    let incoming = objects.join(INCOMING);
+    std::fs::create_dir_all(&incoming)?;
+    // Renamed into place once whole, so a reader never sees a partial object
+    // even if Press is killed mid-write. Dropped on any early return, which
+    // deletes it.
+    let mut staging = tempfile::NamedTempFile::new_in(incoming)?;
+    let hash = hash_through(source, staging.as_file_mut())?;
     let destination = object_path(objects, &hash);
     if destination.exists() {
         return Ok(hash);
@@ -214,26 +240,22 @@ pub fn store(source: &Path, objects: &Path) -> AppResult<String> {
     if let Some(parent) = destination.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    // Written beside the target and renamed, so a reader never sees a partial
-    // object even if Press is killed mid-write.
-    let staging = destination.with_extension("incoming");
-    std::fs::copy(source, &staging)?;
-    match std::fs::rename(&staging, &destination) {
-        Ok(()) => Ok(hash),
-        Err(error) => {
-            let _ = std::fs::remove_file(&staging);
-            // Another snapshot may have stored the same content first.
-            if destination.exists() {
-                Ok(hash)
-            } else {
-                Err(AppError::Io(error))
-            }
-        }
+    match staging.persist(&destination) {
+        Ok(_) => Ok(hash),
+        // Another snapshot may have stored the same content first.
+        Err(_) if destination.exists() => Ok(hash),
+        Err(error) => Err(AppError::Io(error.error)),
     }
 }
 
 fn hash_file(path: &Path) -> AppResult<String> {
-    let mut reader = BufReader::new(File::open(path)?);
+    hash_through(path, &mut std::io::sink())
+}
+
+/// Reads a file once, writing every byte to `target` and hashing the same
+/// bytes on the way past.
+fn hash_through(path: &Path, target: &mut impl Write) -> AppResult<String> {
+    let mut reader = File::open(path)?;
     let mut hasher = Sha256::new();
     let mut buffer = [0_u8; 64 * 1024];
     loop {
@@ -242,6 +264,7 @@ fn hash_file(path: &Path) -> AppResult<String> {
             break;
         }
         hasher.update(&buffer[..read]);
+        target.write_all(&buffer[..read])?;
     }
     Ok(hex(&hasher.finalize()))
 }
@@ -452,6 +475,36 @@ mod tests {
             .collect::<Vec<_>>();
         // The document, and the assets beside it — but neither neighbour.
         assert_eq!(paths, ["essay.md", "figures/plot.png", "references.bib"]);
+    }
+
+    /// What happens when a file is saved after `store` has hashed it: the copy
+    /// holds the new bytes, so the copy is named for the new bytes. Nothing is
+    /// stored under the name of what the file used to say.
+    #[test]
+    fn a_file_saved_while_it_is_stored_is_named_for_what_was_copied() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("project");
+        let objects = directory.path().join("objects");
+        std::fs::create_dir_all(&root).unwrap();
+        write(&root, "main.tex", "what store hashed\n");
+        let hashed = hash_file(&root.join("main.tex")).unwrap();
+
+        write(&root, "main.tex", "what was there by the time it copied\n");
+        let stored = copy_in(&root.join("main.tex"), &objects).unwrap();
+
+        assert_ne!(stored, hashed);
+        assert!(!object_path(&objects, &hashed).exists());
+        assert_eq!(
+            std::fs::read_to_string(object_path(&objects, &stored)).unwrap(),
+            "what was there by the time it copied\n"
+        );
+        assert_eq!(
+            hash_file(&object_path(&objects, &stored)).unwrap(),
+            stored,
+            "an object's name is the hash of what it holds"
+        );
+        let leftovers = std::fs::read_dir(objects.join(INCOMING)).unwrap().count();
+        assert_eq!(leftovers, 0, "the staging file became the object");
     }
 
     #[test]

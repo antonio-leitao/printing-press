@@ -55,8 +55,12 @@ export function stepFrom(current: number, length: number, sign: 1 | -1, count = 
   return moved < 0 ? moved + length : moved;
 }
 
-/** What the prompt says about a search that has run. */
-export function describe(current: number, length: number): string {
+/**
+ * What the prompt says about a search that has run. A search that stopped at
+ * the renderer's limit says there are more than it holds, rather than giving
+ * the limit as though it were the count.
+ */
+export function describe(current: number, length: number, complete = true): string {
   if (length === 0) return 'No matches';
-  return `${current + 1} of ${length}`;
+  return `${current + 1} of ${length}${complete ? '' : '+'}`;
 }

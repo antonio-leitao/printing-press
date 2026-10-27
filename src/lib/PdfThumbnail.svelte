@@ -58,8 +58,10 @@
     const controller = new AbortController();
     void (async () => {
       try {
+        // Page one alone. The whole layout would load every page of the
+        // document, once per card, to answer a question about the first.
         const first =
-          measured?.build === build ? measured.size : (await api.pageLayout(artifact.id))[0];
+          measured?.build === build ? measured.size : await api.pageSize(artifact.id, 0);
         if (!first || controller.signal.aborted) return;
         measured = { build, size: first };
         // Small enough to be cheap, sharp enough on a retina display. Sized to

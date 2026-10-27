@@ -685,6 +685,16 @@ pub struct SearchHit {
     pub height: f32,
 }
 
+/// What a search of the whole document found. `complete` is false when it
+/// stopped at the renderer's limit before reading every page, so the prompt
+/// can say there are more than it shows.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SearchResults {
+    pub hits: Vec<SearchHit>,
+    pub complete: bool,
+}
+
 /// Live build progress. Emitted from parsed latexmk output rather than a timer,
 /// so the banner can say something true about a long build.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]

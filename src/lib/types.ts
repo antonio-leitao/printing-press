@@ -173,6 +173,15 @@ export type SearchHit = {
   height: number;
 };
 
+/**
+ * What a search of the whole document found. `complete` is false when the
+ * renderer stopped at its limit before reading every page.
+ */
+export type SearchResults = {
+  hits: SearchHit[];
+  complete: boolean;
+};
+
 /** Whether a tool is installed, and where. Nothing asks it for its version. */
 export type ToolInfo = {
   available: boolean;

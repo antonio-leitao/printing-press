@@ -130,20 +130,23 @@ pub fn page_count(document: &Document) -> AppResult<usize> {
 /// single page has been drawn.
 pub fn geometry(document: &Document) -> AppResult<Vec<PageGeometry>> {
     let count = page_count(document)?;
-    let mut pages = Vec::with_capacity(count);
-    for index in 0..count {
-        let page = document
-            .load_page(index as i32)
-            .map_err(|error| mupdf_error("could not load a page", error))?;
-        let bounds = page
-            .bounds()
-            .map_err(|error| mupdf_error("could not measure a page", error))?;
-        pages.push(PageGeometry {
-            width: bounds.x1 - bounds.x0,
-            height: bounds.y1 - bounds.y0,
-        });
-    }
-    Ok(pages)
+    (0..count).map(|index| page_size(document, index)).collect()
+}
+
+/// One page's size, for a caller that needs no more than that: a thumbnail
+/// draws one page, and measuring every other page of a thesis to find out how
+/// big the first one is costs a load of each.
+pub fn page_size(document: &Document, index: usize) -> AppResult<PageGeometry> {
+    let page = document
+        .load_page(index as i32)
+        .map_err(|error| mupdf_error("could not load a page", error))?;
+    let bounds = page
+        .bounds()
+        .map_err(|error| mupdf_error("could not measure a page", error))?;
+    Ok(PageGeometry {
+        width: bounds.x1 - bounds.x0,
+        height: bounds.y1 - bounds.y0,
+    })
 }
 
 /// Rasterises one page. `scale` is device pixels per PDF point, so it already
@@ -424,6 +427,42 @@ fn destination_top(kind: mupdf::DestinationKind) -> Option<f32> {
 
 const MAX_HITS_PER_PAGE: u32 = 500;
 
+/// Where a search of the whole document stops gathering.
+///
+/// A short needle in a long document matches almost everywhere: "e" in a
+/// thesis is tens of thousands of hits, every one of them a box over the page
+/// and a stop for `n`. Past this many, walking them stops meaning anything, and
+/// stopping early saves reading the rest of the document as well.
+pub const MOST_HITS: usize = 10_000;
+
+/// What a search of the whole document gathered, and whether it read to the
+/// end or stopped at [`MOST_HITS`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct Found {
+    pub hits: Vec<Hit>,
+    pub complete: bool,
+}
+
+/// Searches every page in order, stopping once more than `limit` hits are in.
+pub fn search(document: &Document, needle: &str, limit: usize) -> AppResult<Found> {
+    let count = page_count(document)?;
+    let mut hits = Vec::new();
+    for index in 0..count {
+        hits.extend(search_page(document, index, needle)?);
+        if hits.len() > limit {
+            hits.truncate(limit);
+            return Ok(Found {
+                hits,
+                complete: false,
+            });
+        }
+    }
+    Ok(Found {
+        hits,
+        complete: true,
+    })
+}
+
 /// MuPDF's own search. This is the same routine zathura uses.
 pub fn search_page(document: &Document, index: usize, needle: &str) -> AppResult<Vec<Hit>> {
     if needle.is_empty() {
@@ -488,6 +527,11 @@ pub enum Job {
         path: PathBuf,
         reply: oneshot::Sender<AppResult<Vec<PageGeometry>>>,
     },
+    Size {
+        path: PathBuf,
+        page: usize,
+        reply: oneshot::Sender<AppResult<PageGeometry>>,
+    },
     Words {
         path: PathBuf,
         page: usize,
@@ -501,7 +545,7 @@ pub enum Job {
     Search {
         path: PathBuf,
         needle: String,
-        reply: oneshot::Sender<AppResult<Vec<Hit>>>,
+        reply: oneshot::Sender<AppResult<Found>>,
     },
 }
 
@@ -516,6 +560,7 @@ impl Job {
         match self {
             Self::Render { reply, .. } => reply.is_closed(),
             Self::Geometry { reply, .. } => reply.is_closed(),
+            Self::Size { reply, .. } => reply.is_closed(),
             Self::Words { reply, .. } => reply.is_closed(),
             Self::Links { reply, .. } => reply.is_closed(),
             Self::Search { reply, .. } => reply.is_closed(),
@@ -657,6 +702,10 @@ impl RenderPool {
         self.submit(|reply| Job::Geometry { path, reply }).await
     }
 
+    pub async fn size(&self, path: PathBuf, page: usize) -> AppResult<PageGeometry> {
+        self.submit(|reply| Job::Size { path, page, reply }).await
+    }
+
     pub async fn words(&self, path: PathBuf, page: usize) -> AppResult<Vec<Word>> {
         self.submit(|reply| Job::Words { path, page, reply }).await
     }
@@ -665,7 +714,7 @@ impl RenderPool {
         self.submit(|reply| Job::Links { path, page, reply }).await
     }
 
-    pub async fn search(&self, path: PathBuf, needle: String) -> AppResult<Vec<Hit>> {
+    pub async fn search(&self, path: PathBuf, needle: String) -> AppResult<Found> {
         self.submit(|reply| Job::Search {
             path,
             needle,
@@ -776,21 +825,35 @@ fn worker(queue: &Queue) {
                 invert,
                 reply,
             } => {
-                let result = cache
-                    .get(&path)
-                    .and_then(|document| render_page(document, page, scale, invert));
+                let result = guarded(&mut cache, |cache| {
+                    cache
+                        .get(&path)
+                        .and_then(|document| render_page(document, page, scale, invert))
+                });
                 let _ = reply.send(result);
             }
             Job::Geometry { path, reply } => {
-                let result = cache.get(&path).and_then(geometry);
+                let result = guarded(&mut cache, |cache| cache.get(&path).and_then(geometry));
+                let _ = reply.send(result);
+            }
+            Job::Size { path, page, reply } => {
+                let result = guarded(&mut cache, |cache| {
+                    cache
+                        .get(&path)
+                        .and_then(|document| page_size(document, page))
+                });
                 let _ = reply.send(result);
             }
             Job::Words { path, page, reply } => {
-                let result = cache.get(&path).and_then(|document| words(document, page));
+                let result = guarded(&mut cache, |cache| {
+                    cache.get(&path).and_then(|document| words(document, page))
+                });
                 let _ = reply.send(result);
             }
             Job::Links { path, page, reply } => {
-                let result = cache.get(&path).and_then(|document| links(document, page));
+                let result = guarded(&mut cache, |cache| {
+                    cache.get(&path).and_then(|document| links(document, page))
+                });
                 let _ = reply.send(result);
             }
             Job::Search {
@@ -798,13 +861,10 @@ fn worker(queue: &Queue) {
                 needle,
                 reply,
             } => {
-                let result = cache.get(&path).and_then(|document| {
-                    let count = page_count(document)?;
-                    let mut hits = Vec::new();
-                    for index in 0..count {
-                        hits.extend(search_page(document, index, &needle)?);
-                    }
-                    Ok(hits)
+                let result = guarded(&mut cache, |cache| {
+                    cache
+                        .get(&path)
+                        .and_then(|document| search(document, &needle, MOST_HITS))
                 });
                 let _ = reply.send(result);
             }
@@ -812,10 +872,39 @@ fn worker(queue: &Queue) {
     }
 }
 
+/// Runs one job's work, and turns a panic in it into an error for whoever
+/// asked.
+///
+/// MuPDF's binding unwraps where the C library can throw. Reading a page's
+/// links is one such place: a named destination that leads to a page the
+/// document does not have makes MuPDF throw, and the binding panics on it.
+/// Left to unwind, the panic ended the thread, and nothing replaces a worker
+/// that has gone. A damaged document with such a link on a few pages was
+/// enough to stop every worker, and from then on every page, layout and search
+/// waited forever.
+///
+/// What was open is dropped and opened again on the next job. The panic
+/// happened partway through reading one of those documents, and a handle in
+/// an unknown state is not worth the four milliseconds saved by keeping it.
+fn guarded<T>(
+    cache: &mut DocumentCache,
+    work: impl FnOnce(&mut DocumentCache) -> AppResult<T>,
+) -> AppResult<T> {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| work(cache))) {
+        Ok(result) => result,
+        Err(_) => {
+            *cache = DocumentCache::new();
+            Err(AppError::Build(
+                "MuPDF failed partway through reading this PDF".into(),
+            ))
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::Instant;
+    use std::time::{Duration, Instant};
 
     fn inverted(red: u8, green: u8, blue: u8) -> [u8; 3] {
         let mut pixel = [red, green, blue, 255];
@@ -1144,6 +1233,30 @@ mod tests {
         assert!(search_page(&document, 0, "").unwrap().is_empty());
     }
 
+    /// A needle that matches everywhere stops at the limit and says so, rather
+    /// than reading the whole document into one enormous answer. One that
+    /// matches rarely reads to the end and says that instead.
+    #[test]
+    fn a_search_stops_at_its_limit_and_says_it_did() {
+        let Some((_guard, pdf)) = fixture() else {
+            eprintln!("skipping: latexmk is not installed");
+            return;
+        };
+        let document = open(&pdf).unwrap();
+
+        let everywhere = search(&document, "e", 3).unwrap();
+        assert_eq!(everywhere.hits.len(), 3);
+        assert!(!everywhere.complete, "there were more than three");
+        assert!(
+            everywhere.hits.iter().all(|hit| hit.page == 0),
+            "the first page alone has more than three, so the second was never read"
+        );
+
+        let rare = search(&document, "kestrel", 3).unwrap();
+        assert_eq!(rare.hits.len(), 1);
+        assert!(rare.complete, "every page was read");
+    }
+
     #[tokio::test]
     async fn the_pool_serves_pages_from_several_threads() {
         let Some((_guard, pdf)) = fixture() else {
@@ -1154,6 +1267,9 @@ mod tests {
 
         let geometry = pool.geometry(pdf.clone()).await.unwrap();
         assert_eq!(geometry.len(), 2);
+        // One page measured alone is the same page measured with the rest.
+        assert_eq!(pool.size(pdf.clone(), 1).await.unwrap(), geometry[1]);
+        assert!(pool.size(pdf.clone(), 2).await.is_err(), "there is no third page");
 
         // Both pages at once, which is the point of having more than one thread.
         let (first, second) = tokio::join!(
@@ -1166,9 +1282,10 @@ mod tests {
         let extracted = pool.words(pdf.clone(), 0).await.unwrap();
         assert!(extracted.iter().any(|word| word.text == "Introduction"));
 
-        let hits = pool.search(pdf.clone(), "kestrel".into()).await.unwrap();
-        assert_eq!(hits.len(), 1);
-        assert_eq!(hits[0].page, 1);
+        let found = pool.search(pdf.clone(), "kestrel".into()).await.unwrap();
+        assert_eq!(found.hits.len(), 1);
+        assert_eq!(found.hits[0].page, 1);
+        assert!(found.complete);
 
         // A second request for the same document reuses the cached handle.
         assert!(pool.render(pdf, 0, 1.0, false).await.is_ok());
@@ -1194,6 +1311,39 @@ mod tests {
 
         // The worker stays available for real work.
         assert!(pool.render(pdf, 0, 1.0, false).await.is_ok());
+    }
+
+    /// One page, with a link to a named destination on page 100. Written by
+    /// hand so the test needs no TeX. MuPDF throws resolving the link, and its
+    /// binding panics on the throw.
+    const LINK_TO_NOWHERE: &[u8] = b"%PDF-1.4\n\
+1 0 obj<</Type/Catalog/Pages 2 0 R/Dests<</nowhere[99/XYZ 0 0 0]>>>>endobj\n\
+2 0 obj<</Type/Pages/Kids[3 0 R]/Count 1>>endobj\n\
+3 0 obj<</Type/Page/Parent 2 0 R/MediaBox[0 0 200 200]/Annots[4 0 R]>>endobj\n\
+4 0 obj<</Type/Annot/Subtype/Link/Rect[10 10 100 50]/Dest(nowhere)>>endobj\n\
+trailer<</Root 1 0 R>>\n%%EOF\n";
+
+    /// A panic in one job is that job's failure, not the worker's. There is
+    /// one worker here, so if the panic had ended its thread, nothing would be
+    /// left to answer the layout asked for after it.
+    #[tokio::test]
+    async fn a_page_that_panics_mupdf_leaves_the_worker_serving() {
+        let directory = tempfile::tempdir().unwrap();
+        let pdf = directory.path().join("nowhere.pdf");
+        std::fs::write(&pdf, LINK_TO_NOWHERE).unwrap();
+        let pool = RenderPool::new(1);
+        let patience = Duration::from_secs(5);
+
+        let links = tokio::time::timeout(patience, pool.links(pdf.clone(), 0))
+            .await
+            .expect("the request is answered");
+        assert!(links.is_err(), "the links cannot be read, and the caller hears so");
+
+        let pages = tokio::time::timeout(patience, pool.geometry(pdf.clone()))
+            .await
+            .expect("the worker is still there to answer")
+            .expect("and the document is still readable");
+        assert_eq!(pages.len(), 1);
     }
 
     /// The page under the reader's eyes is the newest request, and it must not
